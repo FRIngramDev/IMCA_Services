@@ -1,0 +1,164 @@
+{
+  "Version": 1,
+  "WorkspaceRootPath": "\\\\frlswfls1001\\Services\\Developpement\\_Commun\\Dev_Projet\\git\\appConstelation\\IMCA_Services\\",
+  "Documents": [
+    {
+      "AbsoluteMoniker": "D:0:0:{E832792E-068E-4B5E-A80A-0CE0E8E322AB}|IMCA_Services.csproj|\\\\frlswfls1001\\services\\developpement\\_commun\\dev_projet\\git\\appconstelation\\imca_services\\fortinet_load_bid\\fortinet_load_bid.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{E832792E-068E-4B5E-A80A-0CE0E8E322AB}|IMCA_Services.csproj|\\\\frlswfls1001\\Services\\Developpement\\_Commun\\Dev_Projet\\git\\appConstelation\\IMCA_Services\\imca_services\\imca_services.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{E832792E-068E-4B5E-A80A-0CE0E8E322AB}|IMCA_Services.csproj|\\\\frlswfls1001\\Services\\Developpement\\_Commun\\Dev_Projet\\git\\appConstelation\\IMCA_Services\\imca_services\\imca_services.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}|Form"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{E832792E-068E-4B5E-A80A-0CE0E8E322AB}|IMCA_Services.csproj|\\\\frlswfls1001\\Services\\Developpement\\_Commun\\Dev_Projet\\git\\appConstelation\\IMCA_Services\\idep_fr\\idep_fr.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{E832792E-068E-4B5E-A80A-0CE0E8E322AB}|IMCA_Services.csproj|\\\\frlswfls1001\\Services\\Developpement\\_Commun\\Dev_Projet\\git\\appConstelation\\IMCA_Services\\program.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}"
+    }
+  ],
+  "DocumentGroupContainers": [
+    {
+      "Orientation": 0,
+      "VerticalTabListWidth": 256,
+      "DocumentGroups": [
+        {
+          "DockedWidth": 200,
+          "SelectedChildIndex": 2,
+          "Children": [
+            {
+              "$type": "Bookmark",
+              "Name": "ST:0:0:{1c4feeaa-4718-4aa9-859d-94ce25d182ba}"
+            },
+            {
+              "$type": "Bookmark",
+              "Name": "ST:0:0:{e1b7d1f8-9b3c-49b1-8f4f-bfc63a88835d}"
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 0,
+              "Title": "Fortinet_load_bid.cs",
+              "DocumentMoniker": "\\\\frlswfls1001\\Services\\Developpement\\_Commun\\Dev_Projet\\git\\appConstelation\\IMCA_Services\\Fortinet_load_Bid\\Fortinet_load_bid.cs",
+              "RelativeDocumentMoniker": "Fortinet_load_Bid\\Fortinet_load_bid.cs",
+              "ToolTip": "\\\\frlswfls1001\\Services\\Developpement\\_Commun\\Dev_Projet\\git\\appConstelation\\IMCA_Services\\Fortinet_load_Bid\\Fortinet_load_bid.cs",
+              "RelativeToolTip": "Fortinet_load_Bid\\Fortinet_load_bid.cs",
+              "ViewState": "AgIAAH8FAAAAAAAAAAAlwI4FAABhAAAAAAAAAA==",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000738|",
+              "WhenOpened": "2026-08-10T15:12:56.935Z",
+              "EditorCaption": ""
+            },
+            {
+              "$type": "Bookmark",
+              "Name": "ST:0:0:{269a02dc-6af8-11d3-bdc4-00c04f688e50}"
+            },
+            {
+              "$type": "Bookmark",
+              "Name": "ST:131:0:{1fc202d4-d401-403c-9834-5b218574bb67}"
+            },
+            {
+              "$type": "Bookmark",
+              "Name": "ST:1224682143:0:{83107a3e-496a-485e-b455-16ddb978e55e}"
+            },
+            {
+              "$type": "Bookmark",
+              "Name": "ST:129:0:{116d2292-e37d-41cd-a077-ebacac4c8cc4}"
+            },
+            {
+              "$type": "Bookmark",
+              "Name": "ST:11:0:{2456bd12-ecf7-4988-a4a6-67d49173f565}"
+            },
+            {
+              "$type": "Bookmark",
+              "Name": "ST:128:0:{1fc202d4-d401-403c-9834-5b218574bb67}"
+            },
+            {
+              "$type": "Bookmark",
+              "Name": "ST:130:0:{1fc202d4-d401-403c-9834-5b218574bb67}"
+            },
+            {
+              "$type": "Bookmark",
+              "Name": "ST:129:0:{1fc202d4-d401-403c-9834-5b218574bb67}"
+            },
+            {
+              "$type": "Bookmark",
+              "Name": "ST:0:0:{56df62a4-05a3-4e5b-aa1a-99371ccfb997}"
+            },
+            {
+              "$type": "Bookmark",
+              "Name": "ST:0:0:{3ae79031-e1bc-11d0-8f78-00a0c9110057}"
+            },
+            {
+              "$type": "Bookmark",
+              "Name": "ST:0:0:{131369f2-062d-44a2-8671-91ff31efb4f4}"
+            },
+            {
+              "$type": "Bookmark",
+              "Name": "ST:0:0:{1c64b9c2-e352-428e-a56d-0ace190b99a6}"
+            },
+            {
+              "$type": "Bookmark",
+              "Name": "ST:0:0:{aa2115a1-9712-457b-9047-dbb71ca2cdd2}"
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 1,
+              "Title": "imca_services.cs",
+              "DocumentMoniker": "\\\\frlswfls1001\\Services\\Developpement\\_Commun\\Dev_Projet\\git\\appConstelation\\IMCA_Services\\IMCA_services\\imca_services.cs",
+              "RelativeDocumentMoniker": "IMCA_services\\imca_services.cs",
+              "ToolTip": "\\\\frlswfls1001\\Services\\Developpement\\_Commun\\Dev_Projet\\git\\appConstelation\\IMCA_Services\\IMCA_services\\imca_services.cs",
+              "RelativeToolTip": "IMCA_services\\imca_services.cs",
+              "ViewState": "AgIAAEYBAAAAAAAAAAAtwGABAAAcAAAAAAAAAA==",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000738|",
+              "WhenOpened": "2026-08-10T15:12:57.151Z"
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 4,
+              "Title": "Program.cs",
+              "DocumentMoniker": "\\\\frlswfls1001\\Services\\Developpement\\_Commun\\Dev_Projet\\git\\appConstelation\\IMCA_Services\\Program.cs",
+              "RelativeDocumentMoniker": "Program.cs",
+              "ToolTip": "\\\\frlswfls1001\\Services\\Developpement\\_Commun\\Dev_Projet\\git\\appConstelation\\IMCA_Services\\Program.cs",
+              "RelativeToolTip": "Program.cs",
+              "ViewState": "AgIAAAIAAAAAAAAAAAAiwAwAAAA2AAAAAAAAAA==",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000738|",
+              "WhenOpened": "2026-08-10T15:12:57.155Z"
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 3,
+              "Title": "Idep_FR.cs",
+              "DocumentMoniker": "\\\\frlswfls1001\\Services\\Developpement\\_Commun\\Dev_Projet\\git\\appConstelation\\IMCA_Services\\Idep_FR\\Idep_FR.cs",
+              "RelativeDocumentMoniker": "Idep_FR\\Idep_FR.cs",
+              "ToolTip": "\\\\frlswfls1001\\Services\\Developpement\\_Commun\\Dev_Projet\\git\\appConstelation\\IMCA_Services\\Idep_FR\\Idep_FR.cs",
+              "RelativeToolTip": "Idep_FR\\Idep_FR.cs",
+              "ViewState": "AgIAAKIEAAAAAAAAAAAwwLwEAAAAAAAAAAAAAA==",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000738|",
+              "WhenOpened": "2026-08-10T15:12:57.157Z"
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 2,
+              "Title": "imca_services.cs [Design]",
+              "DocumentMoniker": "\\\\frlswfls1001\\Services\\Developpement\\_Commun\\Dev_Projet\\git\\appConstelation\\IMCA_Services\\IMCA_services\\imca_services.cs",
+              "RelativeDocumentMoniker": "IMCA_services\\imca_services.cs",
+              "ToolTip": "S:\\Developpement\\_Commun\\Dev_Projet\\Applications\\Constellation\\IMCA_Services\\IMCA_services\\imca_services.cs [Design]",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000738|",
+              "WhenOpened": "2026-08-10T15:12:57.223Z"
+            }
+          ]
+        },
+        {
+          "DockedWidth": 428,
+          "SelectedChildIndex": -1,
+          "Children": [
+            {
+              "$type": "Bookmark",
+              "Name": "ST:130:0:{116d2292-e37d-41cd-a077-ebacac4c8cc4}"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

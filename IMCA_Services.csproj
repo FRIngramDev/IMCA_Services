@@ -279,6 +279,7 @@
     <Reference Include="WindowsBase" />
   </ItemGroup>
   <ItemGroup>
+    <Compile Include="Brother_import_quotation\Brother_import_quotation.cs" />
     <Compile Include="Fortinet_load_Bid\Fortinet_load_bid.cs" />
     <Compile Include="Idep_FR\Idep_FR.cs" />
     <Compile Include="ProjectInstaller.cs">
