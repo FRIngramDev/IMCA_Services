@@ -1,0 +1,18 @@
+FRANCE(FR) at 20/03/2026 10:00:48
+   Debug Parameter is set to TRUE at 20/03/2026 10:00:48
+   Connexion to cotationsfortinet_fr@ingrammicro.com at 20/03/2026 10:00:48
+   Sender_email_adress      : sfdc-deployment@fortinet.com
+   Sharedmailbox_folder_in  : Test
+   Sharedmailbox_folder_out : COP
+   StartDateScan            : 20240501
+   Extracting the 15 most recent messages
+   No emails found
+FRANCE(FR) at 20/03/2026 10:07:08
+   Debug Parameter is set to TRUE at 20/03/2026 10:07:08
+   Connexion to cotationsfortinet_fr@ingrammicro.com at 20/03/2026 10:07:08
+   Sender_email_adress      : sfdc-deployment@fortinet.com
+   Sharedmailbox_folder_in  : Test
+   Sharedmailbox_folder_out : COP
+   StartDateScan            : 20240501
+   Extracting the 15 most recent messages
+   No emails found

@@ -1,0 +1,73 @@
+IMCA Services started at                   : 20/03/2026 09:54:28
+   Session Name                            : SERVICE01
+   Timer Interval                          : 15 second(s)
+   Connection String                       : Data Source=DEFRWSQL1131C01,1433;Initial Catalog=IMCA_BACKOFFICE;Persist Security Info=True;MultipleActiveResultSets=True;Trusted_connection=yes;Connection Timeout=0
+   Number of Errors Allowed per query      : 10
+   Start Terminal Sessions                 : FALSE
+   Execute IMCA Action using Thread        : FALSE
+   Mumber of Thread Max                    : 10
+   Start Checking TODO was ran at 20/03/2026 09:54:45
+       ACTION : SBO Import Fortinet (ID : 3847595057) has been reserved. We can start it at 20/03/2026 09:54:46
+               FUNCTION to execute : IMCA_Services.Fortinet_load_bid.Read_Email_with_Graph (ID : 524487)
+IMCA Services started at                   : 20/03/2026 09:56:27
+   Session Name                            : SERVICE01
+   Timer Interval                          : 15 second(s)
+   Connection String                       : Data Source=DEFRWSQL4102,1433;Initial Catalog=IMCA_BACKOFFICE;Persist Security Info=True;MultipleActiveResultSets=True;Trusted_connection=yes;Connection Timeout=0
+   Number of Errors Allowed per query      : 10
+   Start Terminal Sessions                 : FALSE
+   Execute IMCA Action using Thread        : FALSE
+   Mumber of Thread Max                    : 10
+   Start Checking TODO was ran at 20/03/2026 09:57:10
+   End Checking TODO was ran at 20/03/2026 09:57:56
+   Start Checking TODO was ran at 20/03/2026 09:58:11
+IMCA Services started at                   : 20/03/2026 10:17:24
+   Session Name                            : SERVICE01
+   Timer Interval                          : 15 second(s)
+   Connection String                       : Data Source=DEFRWSQL1131C01,1433;Initial Catalog=IMCA_BACKOFFICE;Persist Security Info=True;MultipleActiveResultSets=True;Trusted_connection=yes;Connection Timeout=0
+   Number of Errors Allowed per query      : 10
+   Start Terminal Sessions                 : FALSE
+   Execute IMCA Action using Thread        : FALSE
+   Mumber of Thread Max                    : 10
+   Start Checking TODO was ran at 20/03/2026 10:17:40
+   End Checking TODO was ran at 20/03/2026 10:17:41
+   Start Checking TODO was ran at 20/03/2026 10:17:56
+   End Checking TODO was ran at 20/03/2026 10:17:56
+   Start Checking TODO was ran at 20/03/2026 10:18:11
+   End Checking TODO was ran at 20/03/2026 10:18:11
+   Start Checking TODO was ran at 20/03/2026 10:18:26
+   End Checking TODO was ran at 20/03/2026 10:18:26
+   Start Checking TODO was ran at 20/03/2026 10:18:41
+   End Checking TODO was ran at 20/03/2026 10:18:42
+   Start Checking TODO was ran at 20/03/2026 10:18:57
+   End Checking TODO was ran at 20/03/2026 10:18:57
+   Start Checking TODO was ran at 20/03/2026 10:19:12
+   End Checking TODO was ran at 20/03/2026 10:19:12
+   Start Checking TODO was ran at 20/03/2026 10:19:27
+   End Checking TODO was ran at 20/03/2026 10:19:27
+   Start Checking TODO was ran at 20/03/2026 10:19:42
+   End Checking TODO was ran at 20/03/2026 10:19:42
+   Start Checking TODO was ran at 20/03/2026 10:19:57
+   End Checking TODO was ran at 20/03/2026 10:19:58
+   Start Checking TODO was ran at 20/03/2026 10:20:13
+   End Checking TODO was ran at 20/03/2026 10:20:13
+   Start Checking TODO was ran at 20/03/2026 10:20:28
+   End Checking TODO was ran at 20/03/2026 10:20:28
+   Start Checking TODO was ran at 20/03/2026 10:20:43
+   End Checking TODO was ran at 20/03/2026 10:20:43
+   Start Checking TODO was ran at 20/03/2026 10:20:58
+   End Checking TODO was ran at 20/03/2026 10:20:58
+   Start Checking TODO was ran at 20/03/2026 10:21:13
+       SERVICE01 reserved ACTION  SBO Import Fortinet (ID : 3847619840) at 20/03/2026 10:21:14
+       ACTION : SBO Import Fortinet (ID : 3847619840) has been reserved. We can start it at 20/03/2026 10:21:28
+               FUNCTION to execute : IMCA_Services.Fortinet_load_bid.Read_Email_with_Graph (ID : 524487)
+               NameSpace           : IMCA_Services
+               ClassName           : Fortinet_load_bid
+               Method              : Read_Email_with_Graph
+               FUNCTION to execute : EVALOPENQUERY (ID : 525587)
+               FUNCTION to execute : EVALOPENQUERY (ID : 525604)
+               FUNCTION to execute : EVALOPENQUERY (ID : 525605)
+               FUNCTION to execute : EVALOPENQUERY (ID : 525606)
+               FUNCTION to execute : EVALOPENQUERY (ID : 525607)
+               FUNCTION to execute : EVALOPENQUERY (ID : 525608)
+       ACTION : SBO Import Fortinet (ID : 3847619840) finished at 20/03/2026 10:28:23
+       SERVICE01 reserved ACTION  IDEP_FR (ID : 3847619848) at 20/03/2026 10:28:43
