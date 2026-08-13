@@ -1,0 +1,3 @@
+FRANCE(FR) at 11/08/2026 16:27:07
+   Debug Parameter is set to TRUE at 11/08/2026 16:27:07
+   Connexion to cotationsfortinet_fr@ingrammicro.com at 11/08/2026 16:27:07

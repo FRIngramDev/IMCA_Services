@@ -1,0 +1,21 @@
+2026-08-11 16:15:25 - FRANCE(FR) at 11/08/2026 16:15:23
+2026-08-11 16:15:30 -    Debug Parameter is set to TRUE at 11/08/2026 16:15:26
+2026-08-11 16:15:37 -    Connexion to cotationsbrother_fr@ingrammicro.com at 11/08/2026 16:15:36
+2026-08-11 16:44:23 - FRANCE(FR) at 11/08/2026 16:44:23
+2026-08-11 16:44:23 -    Debug Parameter is set to TRUE at 11/08/2026 16:44:23
+2026-08-11 16:44:23 -    Connexion to cotationsbrother_fr@ingrammicro.com at 11/08/2026 16:44:23
+2026-08-11 17:00:40 - FRANCE(FR) at 11/08/2026 17:00:40
+2026-08-11 17:00:40 -    Debug Parameter is set to TRUE at 11/08/2026 17:00:40
+2026-08-11 17:00:41 -    Connexion to cotationsbrother_fr@ingrammicro.com at 11/08/2026 17:00:41
+2026-08-11 17:13:23 -    Sharedmailbox_folder_in  : INBOX
+2026-08-11 17:13:23 -    Sharedmailbox_folder_out : Archives
+2026-08-11 17:13:23 -    Path pieces jointes      : temp
+2026-08-11 17:13:23 -    Extracting the 10 oldest messages
+2026-08-11 17:13:27 -    No emails found
+2026-08-11 17:18:54 - FRANCE(FR) at 11/08/2026 17:18:54
+2026-08-11 17:18:55 -    Debug Parameter is set to TRUE at 11/08/2026 17:18:55
+2026-08-11 17:18:55 -    Connexion to cotationsbrother_fr@ingrammicro.com at 11/08/2026 17:18:55
+2026-08-11 17:22:32 -    Sharedmailbox_folder_in  : INBOX
+2026-08-11 17:22:32 -    Sharedmailbox_folder_out : Archives
+2026-08-11 17:22:32 -    Path pieces jointes      : temp
+2026-08-11 17:22:33 -    Extracting the 10 oldest messages

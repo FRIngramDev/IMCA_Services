@@ -39,6 +39,9 @@ namespace IMCA_Services
         private string NUMBER_OF_THREAD_MAX = "";
         private Int16 nb_created_thread = 0;
         private Boolean timer_check_TODO_is_running = false;
+        private string logs_folder = "";
+        private string temp_folder = "";
+
         public class TS_Session
         {
             private int LogonErrorCode { get; set; }
@@ -466,6 +469,7 @@ namespace IMCA_Services
             public string Number_of_errors_allowed_per_query { get; set; }
             public string EXECUTE_IMCA_ACTION_USING_THREAD { get; set; }
             public string NUMBER_OF_THREAD_MAX { get; set; }
+            public string temp_folder { get; set; }
 
         }
         public imca_services()
@@ -637,7 +641,7 @@ namespace IMCA_Services
             string json_file = "";
 
             service_path = Path.GetDirectoryName(System.Reflection.Assembly.GetEntryAssembly().Location);
-            param.logs_folder = "logs";
+            //param.logs_folder = "logs";
 
             try
             {
@@ -653,6 +657,8 @@ namespace IMCA_Services
                 Number_of_errors_allowed_per_query = param.Number_of_errors_allowed_per_query;
                 EXECUTE_IMCA_ACTION_USING_THREAD = param.EXECUTE_IMCA_ACTION_USING_THREAD;
                 NUMBER_OF_THREAD_MAX = param.NUMBER_OF_THREAD_MAX;
+                logs_folder = param.logs_folder;
+                temp_folder = param.temp_folder;
 
 
                 if (session_name is null)
@@ -682,16 +688,16 @@ namespace IMCA_Services
 
 
                 // Delete old logs files
-                class_dev_tools.Fonction.DeleteFichiers(service_path + "\\" + param.logs_folder, -7);
+                class_dev_tools.Fonction.DeleteFichiers(service_path + "\\" + logs_folder, -7);
 
-                WriteToFile("IMCA Services started at                   : " + DateTime.Now.ToString("dd/MM/yyyy HH:mm:ss"), 0, param.logs_folder);
-                WriteToFile("   Session Name                            : " + session_name.ToUpper(), 0, param.logs_folder);
-                WriteToFile("   Timer Interval                          : " + nb_sec + " second(s)", 0, param.logs_folder);
-                WriteToFile("   Connection String                       : " + sql_con, 0, param.logs_folder);
-                WriteToFile("   Number of Errors Allowed per query      : " + Number_of_errors_allowed_per_query, 0, param.logs_folder);
-                WriteToFile("   Start Terminal Sessions                 : " + start_terminal_sessions, 0, param.logs_folder);
-                WriteToFile("   Execute IMCA Action using Thread        : " + EXECUTE_IMCA_ACTION_USING_THREAD, 0, param.logs_folder);
-                WriteToFile("   Mumber of Thread Max                    : " + NUMBER_OF_THREAD_MAX, 0, param.logs_folder);
+                WriteToFile("IMCA Services started at                   : " + DateTime.Now.ToString("dd/MM/yyyy HH:mm:ss"), 0, logs_folder);
+                WriteToFile("   Session Name                            : " + session_name.ToUpper(), 0, logs_folder);
+                WriteToFile("   Timer Interval                          : " + nb_sec + " second(s)", 0, logs_folder);
+                WriteToFile("   Connection String                       : " + sql_con, 0, logs_folder);
+                WriteToFile("   Number of Errors Allowed per query      : " + Number_of_errors_allowed_per_query, 0, logs_folder);
+                WriteToFile("   Start Terminal Sessions                 : " + start_terminal_sessions, 0, logs_folder);
+                WriteToFile("   Execute IMCA Action using Thread        : " + EXECUTE_IMCA_ACTION_USING_THREAD, 0, logs_folder);
+                WriteToFile("   Mumber of Thread Max                    : " + NUMBER_OF_THREAD_MAX, 0, logs_folder);
 
 
                 // Open Terminal Sessions
@@ -704,11 +710,11 @@ namespace IMCA_Services
                 {
                     try
                     {
-                        start_timer(param.logs_folder);
+                        start_timer(logs_folder, temp_folder);
                     }
                     catch (Exception e)
                     {
-                        WriteToFile("IMCA Services not started (Unable to start Thread) - Error : " + e.Message + " at " + DateTime.Now.ToString("dd/MM/yyyy HH:mm:ss"), 0, param.logs_folder);
+                        WriteToFile("IMCA Services not started (Unable to start Thread) - Error : " + e.Message + " at " + DateTime.Now.ToString("dd/MM/yyyy HH:mm:ss"), 0, logs_folder);
                         this.Stop();
                     }
                 }
@@ -723,7 +729,7 @@ namespace IMCA_Services
             }
             catch (Exception ex)
             {
-                WriteToFile("IMCA Services not started - OnStart procedure Issue -  " + ex.Message + " at " + DateTime.Now.ToString("dd/MM/yyyy HH:mm:ss"), 0, param.logs_folder);
+                WriteToFile("IMCA Services not started - OnStart procedure Issue -  " + ex.Message + " at " + DateTime.Now.ToString("dd/MM/yyyy HH:mm:ss"), 0, logs_folder);
                 this.Stop();
             }
 
@@ -783,14 +789,14 @@ namespace IMCA_Services
 
             WriteToFile("IMCA Services stopped at " + DateTime.Now.ToString("dd/MM/yyyy HH:mm:ss"));
         }
-        public void start_timer(string logs)
+        public void start_timer(string logs, string temp_folder)
         {
             timer_check_TODO = new System.Timers.Timer();
-            timer_check_TODO.Elapsed += delegate { OnElaspedTime(logs); };
+            timer_check_TODO.Elapsed += delegate { OnElaspedTime(logs, temp_folder); };
             timer_check_TODO.Interval = nb_sec * 1000;
             timer_check_TODO.Enabled = true;
         }
-        private void OnElaspedTime(string logs)
+        private void OnElaspedTime(string logs, string temp_folder)
         {
             WriteToFile("   Start Checking TODO was ran at " + DateTime.Now.ToString("dd/MM/yyyy HH:mm:ss"));
 
@@ -799,7 +805,7 @@ namespace IMCA_Services
                 //timer_check_TODO.Enabled = false;
                 timer_check_TODO.Stop();
 
-                check_if_TODO(logs);
+                check_if_TODO(logs, temp_folder);
 
                 timer_check_TODO.Start();
 
@@ -1821,7 +1827,7 @@ namespace IMCA_Services
         }
 
 
-        public void execute_IMCA_Action(DataRow dr, string logs, Boolean using_thread)
+        public void execute_IMCA_Action(DataRow dr, string logs, string temp_folder, Boolean using_thread)
         {
             SqlDataReader dt2;
 
@@ -1944,7 +1950,7 @@ namespace IMCA_Services
 
                                         try
                                         {
-                                            caller(dt2["ClassName_Method"].ToString(), new object[] { sql_con, logs, session_name });
+                                            caller(dt2["ClassName_Method"].ToString(), new object[] { sql_con, logs, temp_folder, session_name });
 
                                         }
                                         catch (Exception ex)
@@ -2170,7 +2176,7 @@ namespace IMCA_Services
                 nb_created_thread -= 1;
         }
 
-        protected void check_if_TODO(string logs)
+        protected void check_if_TODO(string logs, string temp_folder)
         {
             timer_check_TODO_is_running = true;
 
@@ -2211,7 +2217,7 @@ namespace IMCA_Services
                             {
                                 if (nb_created_thread <= Int16.Parse(NUMBER_OF_THREAD_MAX))
                                 {
-                                    Thread new_IMCA_action_Thread = new Thread(() => execute_IMCA_Action(dr, logs, true));
+                                    Thread new_IMCA_action_Thread = new Thread(() => execute_IMCA_Action(dr, logs, temp_folder, true));
                                     new_IMCA_action_Thread.IsBackground = true;
                                     new_IMCA_action_Thread.SetApartmentState(ApartmentState.STA);
                                     new_IMCA_action_Thread.Start();
@@ -2219,7 +2225,7 @@ namespace IMCA_Services
                             }
                             else
                             {
-                                execute_IMCA_Action(dr, logs, false);
+                                execute_IMCA_Action(dr, logs, temp_folder, false);
                             }
                             System.Threading.Thread.Sleep(500);
                         }
