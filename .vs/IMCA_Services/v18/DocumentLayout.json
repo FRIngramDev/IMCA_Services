@@ -3,19 +3,22 @@
   "WorkspaceRootPath": "\\\\frlswfls1001\\Services\\Developpement\\_Commun\\Dev_Projet\\git\\appConstelation\\IMCA_Services\\",
   "Documents": [
     {
+      "AbsoluteMoniker": "D:0:0:{A2FE74E1-B743-11D0-AE1A-00A0C90FFFC3}|\u003CMiscFiles\u003E|\\\\frlswfls1001\\Services\\Developpement\\_Commun\\Dev_Projet\\git\\appConstelation\\IMCA_Services\\.gitignore||{3B902123-F8A7-4915-9F01-361F908088D0}"
+    },
+    {
       "AbsoluteMoniker": "D:0:0:{E832792E-068E-4B5E-A80A-0CE0E8E322AB}|IMCA_Services.csproj|\\\\frlswfls1001\\Services\\Developpement\\_Commun\\Dev_Projet\\git\\appConstelation\\IMCA_Services\\idep_fr\\idep_fr.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}"
     },
     {
-      "AbsoluteMoniker": "D:0:0:{E832792E-068E-4B5E-A80A-0CE0E8E322AB}|IMCA_Services.csproj|\\\\frlswfls1001\\services\\developpement\\_commun\\dev_projet\\git\\appconstelation\\imca_services\\imca_services\\imca_services.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}"
+      "AbsoluteMoniker": "D:0:0:{E832792E-068E-4B5E-A80A-0CE0E8E322AB}|IMCA_Services.csproj|\\\\frlswfls1001\\services\\developpement\\_commun\\dev_projet\\git\\appconstelation\\imca_services\\brother_load_bid\\brother_load_bid.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}"
     },
     {
       "AbsoluteMoniker": "D:0:0:{E832792E-068E-4B5E-A80A-0CE0E8E322AB}|IMCA_Services.csproj|\\\\frlswfls1001\\services\\developpement\\_commun\\dev_projet\\git\\appconstelation\\imca_services\\fortinet_load_bid\\fortinet_load_bid.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}"
     },
     {
-      "AbsoluteMoniker": "D:0:0:{E832792E-068E-4B5E-A80A-0CE0E8E322AB}|IMCA_Services.csproj|\\\\frlswfls1001\\services\\developpement\\_commun\\dev_projet\\git\\appconstelation\\imca_services\\imca_services\\imca_services.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}|Form"
+      "AbsoluteMoniker": "D:0:0:{E832792E-068E-4B5E-A80A-0CE0E8E322AB}|IMCA_Services.csproj|\\\\frlswfls1001\\services\\developpement\\_commun\\dev_projet\\git\\appconstelation\\imca_services\\imca_services\\imca_services.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}"
     },
     {
-      "AbsoluteMoniker": "D:0:0:{E832792E-068E-4B5E-A80A-0CE0E8E322AB}|IMCA_Services.csproj|\\\\frlswfls1001\\services\\developpement\\_commun\\dev_projet\\git\\appconstelation\\imca_services\\brother_load_bid\\brother_load_bid.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}"
+      "AbsoluteMoniker": "D:0:0:{E832792E-068E-4B5E-A80A-0CE0E8E322AB}|IMCA_Services.csproj|\\\\frlswfls1001\\services\\developpement\\_commun\\dev_projet\\git\\appconstelation\\imca_services\\imca_services\\imca_services.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}|Form"
     },
     {
       "AbsoluteMoniker": "D:0:0:{E832792E-068E-4B5E-A80A-0CE0E8E322AB}|IMCA_Services.csproj|\\\\frlswfls1001\\services\\developpement\\_commun\\dev_projet\\git\\appconstelation\\imca_services\\packages.config||{FA3CD31E-987B-443A-9B81-186104E8DAC1}"
@@ -28,11 +31,28 @@
       "DocumentGroups": [
         {
           "DockedWidth": 200,
-          "SelectedChildIndex": 20,
+          "SelectedChildIndex": 0,
           "Children": [
+            {
+              "$type": "Document",
+              "DocumentIndex": 0,
+              "Title": ".gitignore",
+              "DocumentMoniker": "\\\\frlswfls1001\\Services\\Developpement\\_Commun\\Dev_Projet\\git\\appConstelation\\IMCA_Services\\.gitignore",
+              "RelativeDocumentMoniker": ".gitignore",
+              "ToolTip": "\\\\frlswfls1001\\Services\\Developpement\\_Commun\\Dev_Projet\\git\\appConstelation\\IMCA_Services\\.gitignore",
+              "RelativeToolTip": ".gitignore",
+              "ViewState": "AgIAAAAAAAAAAAAAAAAAAAQAAAAfAAAAAAAAAA==",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.001001|",
+              "WhenOpened": "2026-08-13T13:32:30.171Z",
+              "EditorCaption": ""
+            },
             {
               "$type": "Bookmark",
               "Name": "ST:0:0:{1c4feeaa-4718-4aa9-859d-94ce25d182ba}"
+            },
+            {
+              "$type": "Bookmark",
+              "Name": "ST:0:0:{c6f34f0d-7ae5-4f3a-be61-fe0c21ae9eb8}"
             },
             {
               "$type": "Bookmark",
@@ -92,7 +112,7 @@
             },
             {
               "$type": "Document",
-              "DocumentIndex": 5,
+              "DocumentIndex": 6,
               "Title": "packages.config",
               "DocumentMoniker": "\\\\frlswfls1001\\Services\\Developpement\\_Commun\\Dev_Projet\\git\\appConstelation\\IMCA_Services\\packages.config",
               "RelativeDocumentMoniker": "packages.config",
@@ -104,7 +124,7 @@
             },
             {
               "$type": "Document",
-              "DocumentIndex": 4,
+              "DocumentIndex": 2,
               "Title": "Brother_load_Bid.cs",
               "DocumentMoniker": "\\\\frlswfls1001\\Services\\Developpement\\_Commun\\Dev_Projet\\git\\appConstelation\\IMCA_Services\\Brother_load_Bid\\Brother_load_Bid.cs",
               "RelativeDocumentMoniker": "Brother_load_Bid\\Brother_load_Bid.cs",
@@ -117,20 +137,20 @@
             },
             {
               "$type": "Document",
-              "DocumentIndex": 1,
+              "DocumentIndex": 4,
               "Title": "imca_services.cs",
               "DocumentMoniker": "\\\\frlswfls1001\\Services\\Developpement\\_Commun\\Dev_Projet\\git\\appConstelation\\IMCA_Services\\IMCA_services\\imca_services.cs",
               "RelativeDocumentMoniker": "IMCA_services\\imca_services.cs",
               "ToolTip": "\\\\frlswfls1001\\Services\\Developpement\\_Commun\\Dev_Projet\\git\\appConstelation\\IMCA_Services\\IMCA_services\\imca_services.cs",
               "RelativeToolTip": "IMCA_services\\imca_services.cs",
-              "ViewState": "AgIAAI8HAAAAAAAAAAAIwKQHAAAoAAAAAAAAAA==",
+              "ViewState": "AgIAAIwHAAAAAAAAAAAIwKIHAAAoAAAAAAAAAA==",
               "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000738|",
               "WhenOpened": "2026-08-11T10:08:33.688Z",
               "EditorCaption": ""
             },
             {
               "$type": "Document",
-              "DocumentIndex": 3,
+              "DocumentIndex": 5,
               "Title": "imca_services.cs [Design]",
               "DocumentMoniker": "\\\\frlswfls1001\\Services\\Developpement\\_Commun\\Dev_Projet\\git\\appConstelation\\IMCA_Services\\IMCA_services\\imca_services.cs",
               "RelativeDocumentMoniker": "IMCA_services\\imca_services.cs",
@@ -142,26 +162,26 @@
             },
             {
               "$type": "Document",
-              "DocumentIndex": 2,
+              "DocumentIndex": 3,
               "Title": "Fortinet_load_bid.cs",
               "DocumentMoniker": "\\\\frlswfls1001\\Services\\Developpement\\_Commun\\Dev_Projet\\git\\appConstelation\\IMCA_Services\\Fortinet_load_Bid\\Fortinet_load_bid.cs",
               "RelativeDocumentMoniker": "Fortinet_load_Bid\\Fortinet_load_bid.cs",
               "ToolTip": "\\\\frlswfls1001\\Services\\Developpement\\_Commun\\Dev_Projet\\git\\appConstelation\\IMCA_Services\\Fortinet_load_Bid\\Fortinet_load_bid.cs",
               "RelativeToolTip": "Fortinet_load_Bid\\Fortinet_load_bid.cs",
-              "ViewState": "AgIAALEFAAAAAAAAAAAwwMAFAABHAAAAAAAAAA==",
+              "ViewState": "AgIAAB0FAAAAAAAAAAAswDEFAAAqAAAAAAAAAA==",
               "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000738|",
               "WhenOpened": "2026-08-10T15:12:56.935Z",
               "EditorCaption": ""
             },
             {
               "$type": "Document",
-              "DocumentIndex": 0,
+              "DocumentIndex": 1,
               "Title": "Idep_FR.cs",
               "DocumentMoniker": "\\\\frlswfls1001\\Services\\Developpement\\_Commun\\Dev_Projet\\git\\appConstelation\\IMCA_Services\\Idep_FR\\Idep_FR.cs",
               "RelativeDocumentMoniker": "Idep_FR\\Idep_FR.cs",
               "ToolTip": "\\\\frlswfls1001\\Services\\Developpement\\_Commun\\Dev_Projet\\git\\appConstelation\\IMCA_Services\\Idep_FR\\Idep_FR.cs",
               "RelativeToolTip": "Idep_FR\\Idep_FR.cs",
-              "ViewState": "AgIAAAYAAAAAAAAAAAAAAB4AAAA0AAAAAAAAAA==",
+              "ViewState": "AgIAAJAEAAAAAAAAAAAswKcEAACAAAAAAAAAAA==",
               "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000738|",
               "WhenOpened": "2026-08-10T15:12:57.157Z",
               "EditorCaption": ""
