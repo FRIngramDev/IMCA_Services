@@ -21,17 +21,28 @@ namespace Idep_FR
     public class Idep_FR
     {
         public string strRep_Travail;
-        public string Nom_modele_MDB;
-        public string strMonarch;
+        public string Nom_modele_MDB; 
+
         public string rep_modele_monarch;
         public string NomFicModele_XML;
+
         public SqlConnection ConBase;
-        public string strCon;
+        public string strCon ="";
+        public string sql_con_parameter_global = "";
+
+        public string str_annuaire_con ="";
+        public string sql_annuaire_parameter_global = "";
+
+        public string strMonarch;
+        public string sql_monarch_parameter_global = "";
+
         public string date_rap;
         public string rep_fichier_traites;
         public DataSet DS;
         private string logs_folder = "";
+        private string temp_folder = "";
         private string global_session_name = "";
+
 
         public Idep_FR()
         {
@@ -44,7 +55,6 @@ namespace Idep_FR
         }
         public class IDEP_FRJSON_file
         {
-            public string logs_folder { get; set; }
             public List<parameters> list_param { get; set; }
         }
         private string get_IMCA_paramters(string sql_con, string param_name)
@@ -1143,7 +1153,7 @@ namespace Idep_FR
 
         }
 
-        public void Files_Management(string sql_con, string logs, string session_name)
+        public void Files_Management(string sql_con, string logs,string temp_folder, string session_name)
         {
             string[] tab_fich;
             System.IO.FileInfo fich;
@@ -1163,17 +1173,28 @@ namespace Idep_FR
             var idep_param = new IDEP_FRJSON_file();
             idep_param = JsonConvert.DeserializeObject<IDEP_FRJSON_file>(global_parameters);
 
-            string str_annuaire_con = idep_param.list_param.FirstOrDefault(x => x.param == "sql_annuaire").valeur.ToString();
+           // str_annuaire_con = idep_param.list_param.FirstOrDefault(x => x.param == "sql_annuaire").valeur.ToString();
+            //strCon = idep_param.list_param.FirstOrDefault(x => x.param == "sql_con").valeur.ToString();
+
+            sql_con_parameter_global = idep_param.list_param.FirstOrDefault(x => x.param == "sql_con_parameter_global").valeur.ToString();
+
+            sql_annuaire_parameter_global = idep_param.list_param.FirstOrDefault(x => x.param == "sql_annuaire_parameter_global").valeur.ToString();
+
+            sql_monarch_parameter_global = idep_param.list_param.FirstOrDefault(x => x.param == "sql_monarch_parameter_global").valeur.ToString();
+
+            strCon = get_IMCA_paramters(sql_con, sql_con_parameter_global);
+
+            str_annuaire_con = get_IMCA_paramters(sql_con, sql_annuaire_parameter_global);
+
+            strMonarch = get_IMCA_paramters(sql_con, sql_monarch_parameter_global);
+
             string rep_a_scanner = idep_param.list_param.FirstOrDefault(x => x.param == "rep_a_scanner").valeur.ToString();
             rep_fichier_traites = idep_param.list_param.FirstOrDefault(x => x.param == "rep_fichier_traites").valeur.ToString();
             strRep_Travail = idep_param.list_param.FirstOrDefault(x => x.param == "repertoire_temporaire").valeur.ToString();
             Nom_modele_MDB = strRep_Travail;
-            strMonarch = idep_param.list_param.FirstOrDefault(x => x.param == "sql_monarch").valeur.ToString();
             rep_modele_monarch = idep_param.list_param.FirstOrDefault(x => x.param == "modeles_monarch").valeur.ToString();
-            strCon = idep_param.list_param.FirstOrDefault(x => x.param == "sql_con").valeur.ToString();
+            
             NomFicModele_XML = idep_param.list_param.FirstOrDefault(x => x.param == "modele_xml").valeur.ToString();
-
-
             class_dev_tools.envoi_mail obj_email = new class_dev_tools.envoi_mail();
             class_dev_tools.DroitAnnuaire user_info = new class_dev_tools.DroitAnnuaire(str_annuaire_con);
 

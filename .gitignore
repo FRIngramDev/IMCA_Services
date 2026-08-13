@@ -1,0 +1,15 @@
+﻿################################################################################
+# Ce fichier .gitignore a été automatiquement créé par Microsoft(R) Visual Studio.
+################################################################################
+
+# IMCA Services runtime folders
+**/bin/Debug/logs/
+**/bin/Debug/temp/
+**/bin/Release/logs/
+**/bin/Release/temp/
+
+# Optional case-insensitive variants
+**/bin/debug/logs/
+**/bin/debug/temp/
+**/bin/release/logs/
+**/bin/release/temp/
