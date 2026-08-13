@@ -4,7 +4,6 @@
 # Visual Studio local files
 .vs/
 *.suo
-*.sln
 # IMCA Services runtime folders
 **/bin/Debug/logs/
 **/bin/Debug/temp/
