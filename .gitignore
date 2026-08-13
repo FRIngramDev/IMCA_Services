@@ -1,7 +1,9 @@
 ﻿################################################################################
 # Ce fichier .gitignore a été automatiquement créé par Microsoft(R) Visual Studio.
 ################################################################################
-
+# Visual Studio local files
+.vs/
+*.suo
 # IMCA Services runtime folders
 **/bin/Debug/logs/
 **/bin/Debug/temp/
