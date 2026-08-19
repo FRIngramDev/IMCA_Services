@@ -86,13 +86,10 @@
         </member>
         <member name="T:Microsoft.Kiota.Serialization.Text.TextParseNodeFactory">
             <summary>
-            The <see cref="T:Microsoft.Kiota.Abstractions.Serialization.IAsyncParseNodeFactory"/> implementation for text/plain content types
+            The <see cref="T:Microsoft.Kiota.Abstractions.Serialization.IParseNodeFactory"/> implementation for text/plain content types
             </summary>
         </member>
         <member name="P:Microsoft.Kiota.Serialization.Text.TextParseNodeFactory.ValidContentType">
-            <inheritdoc />
-        </member>
-        <member name="M:Microsoft.Kiota.Serialization.Text.TextParseNodeFactory.GetRootParseNode(System.String,System.IO.Stream)">
             <inheritdoc />
         </member>
         <member name="M:Microsoft.Kiota.Serialization.Text.TextParseNodeFactory.GetRootParseNodeAsync(System.String,System.IO.Stream,System.Threading.CancellationToken)">

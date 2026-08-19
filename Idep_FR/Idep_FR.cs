@@ -110,6 +110,10 @@ namespace Idep_FR
         {
             this.logs_folder = logs_folder;
         }
+        public void settemp_folder(string temp_folder)
+        {
+            this.temp_folder = temp_folder;
+        }
 
 
         public string InsertSQL_with_odbc(string strSql, string strSqlBDD, OdbcConnection Connexion, string MODELE)
@@ -1164,6 +1168,7 @@ namespace Idep_FR
 
 
             setlogs_folder(service_path + "\\" + logs);
+            settemp_folder(service_path + "\\" + temp_folder);
 
             global_session_name = session_name;
 

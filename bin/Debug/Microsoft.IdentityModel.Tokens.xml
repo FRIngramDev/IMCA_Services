@@ -92,6 +92,12 @@
             When enabled, the XML type attribute will be capitalized (XML) for saml configurations.
             </summary>
         </member>
+        <member name="F:Microsoft.IdentityModel.Tokens.AppContextSwitches.UseCaseSensitivePClaimComparisonSwitch">
+            <summary>
+            Controls whether the Signed HTTP Request 'p' (path) claim is compared case-sensitively (ordinal) per RFC 3986 section 3.3.
+            On the 8.x line the comparison is case-insensitive (OrdinalIgnoreCase) by default; set the switch to <c>true</c> to opt in to the case-sensitive (Ordinal) comparison.
+            </summary>
+        </member>
         <member name="M:Microsoft.IdentityModel.Tokens.AppContextSwitches.ResetAllSwitches">
             <summary>
             Used for testing to reset all switches to its default value.
@@ -746,6 +752,11 @@
             The Jku property is used to specify the location of the public key used to verify the signature of the JWT.
             </summary>
         </member>
+        <member name="P:Microsoft.IdentityModel.Tokens.Cnf.Jkt">
+            <summary>
+            The Jkt property is used for DPoP, it is the base64url encoded JWK SHA-256 thumbprint.
+            </summary>
+        </member>
         <member name="P:Microsoft.IdentityModel.Tokens.Cnf.JsonWebKey">
             <summary>
             The Jwk property is used to specify the public key used to verify the signature of the JWT.
@@ -889,6 +900,11 @@
             https://datatracker.ietf.org/doc/html/rfc7800#section-6.2.2
             </summary>
         </member>
+        <member name="F:Microsoft.IdentityModel.Tokens.ConfirmationClaimTypes.Jkt">
+            <summary>
+            https://datatracker.ietf.org/doc/html/rfc9449#name-jwk-thumbprint-confirmation
+            </summary>
+        </member>
         <member name="T:Microsoft.IdentityModel.Tokens.CryptoProviderCache">
             <summary>
             Abstract definition of a cache for cryptographic providers.
@@ -1013,6 +1029,17 @@
             <summary>
             Gets or sets a bool controlling if <see cref="T:Microsoft.IdentityModel.Tokens.SignatureProvider"/> should be cached.
             </summary>
+        </member>
+        <member name="P:Microsoft.IdentityModel.Tokens.CryptoProviderFactory.CacheCustomProviders">
+            <summary>
+            Gets or sets a bool controlling if <see cref="T:Microsoft.IdentityModel.Tokens.SignatureProvider"/> instances created by <see cref="P:Microsoft.IdentityModel.Tokens.CryptoProviderFactory.CustomCryptoProvider"/>
+            should be cached. Default is <see langword="false"/>.
+            </summary>
+            <remarks>
+            When <see langword="true"/>, signature providers returned by <see cref="M:Microsoft.IdentityModel.Tokens.ICryptoProvider.Create(System.String,System.Object[])"/>
+            are cached using the same <see cref="P:Microsoft.IdentityModel.Tokens.CryptoProviderFactory.CryptoProviderCache"/> used for built-in providers. This avoids
+            repeated provider creation and key materialisation on every signature validation.
+            </remarks>
         </member>
         <member name="P:Microsoft.IdentityModel.Tokens.CryptoProviderFactory.SignatureProviderObjectPoolCacheSize">
             <summary>
@@ -5052,6 +5079,12 @@
             The default is <c>true</c>.
             </summary>
         </member>
+        <member name="P:Microsoft.IdentityModel.Tokens.Experimental.ValidationParameters.IgnoreCaseWhenValidatingAudience">
+            <summary>
+            Gets or sets a boolean that controls if case is ignored when validating the audience.
+            The default is <c>false</c>, meaning audience comparison is case-sensitive (ordinal).
+            </summary>
+        </member>
         <member name="P:Microsoft.IdentityModel.Tokens.Experimental.ValidationParameters.IncludeTokenOnFailedValidation">
             <summary>
             Gets or sets the flag that indicates whether to include the <see cref="T:Microsoft.IdentityModel.Tokens.SecurityToken"/> when the validation fails.
@@ -6134,6 +6167,18 @@
             </summary>
             <remarks>Value is formatted as: Base64urlEncoding</remarks>
         </member>
+        <member name="P:Microsoft.IdentityModel.Tokens.JsonWebKey.Pub">
+            <summary>
+            Gets or sets the 'pub' (AKP public key).
+            </summary>
+            <remarks>Value is formatted as: Base64urlEncoding</remarks>
+        </member>
+        <member name="P:Microsoft.IdentityModel.Tokens.JsonWebKey.Priv">
+            <summary>
+            Gets or sets the 'priv' (AKP private key / seed).
+            </summary>
+            <remarks>Value is formatted as: Base64urlEncoding</remarks>
+        </member>
         <member name="P:Microsoft.IdentityModel.Tokens.JsonWebKey.KeySize">
             <summary>
             Gets the key size of <see cref="T:Microsoft.IdentityModel.Tokens.JsonWebKey"/>.
@@ -6158,9 +6203,16 @@
             </summary>
             <returns>A the JWK thumbprint.</returns>
         </member>
+        <member name="M:Microsoft.IdentityModel.Tokens.JsonWebKey.RepresentAsAsymmetricPublicJwkForDpop">
+            <summary>
+            Creates a minimal public JWK representation for DPoP proof headers per RFC 9449 and RFC 7638.
+            Only the required members for the key type are included (no alg, kid, or use).
+            </summary>
+        </member>
         <member name="M:Microsoft.IdentityModel.Tokens.JsonWebKey.RepresentAsAsymmetricPublicJwk">
             <summary>
             Creates a JsonWebKey representation of an asymmetric public key.
+            For AKP keys, the 'alg' parameter is included as it is required by the key type specification.
             </summary>
             <returns>JsonWebKey representation of an asymmetric public key.</returns>
             <remarks>https://datatracker.ietf.org/doc/html/rfc7800#section-3.2</remarks>
@@ -6209,7 +6261,7 @@
             </summary>
             <param name="key">a <see cref="T:Microsoft.IdentityModel.Tokens.X509SecurityKey"/> to convert.</param>
             <param name="representAsRsaKey">
-            <c>true</c> to represent the <paramref name="key"/> as an <see cref="T:Microsoft.IdentityModel.Tokens.RsaSecurityKey"/>,
+            <c>true</c> to extract the key material (RSA, ECDsa, or ML-DSA) from the <paramref name="key"/>,
             <c>false</c> to represent the <paramref name="key"/> as an <see cref="T:Microsoft.IdentityModel.Tokens.X509SecurityKey"/>, using the "x5c" parameter.
             </param>
             <returns>a <see cref="T:Microsoft.IdentityModel.Tokens.JsonWebKey"/>.</returns>
@@ -6237,6 +6289,11 @@
             </summary>
             <param name="webKey"><see cref="T:Microsoft.IdentityModel.Tokens.JsonWebKey"/></param>
             <param name="key"><see cref="T:Microsoft.IdentityModel.Tokens.SecurityKey"/></param>
+        </member>
+        <member name="M:Microsoft.IdentityModel.Tokens.JsonWebKeyConverter.ConvertFromMlDsaSecurityKey(Microsoft.IdentityModel.Tokens.MlDsaSecurityKey)">
+            <summary>
+            Converts an <see cref="T:Microsoft.IdentityModel.Tokens.MlDsaSecurityKey"/> into a <see cref="T:Microsoft.IdentityModel.Tokens.JsonWebKey"/>.
+            </summary>
         </member>
         <member name="T:Microsoft.IdentityModel.Tokens.JsonWebKeyECTypes">
             <summary>
@@ -6414,6 +6471,110 @@
             <summary>
             Log messages and codes
             </summary>
+        </member>
+        <member name="T:Microsoft.IdentityModel.Tokens.MlDsaAdapter">
+            <summary>
+            Provides helper methods for creating <see cref="T:System.Security.Cryptography.MLDsa"/> instances from JWK parameters.
+            </summary>
+        </member>
+        <member name="M:Microsoft.IdentityModel.Tokens.MlDsaAdapter.CreateMlDsa(Microsoft.IdentityModel.Tokens.JsonWebKey,System.Boolean)">
+            <summary>
+            Creates an <see cref="T:System.Security.Cryptography.MLDsa"/> instance from a <see cref="T:Microsoft.IdentityModel.Tokens.JsonWebKey"/>.
+            </summary>
+            <param name="jsonWebKey">The JWK containing ML-DSA key material.</param>
+            <param name="usePrivateKey">Whether to include the private key (seed).</param>
+            <returns>An <see cref="T:System.Security.Cryptography.MLDsa"/> instance.</returns>
+        </member>
+        <member name="M:Microsoft.IdentityModel.Tokens.MlDsaAdapter.GetMLDsaAlgorithm(System.String)">
+            <summary>
+            Maps a JWK algorithm string to the corresponding <see cref="T:System.Security.Cryptography.MLDsaAlgorithm"/>.
+            </summary>
+        </member>
+        <member name="M:Microsoft.IdentityModel.Tokens.MlDsaAdapter.CloneMlDsa(System.Security.Cryptography.MLDsa,System.Boolean)">
+            <summary>
+            Creates an independent clone of an <see cref="T:System.Security.Cryptography.MLDsa"/> instance by re-importing key material.
+            The clone is fully independent and safe for concurrent use on a separate thread.
+            </summary>
+            <param name="source">The source <see cref="T:System.Security.Cryptography.MLDsa"/> to clone.</param>
+            <param name="includePrivateKey">Whether to include the private key in the clone.</param>
+            <returns>
+            A new <see cref="T:System.Security.Cryptography.MLDsa"/> instance with the same key material, or <see langword="null"/>
+            if the key material cannot be exported (e.g., HSM-backed non-exportable keys).
+            </returns>
+        </member>
+        <member name="T:Microsoft.IdentityModel.Tokens.MlDsaSecurityKey">
+            <summary>
+            Represents an ML-DSA security key.
+            </summary>
+        </member>
+        <member name="M:Microsoft.IdentityModel.Tokens.MlDsaSecurityKey.#ctor(System.Security.Cryptography.MLDsa)">
+            <summary>
+            Initializes a new instance of the <see cref="T:Microsoft.IdentityModel.Tokens.MlDsaSecurityKey"/> class.
+            </summary>
+            <param name="mlDsa">The <see cref="P:Microsoft.IdentityModel.Tokens.MlDsaSecurityKey.MLDsa"/> instance. The caller is responsible for the
+            lifetime of this instance; disposing the key does not dispose the MLDsa.</param>
+        </member>
+        <member name="P:Microsoft.IdentityModel.Tokens.MlDsaSecurityKey.MLDsa">
+            <summary>
+            The <see cref="P:Microsoft.IdentityModel.Tokens.MlDsaSecurityKey.MLDsa"/> instance used to initialize the key.
+            </summary>
+        </member>
+        <member name="M:Microsoft.IdentityModel.Tokens.MlDsaSecurityKey.Dispose">
+            <summary>
+            Releases resources held by this instance.
+            Only disposes the <see cref="P:Microsoft.IdentityModel.Tokens.MlDsaSecurityKey.MLDsa"/> if this key owns the instance
+            (i.e., the instance was created internally from a <see cref="T:Microsoft.IdentityModel.Tokens.JsonWebKey"/>).
+            </summary>
+        </member>
+        <member name="M:Microsoft.IdentityModel.Tokens.MlDsaSecurityKey.Dispose(System.Boolean)">
+            <summary>
+            Releases unmanaged and, optionally, managed resources.
+            </summary>
+            <param name="disposing"><see langword="true"/> to release both managed and unmanaged resources;
+            <see langword="false"/> to release only unmanaged resources.</param>
+        </member>
+        <member name="P:Microsoft.IdentityModel.Tokens.MlDsaSecurityKey.HasPrivateKey">
+            <summary>
+            Gets a bool indicating if a private key exists.
+            </summary>
+            <return><see langword="true"/> if it has a private key; otherwise, <see langword="false"/>.</return>
+        </member>
+        <member name="P:Microsoft.IdentityModel.Tokens.MlDsaSecurityKey.PrivateKeyStatus">
+            <summary>
+            Gets a value indicating the existence of the private key.
+            </summary>
+            <returns>
+            <see cref="F:Microsoft.IdentityModel.Tokens.PrivateKeyStatus.Exists"/> if the private key exists.
+            <see cref="F:Microsoft.IdentityModel.Tokens.PrivateKeyStatus.DoesNotExist"/> if the private key does not exist.
+            <see cref="F:Microsoft.IdentityModel.Tokens.PrivateKeyStatus.Unknown"/> if the existence of the private key cannot be determined.
+            </returns>
+        </member>
+        <member name="P:Microsoft.IdentityModel.Tokens.MlDsaSecurityKey.KeySize">
+            <summary>
+            Gets the ML-DSA key size in bits.
+            </summary>
+        </member>
+        <member name="M:Microsoft.IdentityModel.Tokens.MlDsaSecurityKey.CanComputeJwkThumbprint">
+            <summary>
+            Determines whether the <see cref="T:Microsoft.IdentityModel.Tokens.MlDsaSecurityKey"/> can compute a JWK thumbprint.
+            </summary>
+            <returns><see langword="true"/> if JWK thumbprint can be computed; otherwise, <see langword="false"/>.</returns>
+            <remarks>See: <see href="https://datatracker.ietf.org/doc/html/rfc7638"/>.</remarks>
+        </member>
+        <member name="M:Microsoft.IdentityModel.Tokens.MlDsaSecurityKey.ComputeJwkThumbprint">
+            <summary>
+            Computes a SHA256 hash over the <see cref="T:Microsoft.IdentityModel.Tokens.MlDsaSecurityKey"/>.
+            </summary>
+            <returns>A JWK thumbprint.</returns>
+            <remarks>See: <see href="https://datatracker.ietf.org/doc/html/rfc7638"/>.</remarks>
+        </member>
+        <member name="M:Microsoft.IdentityModel.Tokens.MlDsaSecurityKey.GetAlgorithmName(System.Security.Cryptography.MLDsaAlgorithm)">
+            <summary>
+            Gets the JWK algorithm name for the specified <see cref="T:System.Security.Cryptography.MLDsaAlgorithm"/>.
+            </summary>
+            <param name="algorithm">The ML-DSA algorithm.</param>
+            <returns>The algorithm name string (e.g., "ML-DSA-44").</returns>
+            <exception cref="T:System.ArgumentException">Thrown when the algorithm is not supported.</exception>
         </member>
         <member name="T:Microsoft.IdentityModel.Tokens.DisposableObjectPool`1">
              <summary>
@@ -7140,6 +7301,12 @@
             <exception cref="T:System.ArgumentNullException">if <paramref name="algorithm"/> is null or whitespace.</exception>
             <exception cref="T:System.ArgumentOutOfRangeException">if <paramref name="algorithm"/> is not supported.</exception>
         </member>
+        <member name="M:Microsoft.IdentityModel.Tokens.SupportedAlgorithms.TryGetHashAlgorithmName(System.String,System.Security.Cryptography.HashAlgorithmName@)">
+            <summary>
+            Attempts to get the <see cref="T:System.Security.Cryptography.HashAlgorithmName"/> for the specified signature algorithm.
+            Returns <see langword="false"/> for algorithms that do not use an external hash (e.g., ML-DSA).
+            </summary>
+        </member>
         <member name="M:Microsoft.IdentityModel.Tokens.SupportedAlgorithms.GetDigestFromSignatureAlgorithm(System.String)">
             <summary>
             Creating a Signature requires the use of a <see cref="T:System.Security.Cryptography.HashAlgorithm"/>.
@@ -7591,8 +7758,8 @@
             <summary>
             Returns a new instance of <see cref="T:Microsoft.IdentityModel.Tokens.TokenValidationParameters"/> with values copied from this object.
             </summary>
-            <returns>A new <see cref="T:Microsoft.IdentityModel.Tokens.TokenValidationParameters"/> object copied from this object</returns>
-            <remarks>This is a shallow Clone.</remarks>
+            <returns>A new <see cref="T:Microsoft.IdentityModel.Tokens.TokenValidationParameters"/> object copied from this object.</returns>
+            <remarks>This clone creates new instances for collection/dictionary properties but does not deep-clone referenced objects (for example, <see cref="T:Microsoft.IdentityModel.Tokens.SecurityKey"/> instances) or delegates.</remarks>
         </member>
         <member name="M:Microsoft.IdentityModel.Tokens.TokenValidationParameters.CreateClaimsIdentity(Microsoft.IdentityModel.Tokens.SecurityToken,System.String)">
             <summary>
@@ -7623,6 +7790,12 @@
             <summary>
             Gets or sets a boolean that controls if a '/' is significant at the end of the audience.
             The default is <c>true</c>.
+            </summary>
+        </member>
+        <member name="P:Microsoft.IdentityModel.Tokens.TokenValidationParameters.IgnoreCaseWhenValidatingAudience">
+            <summary>
+            Gets or sets a boolean that controls if case is ignored when validating the audience.
+            The default is <c>false</c>, meaning audience comparison is case-sensitive (ordinal).
             </summary>
         </member>
         <member name="P:Microsoft.IdentityModel.Tokens.TokenValidationParameters.IncludeTokenOnFailedValidation">
@@ -8376,6 +8549,18 @@
             Gets the public key from the <see cref="T:Microsoft.IdentityModel.Tokens.X509SecurityKey"/>.
             </summary>
         </member>
+        <member name="P:Microsoft.IdentityModel.Tokens.X509SecurityKey.MlDsaPrivateKey">
+            <summary>
+            Gets the ML-DSA private key from the certificate, or null if the certificate
+            does not contain an ML-DSA key or does not have a private key.
+            </summary>
+        </member>
+        <member name="P:Microsoft.IdentityModel.Tokens.X509SecurityKey.MlDsaPublicKey">
+            <summary>
+            Gets the ML-DSA public key from the certificate, or null if the certificate
+            does not contain an ML-DSA key or the platform does not support ML-DSA.
+            </summary>
+        </member>
         <member name="P:Microsoft.IdentityModel.Tokens.X509SecurityKey.HasPrivateKey">
             <summary>
             Gets a bool indicating if a private key exists.
@@ -8469,6 +8654,13 @@
             <para>When set to null or empty, all issuers will be reported as "other".</para>
             <para>Example: new[] { "login.microsoftonline.com", "accounts.google.com" }</para>
             </remarks>
+        </member>
+        <member name="M:Microsoft.IdentityModel.Telemetry.CryptoTelemetry.GetKnownAlgorithmFamilyOrOther(System.String)">
+            <summary>
+            Maps a raw algorithm string to a known algorithm family or "other" to prevent cardinality explosion.
+            </summary>
+            <param name="algorithm">The raw algorithm identifier (e.g., RS256, ES512, hmac-sha256).</param>
+            <returns>A bounded algorithm family string: RSA, RSA-PSS, ECDSA, HMAC, none, or other.</returns>
         </member>
         <member name="M:Microsoft.IdentityModel.Telemetry.CryptoTelemetry.GetTrackedIssuerOrOther(System.String)">
             <summary>
@@ -8618,6 +8810,12 @@
             This is used when the configuration source cannot be determined upfront, such in cases where LKG calls or
             request refresh calls on background thread are counted. Configuration source is irrelevant in these cases.
             </remarks>
+        </member>
+        <member name="T:Microsoft.IdentityModel.Telemetry.TelemetryConstants.AlgorithmFamilies">
+            <summary>
+            Algorithm family constants for telemetry. Raw algorithm strings are mapped to these
+            bounded values to prevent cardinality explosion in metric dimensions.
+            </summary>
         </member>
         <member name="T:Microsoft.IdentityModel.Telemetry.TelemetryConstants.SignatureValidationErrors">
             <summary>

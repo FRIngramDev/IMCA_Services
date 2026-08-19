@@ -435,6 +435,11 @@
             Public cloud location for Malaysia West.
             </summary>
         </member>
+        <member name="P:Azure.Core.AzureLocation.DenmarkEast">
+            <summary>
+            Public cloud location for Denmark East.
+            </summary>
+        </member>
         <member name="M:Azure.Core.AzureLocation.#ctor(System.String)">
             <summary> Initializes a new instance of Location. </summary>
             <param name="location"> The location name or the display name. </param>
@@ -2779,6 +2784,11 @@
             A policy that sends an <see cref="T:Azure.Core.AccessToken" /> provided by a <see cref="T:Azure.Core.TokenCredential" /> as an <see cref="P:Azure.Core.HttpHeader.Names.Authorization" /> header.
             </summary>
         </member>
+        <member name="E:Azure.Core.Pipeline.BearerTokenAuthenticationPolicy.TransportOptionsChanged">
+            <summary>
+            Event that is triggered when the transport needs to be updated.
+            </summary>
+        </member>
         <member name="M:Azure.Core.Pipeline.BearerTokenAuthenticationPolicy.#ctor(Azure.Core.TokenCredential,System.String)">
             <summary>
             Creates a new instance of <see cref="T:Azure.Core.Pipeline.BearerTokenAuthenticationPolicy" /> using provided token credential and scope to authenticate for.
@@ -2786,12 +2796,29 @@
             <param name="credential">The token credential to use for authentication.</param>
             <param name="scope">The scope to be included in acquired tokens.</param>
         </member>
+        <member name="M:Azure.Core.Pipeline.BearerTokenAuthenticationPolicy.#ctor(Azure.Core.TokenCredential,System.String,Azure.Core.Pipeline.HttpPipelineTransportOptions)">
+            <summary>
+            Creates a new instance of <see cref="T:Azure.Core.Pipeline.BearerTokenAuthenticationPolicy" /> using provided token credential and scope to authenticate for.
+            </summary>
+            <param name="credential">The token credential to use for authentication.</param>
+            <param name="scope">The scope to be included in acquired tokens.</param>
+            <param name="transportOptions">The <see cref="T:Azure.Core.Pipeline.HttpPipelineTransportOptions" /> to use as a base when updating transport options. If provided, a clone of this instance will be used when updating the transport with new client certificates.</param>
+        </member>
         <member name="M:Azure.Core.Pipeline.BearerTokenAuthenticationPolicy.#ctor(Azure.Core.TokenCredential,System.Collections.Generic.IEnumerable{System.String})">
             <summary>
             Creates a new instance of <see cref="T:Azure.Core.Pipeline.BearerTokenAuthenticationPolicy" /> using provided token credential and scopes to authenticate for.
             </summary>
             <param name="credential">The token credential to use for authentication.</param>
             <param name="scopes">Scopes to be included in acquired tokens.</param>
+            <exception cref="T:System.ArgumentNullException">When <paramref name="credential" /> or <paramref name="scopes" /> is null.</exception>
+        </member>
+        <member name="M:Azure.Core.Pipeline.BearerTokenAuthenticationPolicy.#ctor(Azure.Core.TokenCredential,System.Collections.Generic.IEnumerable{System.String},Azure.Core.Pipeline.HttpPipelineTransportOptions)">
+            <summary>
+            Creates a new instance of <see cref="T:Azure.Core.Pipeline.BearerTokenAuthenticationPolicy" /> using provided token credential and scopes to authenticate for.
+            </summary>
+            <param name="credential">The token credential to use for authentication.</param>
+            <param name="scopes">Scopes to be included in acquired tokens.</param>
+            <param name="transportOptions">The <see cref="T:Azure.Core.Pipeline.HttpPipelineTransportOptions" /> to use as a base when updating transport options. If provided, a clone of this instance will be used when updating the transport with new client certificates.</param>
             <exception cref="T:System.ArgumentNullException">When <paramref name="credential" /> or <paramref name="scopes" /> is null.</exception>
         </member>
         <member name="M:Azure.Core.Pipeline.BearerTokenAuthenticationPolicy.ProcessAsync(Azure.Core.HttpMessage,System.ReadOnlyMemory{Azure.Core.Pipeline.HttpPipelinePolicy})">
@@ -2859,6 +2886,13 @@
             </summary>
             <param name="message">The <see cref="T:Azure.Core.HttpMessage" /> with the <see cref="T:Azure.Core.Request" /> to be authorized.</param>
             <param name="context">The <see cref="T:Azure.Core.TokenRequestContext" /> used to authorize the <see cref="T:Azure.Core.Request" />.</param>
+        </member>
+        <member name="M:Azure.Core.Pipeline.BearerTokenAuthenticationPolicy.OnTransportOptionsChanged(Azure.Core.Pipeline.HttpPipelineTransportOptions)">
+            <summary>
+            Triggers the <see cref="E:Azure.Core.Pipeline.BearerTokenAuthenticationPolicy.TransportOptionsChanged" /> event to update the transport with new options.
+            This can be used to trigger transport updates when token refreshes happen in the background and new tokens have different requirements for the transport, such as a different client certificate.
+            </summary>
+            <param name="options">The updated <see cref="T:Azure.Core.Pipeline.HttpPipelineTransportOptions" /> to apply to the transport, typically containing new client certificates for mTLS token binding.</param>
         </member>
         <member name="T:Azure.Core.Pipeline.DisposableHttpPipeline">
             <summary>
@@ -3429,7 +3463,7 @@
         </member>
         <member name="T:Azure.Core.Pipeline.RetryPolicy">
             <summary>
-            Represents a policy that can be overriden to customize whether or not a request will be retried and how long to wait before retrying.
+            Represents a policy that can be overridden to customize whether or not a request will be retried and how long to wait before retrying.
             </summary>
         </member>
         <member name="M:Azure.Core.Pipeline.RetryPolicy.#ctor(System.Int32,Azure.Core.DelayStrategy)">
@@ -3441,7 +3475,7 @@
         </member>
         <member name="M:Azure.Core.Pipeline.RetryPolicy.ProcessAsync(Azure.Core.HttpMessage,System.ReadOnlyMemory{Azure.Core.Pipeline.HttpPipelinePolicy})">
             <summary>
-            This method can be overriden to take full control over the retry policy. If this is overriden and the base method isn't called,
+            This method can be overridden to take full control over the retry policy. If this is overridden and the base method isn't called,
             it is the implementer's responsibility to populate the <see cref="P:Azure.Core.HttpMessage.ProcessingContext" /> property.
             This method will only be called for async methods.
             </summary>
@@ -3451,7 +3485,7 @@
         </member>
         <member name="M:Azure.Core.Pipeline.RetryPolicy.Process(Azure.Core.HttpMessage,System.ReadOnlyMemory{Azure.Core.Pipeline.HttpPipelinePolicy})">
             <summary>
-            This method can be overriden to take full control over the retry policy. If this is overriden and the base method isn't called,
+            This method can be overridden to take full control over the retry policy. If this is overridden and the base method isn't called,
             it is the implementer's responsibility to populate the <see cref="P:Azure.Core.HttpMessage.ProcessingContext" /> property.
             This method will only be called for sync methods.
             </summary>
@@ -3460,7 +3494,7 @@
         </member>
         <member name="M:Azure.Core.Pipeline.RetryPolicy.ShouldRetry(Azure.Core.HttpMessage,System.Exception)">
             <summary>
-            This method can be overriden to control whether a request should be retried. It will be called for any response where
+            This method can be overridden to control whether a request should be retried. It will be called for any response where
             <see cref="P:Azure.Response.IsError" /> is true, or if an exception is thrown from any subsequent pipeline policies or the transport.
             This method will only be called for sync methods.
             </summary>
@@ -3470,7 +3504,7 @@
         </member>
         <member name="M:Azure.Core.Pipeline.RetryPolicy.ShouldRetryAsync(Azure.Core.HttpMessage,System.Exception)">
             <summary>
-            This method can be overriden to control whether a request should be retried.  It will be called for any response where
+            This method can be overridden to control whether a request should be retried.  It will be called for any response where
             <see cref="P:Azure.Response.IsError" /> is true, or if an exception is thrown from any subsequent pipeline policies or the transport.
             This method will only be called for async methods.
             </summary>
@@ -3480,7 +3514,7 @@
         </member>
         <member name="M:Azure.Core.Pipeline.RetryPolicy.GetNextDelay(Azure.Core.HttpMessage,System.Nullable{System.TimeSpan})">
             <summary>
-            This method can be overriden to control how long to delay before retrying. This method will only be called for sync methods.
+            This method can be overridden to control how long to delay before retrying. This method will only be called for sync methods.
             </summary>
             <param name="message">The message containing the request and response.</param>
             <param name="retryAfter">The Retry-After header value, if any, returned from the service.</param>
@@ -3488,7 +3522,7 @@
         </member>
         <member name="M:Azure.Core.Pipeline.RetryPolicy.GetNextDelayAsync(Azure.Core.HttpMessage,System.Nullable{System.TimeSpan})">
             <summary>
-            This method can be overriden to control how long to delay before retrying. This method will only be called for async methods.
+            This method can be overridden to control how long to delay before retrying. This method will only be called for async methods.
             </summary>
             <param name="message">The message containing the request and response.</param>
             <param name="retryAfter">The Retry-After header value, if any, returned from the service.</param>
@@ -3503,7 +3537,7 @@
         </member>
         <member name="M:Azure.Core.Pipeline.RetryPolicy.OnSendingRequestAsync(Azure.Core.HttpMessage)">
             <summary>
-            This method can be overriden to introduce logic that runs before the request is sent. This will run even for the first attempt.
+            This method can be overridden to introduce logic that runs before the request is sent. This will run even for the first attempt.
             This method will only be called for async methods.
             </summary>
             <param name="message">The message containing the request and response.</param>
@@ -4065,6 +4099,13 @@
             </summary>
             <param name="content">The <see cref="T:Azure.Core.Serialization.DynamicData" /> to use.</param>
             <returns>An instance of <see cref="T:Azure.Core.RequestContent" /> that wraps a <see cref="T:Azure.Core.Serialization.DynamicData" />.</returns>
+        </member>
+        <member name="M:Azure.Core.RequestContent.Create(System.ClientModel.BinaryContent)">
+            <summary>
+            Creates an instance of <see cref="T:Azure.Core.RequestContent" /> that wraps a <see cref="T:System.ClientModel.BinaryContent" />.
+            </summary>
+            <param name="content">The <see cref="T:System.ClientModel.BinaryContent" /> to use.</param>
+            <returns>An instance of <see cref="T:Azure.Core.RequestContent" /> that wraps a <see cref="T:System.ClientModel.BinaryContent" />.</returns>
         </member>
         <member name="M:Azure.Core.RequestContent.Create(System.Object)">
             <summary>
@@ -7089,6 +7130,11 @@
             The host of the Microsoft Entra authority for tenants in the Azure Public Cloud.
             </summary>
         </member>
+        <member name="P:Azure.Identity.AzureAuthorityHosts.AzureBleuCloud">
+            <summary>
+            The host of the Microsoft Entra authority for tenants in Bleu Cloud, the national partner cloud for France.
+            </summary>
+        </member>
         <member name="P:Azure.Identity.AzureAuthorityHosts.AzureChina">
             <summary>
             The host of the Microsoft Entra authority for tenants in the Azure China Cloud.
@@ -7103,6 +7149,51 @@
             <summary>
             The host of the Microsoft Entra authority for tenants in the Azure US Government Cloud.
             </summary>
+        </member>
+        <member name="T:Azure.Identity.AzureCredentialResolver">
+            <summary>
+            A <see cref="T:System.ClientModel.Primitives.CredentialResolver" /> that produces Azure credentials
+            (<see cref="T:Azure.Core.TokenCredential" /> instances) from an
+            <see cref="T:Microsoft.Extensions.Configuration.IConfigurationSection" />. It dispatches on the
+            <c>CredentialSource</c> value of the supplied section and recognizes the
+            full set of Azure token-based credential sources (e.g.
+            <c>AzureCliCredential</c>, <c>ManagedIdentityCredential</c>,
+            <c>EnvironmentCredential</c>, <c>WorkloadIdentityCredential</c>,
+            <c>ChainedTokenCredential</c>, etc.). API-key sections
+            (<c>CredentialSource: ApiKeyCredential</c>) are intentionally NOT
+            claimed by this resolver — consuming clients that accept an API key are
+            expected to dispatch on <c>Credential.CredentialSource</c> themselves
+            at construction time and read <c>Credential.Key</c> directly.
+            </summary>
+            <remarks>
+            Register this resolver explicitly via <see cref="M:Azure.Identity.ConfigurationExtensions.AddAzureCredentialResolver(Microsoft.Extensions.DependencyInjection.IServiceCollection)" />
+            (or its host-builder overload), or rely on
+            <see cref="M:Azure.Identity.ConfigurationExtensions.GetAzureCredentialSettings(Microsoft.Extensions.Configuration.IConfiguration,System.String)" />
+            and friends, which transparently append a built-in instance to the
+            resolver chain. The class has a public parameterless constructor so it
+            can be used with <c>AddCredentialResolver&lt;AzureCredentialResolver&gt;()</c>.
+            </remarks>
+        </member>
+        <member name="P:Azure.Identity.AzureCredentialResolver.Instance">
+            <summary>
+            A shared singleton used by built-in helpers (e.g.
+            <see cref="M:Azure.Identity.ConfigurationExtensions.GetAzureCredentialSettings(Microsoft.Extensions.Configuration.IConfiguration,System.String)" />).
+            </summary>
+        </member>
+        <member name="M:Azure.Identity.AzureCredentialResolver.#ctor">
+            <summary>
+            Initializes a new instance of <see cref="T:Azure.Identity.AzureCredentialResolver" />.
+            </summary>
+        </member>
+        <member name="M:Azure.Identity.AzureCredentialResolver.TryResolve(Microsoft.Extensions.Configuration.IConfigurationSection,System.ClientModel.AuthenticationTokenProvider@)">
+            <summary>
+            Attempts to construct an <see cref="T:System.ClientModel.AuthenticationTokenProvider" /> for
+            the supplied credential configuration section.
+            </summary><param name="credentialSection">The credential configuration section
+            (post-overlay if any overrides were applied by the caller).</param><param name="provider">When this method returns <see langword="true" />,
+            contains the constructed provider; otherwise <see langword="null" />.</param><returns><see langword="true" /> if this resolver recognized and handled
+            the section; <see langword="false" /> to defer to the next resolver in the
+            chain.</returns>
         </member>
         <member name="T:Azure.Identity.ChainedTokenCredentialFactory">
             <summary>
@@ -7149,6 +7240,103 @@
             <param name="configuration">The <see cref="T:Microsoft.Extensions.Configuration.IConfiguration" /> to bind the properties of <typeparamref name="T" /> from.</param>
             <param name="sectionName">The section of <see cref="T:Microsoft.Extensions.Configuration.IConfiguration" /> to bind from.</param>
         </member>
+        <member name="M:Azure.Identity.ConfigurationExtensions.GetAzureClientSettings``1(Microsoft.Extensions.Configuration.IConfiguration,System.String,System.ClientModel.Primitives.CredentialResolver[])">
+            <summary>
+            Creates an instance of <typeparamref name="T" /> and sets its properties from the specified <see cref="T:Microsoft.Extensions.Configuration.IConfiguration" />.
+            The bound settings' <see cref="P:System.ClientModel.Primitives.CredentialSettings.TokenProvider" /> is resolved via the supplied
+            <see cref="T:System.ClientModel.Primitives.CredentialResolver" /> chain together with a built-in <see cref="T:Azure.Identity.AzureCredentialResolver" />
+            appended to the end of the chain (so caller-supplied resolvers take precedence).
+            </summary>
+            <typeparam name="T">The type of <see cref="T:System.ClientModel.Primitives.ClientSettings" /> to create.</typeparam>
+            <param name="configuration">The <see cref="T:Microsoft.Extensions.Configuration.IConfiguration" /> to bind the properties of <typeparamref name="T" /> from.</param>
+            <param name="sectionName">The section of <see cref="T:Microsoft.Extensions.Configuration.IConfiguration" /> to bind from.</param>
+            <param name="resolvers">Caller-supplied resolvers, evaluated in order before the built-in
+            <see cref="T:Azure.Identity.AzureCredentialResolver" /> is consulted.</param>
+        </member>
+        <member name="M:Azure.Identity.ConfigurationExtensions.GetAzureClientSettings``1(Microsoft.Extensions.Configuration.IConfiguration,System.String,System.Collections.Generic.IEnumerable{System.ClientModel.Primitives.CredentialResolver},System.Action{Microsoft.Extensions.Configuration.IConfigurationSection})">
+            <summary>
+            Creates an instance of <typeparamref name="T" /> from the named configuration section,
+            applying <paramref name="configureOverrides" /> to the credential section before resolution.
+            The bound settings' <see cref="P:System.ClientModel.Primitives.CredentialSettings.TokenProvider" /> is resolved via the supplied
+            <see cref="T:System.ClientModel.Primitives.CredentialResolver" /> chain together with a built-in <see cref="T:Azure.Identity.AzureCredentialResolver" />
+            appended to the end of the chain (so caller-supplied resolvers take precedence).
+            </summary>
+            <typeparam name="T">The type of <see cref="T:System.ClientModel.Primitives.ClientSettings" /> to create.</typeparam>
+            <param name="configuration">The <see cref="T:Microsoft.Extensions.Configuration.IConfiguration" /> to bind the properties of <typeparamref name="T" /> from.</param>
+            <param name="sectionName">The section of <see cref="T:Microsoft.Extensions.Configuration.IConfiguration" /> to bind from.</param>
+            <param name="resolvers">Caller-supplied resolvers, evaluated in order before the built-in
+            <see cref="T:Azure.Identity.AzureCredentialResolver" /> is consulted.</param>
+            <param name="configureOverrides">Callback invoked against a writable overlay of the
+            credential section, allowing properties to be added or overridden before resolution.
+            The Azure OpenAI default-scope quirk is applied first when applicable, so callers may
+            override it if needed.</param>
+        </member>
+        <member name="M:Azure.Identity.ConfigurationExtensions.GetAzureCredentialSettings(Microsoft.Extensions.Configuration.IConfiguration,System.String)">
+            <summary>
+            Returns the <see cref="T:System.ClientModel.Primitives.CredentialSettings" /> bound from the named credential
+            section, with <see cref="P:System.ClientModel.Primitives.CredentialSettings.TokenProvider" /> populated by the
+            built-in <see cref="T:Azure.Identity.AzureCredentialResolver" /> when it claims the section.
+            </summary>
+            <remarks>
+            For token-credential sections the returned settings' <see cref="P:System.ClientModel.Primitives.CredentialSettings.TokenProvider" />
+            is a <see cref="T:Azure.Core.TokenCredential" />. For inline ApiKey sections <see cref="P:System.ClientModel.Primitives.CredentialSettings.Key" />
+            is populated and <see cref="P:System.ClientModel.Primitives.CredentialSettings.TokenProvider" /> is <see langword="null" />,
+            letting callers dispatch on either shape without binding a <see cref="T:System.ClientModel.Primitives.ClientSettings" />.
+            Returns <see langword="null" /> only when the named section does not exist. Never throws.
+            </remarks>
+            <param name="configuration">The configuration to resolve from.</param>
+            <param name="sectionName">The credential section name (treated as the credential
+            section itself, not a parent client section).</param>
+        </member>
+        <member name="M:Azure.Identity.ConfigurationExtensions.GetAzureCredentialSettings(Microsoft.Extensions.Configuration.IConfiguration,System.String,System.ClientModel.Primitives.CredentialResolver[])">
+            <summary>
+            Returns the <see cref="T:System.ClientModel.Primitives.CredentialSettings" /> bound from the named credential section.
+            Caller-supplied <paramref name="resolvers" /> are evaluated in order; the built-in
+            <see cref="T:Azure.Identity.AzureCredentialResolver" /> is appended to the chain as a fallback. The
+            first resolver to claim the section populates <see cref="P:System.ClientModel.Primitives.CredentialSettings.TokenProvider" />.
+            </summary>
+            <remarks>
+            When no resolver claims the section (for example, an inline ApiKey section, where the
+            Azure resolver intentionally defers), the returned settings still expose the bound
+            <see cref="P:System.ClientModel.Primitives.CredentialSettings.Key" />, <see cref="P:System.ClientModel.Primitives.CredentialSettings.CredentialSource" />,
+            and <see cref="P:System.ClientModel.Primitives.CredentialSettings.AdditionalProperties" />. Returns <see langword="null" />
+            only when the named section does not exist. Never throws.
+            </remarks>
+            <param name="configuration">The configuration to resolve from.</param>
+            <param name="sectionName">The credential section name.</param>
+            <param name="resolvers">Caller-supplied resolvers evaluated before the built-in resolver.</param>
+        </member>
+        <member name="M:Azure.Identity.ConfigurationExtensions.GetAzureCredentialSettings(Microsoft.Extensions.Configuration.IConfiguration,System.String,System.Collections.Generic.IEnumerable{System.ClientModel.Primitives.CredentialResolver},System.Action{Microsoft.Extensions.Configuration.IConfigurationSection})">
+            <summary>
+            Returns the <see cref="T:System.ClientModel.Primitives.CredentialSettings" /> bound from the named credential section,
+            applying <paramref name="configureOverrides" /> to the credential section before resolving.
+            Caller-supplied <paramref name="resolvers" /> are evaluated in order; the built-in
+            <see cref="T:Azure.Identity.AzureCredentialResolver" /> is appended to the chain as a fallback.
+            </summary>
+            <remarks>
+            The returned settings reflect the post-overlay merged view for
+            <see cref="P:System.ClientModel.Primitives.CredentialSettings.Key" />, <see cref="P:System.ClientModel.Primitives.CredentialSettings.CredentialSource" />,
+            <see cref="P:System.ClientModel.Primitives.CredentialSettings.AdditionalProperties" />, and the
+            <see cref="P:System.ClientModel.Primitives.CredentialSettings.Item(System.String)" /> indexer. Returns <see langword="null" />
+            only when the named section does not exist. Never throws.
+            </remarks>
+        </member>
+        <member name="M:Azure.Identity.ConfigurationExtensions.AddAzureCredentialResolver(Microsoft.Extensions.DependencyInjection.IServiceCollection)">
+            <summary>
+            Registers <see cref="T:Azure.Identity.AzureCredentialResolver" /> in the service collection.
+            Idempotent — repeated calls do not produce duplicate registrations.
+            </summary>
+            <param name="services">The service collection to register on.</param>
+            <exception cref="T:System.ArgumentNullException">Thrown when <paramref name="services" /> is null.</exception>
+        </member>
+        <member name="M:Azure.Identity.ConfigurationExtensions.AddAzureCredentialResolver(Microsoft.Extensions.Hosting.IHostApplicationBuilder)">
+            <summary>
+            Registers <see cref="T:Azure.Identity.AzureCredentialResolver" /> on the host's service collection.
+            Idempotent — repeated calls do not produce duplicate registrations.
+            </summary>
+            <param name="builder">The host builder to register on.</param>
+            <exception cref="T:System.ArgumentNullException">Thrown when <paramref name="builder" /> is null.</exception>
+        </member>
         <member name="M:Azure.Identity.ConfigurationExtensions.AddAzureClient``2(Microsoft.Extensions.Hosting.IHostApplicationBuilder,System.String)">
             <summary>
             Adds a singleton Azure client of the specified type to the <see cref="T:Microsoft.Extensions.Hosting.IHostApplicationBuilder" />'s service collection.
@@ -7188,20 +7376,6 @@
             <param name="key">The unique key to register as.</param>
             <param name="sectionName">The section of <see cref="T:Microsoft.Extensions.Configuration.IConfiguration" /> to use.</param>
             <param name="configureSettings">Factory method to modify the <typeparamref name="TSettings" /> after they are created.</param>
-        </member>
-        <member name="M:Azure.Identity.ConfigurationExtensions.WithAzureCredential``1(``0)">
-            <summary>
-            Sets the <see cref="P:System.ClientModel.Primitives.ClientSettings.CredentialProvider" /> to an instance of <see cref="T:Azure.Core.TokenCredential" />.
-            </summary>
-            <typeparam name="T">The type of <see cref="T:System.ClientModel.Primitives.ClientSettings" />.</typeparam>
-            <param name="settings">The <see cref="T:System.ClientModel.Primitives.ClientSettings" /> instance.</param>
-        </member>
-        <member name="M:Azure.Identity.ConfigurationExtensions.WithAzureCredential(System.ClientModel.Primitives.IClientBuilder)">
-            <summary>
-            Registers a credential factory to return a <see cref="T:Azure.Core.TokenCredential" /> to use for the current <see cref="T:System.ClientModel.Primitives.IClientBuilder" />.
-            If the same credential configuration has already been registered, the existing credential instance is reused.
-            </summary>
-            <param name="clientBuilder">The <see cref="T:System.ClientModel.Primitives.IClientBuilder" /> to add the credential to.</param>
         </member>
         <member name="T:Azure.Identity.AuthorizationCodeCredential">
             <summary>
@@ -7296,6 +7470,12 @@
             As a result, it is crucial to ensure that the configured authority host is valid and trustworthy."
             </summary>
         </member>
+        <member name="P:Azure.Identity.AuthorizationCodeCredentialOptions.TokenRequestCallback">
+            <summary>
+            Gets or sets an optional callback that is invoked before each token request is sent to the identity provider.
+            This callback can be used to customize the token request.
+            </summary>
+        </member>
         <member name="T:Azure.Identity.AzureCliCredential">
             <summary>
             Enables authentication to Microsoft Entra ID using Azure CLI to obtain an access token.
@@ -7356,6 +7536,12 @@
             <summary>
             The subscription name or Id to use for authentication. This equates to the --subscription parameter in the Azure CLI.
             </summary>
+            <remarks>
+            The Azure CLI does not allow the <c>--subscription</c> and <c>--tenant</c> arguments to be specified together.
+            When a tenant is requested for a token — for example, one surfaced by challenge-based authentication — that tenant
+            is authoritative for the issued token and takes precedence, so this <see cref="P:Azure.Identity.AzureCliCredentialOptions.Subscription" /> value is not passed
+            to the CLI for that request. It is used only when no tenant is requested.
+            </remarks>
         </member>
         <member name="T:Azure.Identity.AzureDeveloperCliCredential">
             <summary>
@@ -7703,6 +7889,12 @@
             Specifies the <see cref="P:Azure.Identity.ISupportsTokenCachePersistenceOptions.TokenCachePersistenceOptions" /> to be used by the credential. If no options are specified, the token cache will not be persisted to disk.
             </summary>
         </member>
+        <member name="P:Azure.Identity.ClientAssertionCredentialOptions.TokenRequestCallback">
+            <summary>
+            Gets or sets an optional callback that is invoked before each token request is sent to the identity provider.
+            This callback can be used to customize the token request.
+            </summary>
+        </member>
         <member name="T:Azure.Identity.ClientCertificateCredential">
             <summary>
             Enables authentication of a service principal to Microsoft Entra ID using a X509 certificate that is assigned to its App Registration. More information
@@ -7852,6 +8044,12 @@
             As a result, it is crucial to ensure that the configured authority host is valid and trustworthy."
             </summary>
         </member>
+        <member name="P:Azure.Identity.ClientCertificateCredentialOptions.TokenRequestCallback">
+            <summary>
+            Gets or sets an optional callback that is invoked before each token request is sent to the identity provider.
+            This callback can be used to customize the token request.
+            </summary>
+        </member>
         <member name="T:Azure.Identity.ClientSecretCredential">
             <summary>
             Enables authentication to Microsoft Entra ID using a client secret that was generated for an App Registration. More information on how
@@ -7952,6 +8150,12 @@
             The process of instance discovery entails retrieving authority metadata from https://login.microsoft.com/ to validate the authority.
             By setting this to <c>true</c>, the validation of the authority is disabled.
             As a result, it is crucial to ensure that the configured authority host is valid and trustworthy."
+            </summary>
+        </member>
+        <member name="P:Azure.Identity.ClientSecretCredentialOptions.TokenRequestCallback">
+            <summary>
+            Gets or sets an optional callback that is invoked before each token request is sent to the identity provider.
+            This callback can be used to customize the token request.
             </summary>
         </member>
         <member name="M:Azure.Identity.CredentialOptionsMapper.GetBrokerOptions(System.Boolean@,Azure.Identity.TokenCredentialOptions,Azure.Identity.IFileSystemService)">
@@ -8508,6 +8712,12 @@
             As a result, it is crucial to ensure that the configured authority host is valid and trustworthy."
             </summary>
         </member>
+        <member name="P:Azure.Identity.DeviceCodeCredentialOptions.TokenRequestCallback">
+            <summary>
+            Gets or sets an optional callback that is invoked before each token request is sent to the identity provider.
+            This callback can be used to customize the token request.
+            </summary>
+        </member>
         <member name="T:Azure.Identity.EnvironmentCredential">
              <summary>
              Enables authentication to Microsoft Entra ID using a client secret or certificate.
@@ -8539,16 +8749,9 @@
              <item><term>AZURE_CLIENT_SEND_CERTIFICATE_CHAIN</term><description>(Optional) Specifies whether an authentication request will include an x5c header to support subject name / issuer based authentication. When set to `true` or `1`, authentication requests include the x5c header.</description></item>
              </list>
             
-             <b>Username and password:</b>
-             <list type="table">
-             <listheader><term>Variable</term><description>Description</description></listheader>
-             <item><term>AZURE_TENANT_ID</term><description>The Microsoft Entra tenant (directory) ID.</description></item>
-             <item><term>AZURE_CLIENT_ID</term><description>The client (application) ID of an App Registration in the tenant.</description></item>
-             </list>
-            
-             This credential ultimately uses a <see cref="T:Azure.Identity.ClientSecretCredential" /> or <see cref="T:Azure.Identity.ClientCertificateCredential" /> to
-             perform the authentication using these details. Please consult the
-             documentation of those classes for more details.
+             This credential uses the configuration above to create a credential for authentication (for example,
+             <see cref="T:Azure.Identity.ClientSecretCredential" /> or <see cref="T:Azure.Identity.ClientCertificateCredential" />). Please consult the documentation of the selected
+             credential for more details.
              </summary>
         </member>
         <member name="M:Azure.Identity.EnvironmentCredential.#ctor">
@@ -8617,22 +8820,22 @@
         </member>
         <member name="P:Azure.Identity.EnvironmentCredentialOptions.ClientId">
             <summary>
-            The client ID (app ID) of the service pricipal the credential will authenticate. This value defaults to the value of the environment variable AZURE_CLIENT_ID.
+            The client ID (app ID) of the service principal the credential will authenticate. This value defaults to the value of the environment variable AZURE_CLIENT_ID.
             </summary>
         </member>
         <member name="P:Azure.Identity.EnvironmentCredentialOptions.ClientSecret">
             <summary>
-            The client secret used to authenticate the service pricipal. This value defaults to the value of the environment variable AZURE_CLIENT_SECRET.
+            The client secret used to authenticate the service principal. This value defaults to the value of the environment variable AZURE_CLIENT_SECRET.
             </summary>
         </member>
         <member name="P:Azure.Identity.EnvironmentCredentialOptions.ClientCertificatePath">
             <summary>
-            The path to the client certificate used to authenticate the service pricipal. This value defaults to the value of the environment variable AZURE_CLIENT_CERTIFICATE_PATH.
+            The path to the client certificate used to authenticate the service principal. This value defaults to the value of the environment variable AZURE_CLIENT_CERTIFICATE_PATH.
             </summary>
         </member>
         <member name="P:Azure.Identity.EnvironmentCredentialOptions.ClientCertificatePassword">
             <summary>
-            The password of the client certificate used to authenticate the service pricipal. This value defaults to the value of the environment variable AZURE_CLIENT_CERTIFICATE_PASSWORD.
+            The password of the client certificate used to authenticate the service principal. This value defaults to the value of the environment variable AZURE_CLIENT_CERTIFICATE_PASSWORD.
             </summary>
         </member>
         <member name="P:Azure.Identity.EnvironmentCredentialOptions.SendCertificateChain">
@@ -8828,6 +9031,12 @@
             As a result, it is crucial to ensure that the configured authority host is valid and trustworthy."
             </summary>
         </member>
+        <member name="P:Azure.Identity.InteractiveBrowserCredentialOptions.TokenRequestCallback">
+            <summary>
+            Gets or sets an optional callback that is invoked before each token request is sent to the identity provider.
+            This callback can be used to customize the token request.
+            </summary>
+        </member>
         <member name="P:Azure.Identity.InteractiveBrowserCredentialOptions.BrowserCustomization">
             <summary>
             The options for customizing the browser for interactive authentication.
@@ -8859,6 +9068,12 @@
         <member name="P:Azure.Identity.ISupportsTokenCachePersistenceOptions.TokenCachePersistenceOptions">
             <summary>
             Specifies the <see cref="P:Azure.Identity.ISupportsTokenCachePersistenceOptions.TokenCachePersistenceOptions" /> to be used by the credential. If no options are specified, the token cache will not be persisted to disk.
+            </summary>
+        </member>
+        <member name="P:Azure.Identity.ISupportsTokenRequestCallback.TokenRequestCallback">
+            <summary>
+            Gets or sets an optional callback that is invoked before each token request is sent to the identity provider.
+            This callback can be used to customize the token request.
             </summary>
         </member>
         <member name="T:Azure.Identity.ManagedIdentityCredential">
@@ -8938,6 +9153,13 @@
             Creates an instance of <see cref="T:Azure.Identity.ManagedIdentityCredentialOptions" />.
             </summary>
             <param name="managedIdentityId">The <see cref="P:Azure.Identity.ManagedIdentityCredentialOptions.ManagedIdentityId" /> specifying which managed identity will be configured. By default, <see cref="P:Azure.Identity.ManagedIdentityId.SystemAssigned" /> will be configured.</param>
+        </member>
+        <member name="P:Azure.Identity.ManagedIdentityCredentialOptions.DisableMtlsProofOfPossession">
+            <summary>
+            Disables mTLS proof-of-possession token acquisition for <see cref="T:Azure.Identity.ManagedIdentityCredential" />.
+            When set to <c>true</c>, the credential requests bearer tokens even if proof-of-possession
+            was requested by the caller and runtime prerequisites for mTLS proof-of-possession are available.
+            </summary>
         </member>
         <member name="P:Azure.Identity.ManagedIdentityCredentialOptions.ManagedIdentityId">
             <summary>
@@ -9037,9 +9259,9 @@
             <exception cref="T:Azure.Identity.AuthenticationFailedException">Thrown when the authentication failed.</exception>
         </member>
         <member name="T:Azure.Identity.OnBehalfOfCredentialOptions">
-             <summary>
-            
-             </summary>
+            <summary>
+            Options used to configure the <see cref="T:Azure.Identity.OnBehalfOfCredential" />.
+            </summary>
         </member>
         <member name="P:Azure.Identity.OnBehalfOfCredentialOptions.TokenCachePersistenceOptions">
             <summary>
@@ -9064,6 +9286,12 @@
             The process of instance discovery entails retrieving authority metadata from https://login.microsoft.com/ to validate the authority.
             By setting this to <c>true</c>, the validation of the authority is disabled.
             As a result, it is crucial to ensure that the configured authority host is valid and trustworthy."
+            </summary>
+        </member>
+        <member name="P:Azure.Identity.OnBehalfOfCredentialOptions.TokenRequestCallback">
+            <summary>
+            Gets or sets an optional callback that is invoked before each token request is sent to the identity provider.
+            This callback can be used to customize the token request.
             </summary>
         </member>
         <member name="T:Azure.Identity.SharedTokenCacheCredential">
@@ -9193,6 +9421,13 @@
             Setting this property to true will not disable redaction of <see cref="T:Azure.Core.Request" /> Content. To enable logging of sensitive <see cref="P:Azure.Core.Request.Content" />
             the <see cref="P:Azure.Core.DiagnosticsOptions.IsLoggingContentEnabled" /> property must be set to <c>true</c>.
             Setting this property to `true` equates to passing 'true' for the enablePiiLogging parameter to the 'WithLogging' method on the MSAL client builder.
+            </summary>
+        </member>
+        <member name="P:Azure.Identity.TokenCredentialOptions.AdditionalQueryParameters">
+            <summary>
+            Gets or sets extra query parameters that will be appended to the authentication request sent to Microsoft Entra ID.
+            Each entry maps a parameter name to its value and a flag that controls whether the parameter is part of the token cache key.
+            This property is only honored by MSAL-backed credentials.
             </summary>
         </member>
         <member name="P:Azure.Identity.TokenCredentialOptions.IsChainedCredential">
@@ -9956,6 +10191,32 @@
             </list>
             </summary>
         </member>
+        <member name="T:Azure.Identity.TokenRequestCallbackContext">
+            <summary>
+            Provides access to customize the token request before it is sent.
+            </summary>
+        </member>
+        <member name="P:Azure.Identity.TokenRequestCallbackContext.BodyParameters">
+            <summary>
+            Gets the body parameters of the token request. Adding or modifying entries in this
+            dictionary will cause them to be included in the token request body sent to the identity provider.
+            </summary>
+        </member>
+        <member name="P:Azure.Identity.TokenRequestCallbackContext.Headers">
+            <summary>
+            Gets the headers of the token request.
+            </summary>
+        </member>
+        <member name="P:Azure.Identity.TokenRequestCallbackContext.RequestUri">
+            <summary>
+            Gets the URI of the token request.
+            </summary>
+        </member>
+        <member name="P:Azure.Identity.TokenRequestCallbackContext.CancellationToken">
+            <summary>
+            Gets the cancellation token for the token request.
+            </summary>
+        </member>
         <member name="T:Azure.Identity.UnsafeTokenCacheOptions">
             <summary>
             Options controlling the storage of the token cache.
@@ -9976,7 +10237,7 @@
         <member name="M:Azure.Identity.UnsafeTokenCacheOptions.RefreshCacheAsync(Azure.Identity.TokenCacheRefreshArgs,System.Threading.CancellationToken)">
             <summary>
             Returns the bytes used to initialize the token cache. This would most likely have come from the <see cref="T:Azure.Identity.TokenCacheUpdatedArgs" />.
-            It is recommended that if this method is overriden, there is no need to provide a duplicate implementation for the parameterless <see cref="M:Azure.Identity.UnsafeTokenCacheOptions.RefreshCacheAsync" />.
+            It is recommended that if this method is overridden, there is no need to provide a duplicate implementation for the parameterless <see cref="M:Azure.Identity.UnsafeTokenCacheOptions.RefreshCacheAsync" />.
             </summary>
             <param name="args">The <see cref="T:Azure.Identity.TokenCacheRefreshArgs" /> containing information about the current state of the cache.</param>
             <param name="cancellationToken">The <see cref="T:System.Threading.CancellationToken" /> controlling the lifetime of this operation.</param>
@@ -10269,7 +10530,7 @@
         </member>
         <member name="P:Azure.Messaging.MessageContent.ContentTypeCore">
             <summary>
-            For inheriting types that have a string ContentType property, this property should be overriden to forward
+            For inheriting types that have a string ContentType property, this property should be overridden to forward
             the <see cref="P:Azure.Messaging.MessageContent.ContentType" /> property into the inheriting type's string property, and vice versa.
             For types that have a <see cref="T:Azure.Core.ContentType" /> ContentType property, it is not necessary to override this member.
             </summary>
@@ -10277,7 +10538,7 @@
         <member name="P:Azure.Messaging.MessageContent.IsReadOnly">
             <summary>
             Gets whether the message is read only or not. This
-            can be overriden by inheriting classes to specify whether or
+            can be overridden by inheriting classes to specify whether or
             not the message can be modified.
             </summary>
         </member>

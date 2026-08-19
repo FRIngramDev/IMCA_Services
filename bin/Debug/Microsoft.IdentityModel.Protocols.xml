@@ -132,6 +132,16 @@
             This property will be set to <see cref="F:System.DateTimeOffset.MinValue"/> for <see cref="F:Microsoft.IdentityModel.Protocols.Configuration.ConfigurationEventHandlerResult`1.NoResult"/>.
             </remarks>
         </member>
+        <member name="T:Microsoft.IdentityModel.Protocols.Configuration.ConfigurationRetrievalContext">
+            <summary>
+            Defines the context for configuration retrieval operations.
+            </summary>
+        </member>
+        <member name="P:Microsoft.IdentityModel.Protocols.Configuration.ConfigurationRetrievalContext.BypassCache">
+            <summary>
+            Gets or sets a value indicating whether to bypass the cache when retrieving configuration.
+            </summary>
+        </member>
         <member name="T:Microsoft.IdentityModel.Protocols.Configuration.IConfigurationEventHandler`1">
             <summary>
             Defines event handlers for configuration retrieval and update operations.
@@ -154,6 +164,32 @@
             </summary>
             <param name="metadataAddress">The metadata endpoint address.</param>
             <param name="configuration">The retrieved configuration.</param>
+            <param name="cancellationToken">A cancellation token to observe while waiting for the task to complete.</param>
+        </member>
+        <member name="T:Microsoft.IdentityModel.Protocols.Configuration.IConfigurationEventHandlerContextAware`1">
+            <summary>
+            Defines event handlers for configuration retrieval and update operations.
+            </summary>
+            <typeparam name="T">The type of configuration.</typeparam>
+        </member>
+        <member name="M:Microsoft.IdentityModel.Protocols.Configuration.IConfigurationEventHandlerContextAware`1.BeforeRetrieveAsync(System.String,Microsoft.IdentityModel.Protocols.Configuration.ConfigurationRetrievalContext,System.Threading.CancellationToken)">
+            <summary>
+            Called before retrieving configuration from the metadata endpoint.
+            </summary>
+            <param name="metadataAddress">The metadata endpoint address.</param>
+            <param name="context">The context for the configuration retrieval operation, providing additional information and control.</param>
+            <param name="cancellationToken">A cancellation token to observe while waiting for the task to complete.</param>
+            <returns>
+            A <see cref="T:Microsoft.IdentityModel.Protocols.Configuration.ConfigurationEventHandlerResult`1"/> if valid and available, or <see cref="F:Microsoft.IdentityModel.Protocols.Configuration.ConfigurationEventHandlerResult`1.NoResult"/> to proceed with normal retrieval.
+            </returns>
+        </member>
+        <member name="M:Microsoft.IdentityModel.Protocols.Configuration.IConfigurationEventHandlerContextAware`1.AfterUpdateAsync(System.String,`0,Microsoft.IdentityModel.Protocols.Configuration.ConfigurationRetrievalContext,System.Threading.CancellationToken)">
+            <summary>
+            Called in a fire-and-forget manner after a configuration has been successfully retrieved.
+            </summary>
+            <param name="metadataAddress">The metadata endpoint address.</param>
+            <param name="configuration">The retrieved configuration.</param>
+            <param name="context">The context for the configuration retrieval operation, providing additional information and control.</param>
             <param name="cancellationToken">A cancellation token to observe while waiting for the task to complete.</param>
         </member>
         <member name="T:Microsoft.IdentityModel.Protocols.Configuration.InvalidConfigurationException">
@@ -314,7 +350,7 @@
             </para>
             </remarks>
         </member>
-        <member name="M:Microsoft.IdentityModel.Protocols.ConfigurationManager`1.UpdateCurrentConfigurationAsync">
+        <member name="M:Microsoft.IdentityModel.Protocols.ConfigurationManager`1.UpdateCurrentConfigurationAsync(System.Boolean)">
             <summary>
             This should be called when the configuration needs to be updated either from RequestRefresh or AutomaticRefresh
             The Caller should first check the state checking state using:
@@ -364,7 +400,7 @@
         </member>
         <member name="F:Microsoft.IdentityModel.Protocols.ConfigurationManager`1._refreshRequested">
             <summary>
-            Only used to track the type of request for telemetry.
+            Used to track the type of request for signaling the event handler and for telemetry.
             </summary>
         </member>
         <member name="T:Microsoft.IdentityModel.Protocols.ConfigurationValidationResult">

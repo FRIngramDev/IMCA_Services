@@ -1,11 +1,11 @@
 {
 	"timer_interval":"15",
 	"logs_folder":"logs",
+	"temp_folder":"temp",
 	"session_name":"SERVICE01",
 	"Number_of_errors_allowed_per_query":"10",
 	"SQL_CONNECTION_STRING":"Data Source=DEFRWSQL1131C01,1433;Initial Catalog=IMCA_BACKOFFICE;Persist Security Info=True;MultipleActiveResultSets=True;Trusted_connection=yes;Connection Timeout=0",
-	"START_TERMINAL_SESSIONS":"FALSE",
-	"EXECUTE_IMCA_ACTION_USING_THREAD":"TRUE",
+	"EXECUTE_IMCA_ACTION_USING_THREAD":"FALSE",
 	"NUMBER_OF_THREAD_MAX":"10"
 
 }

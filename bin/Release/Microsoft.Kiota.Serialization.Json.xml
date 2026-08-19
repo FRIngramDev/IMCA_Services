@@ -200,14 +200,6 @@
             The valid content type for json
             </summary>
         </member>
-        <member name="M:Microsoft.Kiota.Serialization.Json.JsonParseNodeFactory.GetRootParseNode(System.String,System.IO.Stream)">
-            <summary>
-            Gets the root <see cref="T:Microsoft.Kiota.Abstractions.Serialization.IParseNode"/> of the json to be read.
-            </summary>
-            <param name="contentType">The content type of the stream to be parsed</param>
-            <param name="content">The <see cref="T:System.IO.Stream"/> containing json to parse.</param>
-            <returns>An instance of <see cref="T:Microsoft.Kiota.Abstractions.Serialization.IParseNode"/> for json manipulation</returns> 
-        </member>
         <member name="M:Microsoft.Kiota.Serialization.Json.JsonParseNodeFactory.GetRootParseNodeAsync(System.String,System.IO.Stream,System.Threading.CancellationToken)">
             <summary>
             Asynchronously gets the root <see cref="T:Microsoft.Kiota.Abstractions.Serialization.IParseNode"/> of the json to be read.
@@ -475,6 +467,165 @@
             <summary>
             Json serialization context for Kiota.
             </summary>
+        </member>
+        <member name="P:Microsoft.Kiota.Serialization.Json.KiotaJsonSerializationContext.Boolean">
+            <summary>
+            Defines the source generated JSON serialization contract metadata for a given type.
+            </summary>
+        </member>
+        <member name="P:Microsoft.Kiota.Serialization.Json.KiotaJsonSerializationContext.NullableBoolean">
+            <summary>
+            Defines the source generated JSON serialization contract metadata for a given type.
+            </summary>
+        </member>
+        <member name="P:Microsoft.Kiota.Serialization.Json.KiotaJsonSerializationContext.Byte">
+            <summary>
+            Defines the source generated JSON serialization contract metadata for a given type.
+            </summary>
+        </member>
+        <member name="P:Microsoft.Kiota.Serialization.Json.KiotaJsonSerializationContext.NullableByte">
+            <summary>
+            Defines the source generated JSON serialization contract metadata for a given type.
+            </summary>
+        </member>
+        <member name="P:Microsoft.Kiota.Serialization.Json.KiotaJsonSerializationContext.Decimal">
+            <summary>
+            Defines the source generated JSON serialization contract metadata for a given type.
+            </summary>
+        </member>
+        <member name="P:Microsoft.Kiota.Serialization.Json.KiotaJsonSerializationContext.NullableDecimal">
+            <summary>
+            Defines the source generated JSON serialization contract metadata for a given type.
+            </summary>
+        </member>
+        <member name="P:Microsoft.Kiota.Serialization.Json.KiotaJsonSerializationContext.Double">
+            <summary>
+            Defines the source generated JSON serialization contract metadata for a given type.
+            </summary>
+        </member>
+        <member name="P:Microsoft.Kiota.Serialization.Json.KiotaJsonSerializationContext.NullableDouble">
+            <summary>
+            Defines the source generated JSON serialization contract metadata for a given type.
+            </summary>
+        </member>
+        <member name="P:Microsoft.Kiota.Serialization.Json.KiotaJsonSerializationContext.Single">
+            <summary>
+            Defines the source generated JSON serialization contract metadata for a given type.
+            </summary>
+        </member>
+        <member name="P:Microsoft.Kiota.Serialization.Json.KiotaJsonSerializationContext.NullableSingle">
+            <summary>
+            Defines the source generated JSON serialization contract metadata for a given type.
+            </summary>
+        </member>
+        <member name="P:Microsoft.Kiota.Serialization.Json.KiotaJsonSerializationContext.Date">
+            <summary>
+            Defines the source generated JSON serialization contract metadata for a given type.
+            </summary>
+        </member>
+        <member name="P:Microsoft.Kiota.Serialization.Json.KiotaJsonSerializationContext.NullableDate">
+            <summary>
+            Defines the source generated JSON serialization contract metadata for a given type.
+            </summary>
+        </member>
+        <member name="P:Microsoft.Kiota.Serialization.Json.KiotaJsonSerializationContext.Time">
+            <summary>
+            Defines the source generated JSON serialization contract metadata for a given type.
+            </summary>
+        </member>
+        <member name="P:Microsoft.Kiota.Serialization.Json.KiotaJsonSerializationContext.NullableTime">
+            <summary>
+            Defines the source generated JSON serialization contract metadata for a given type.
+            </summary>
+        </member>
+        <member name="P:Microsoft.Kiota.Serialization.Json.KiotaJsonSerializationContext.DateTime">
+            <summary>
+            Defines the source generated JSON serialization contract metadata for a given type.
+            </summary>
+        </member>
+        <member name="P:Microsoft.Kiota.Serialization.Json.KiotaJsonSerializationContext.DateTimeOffset">
+            <summary>
+            Defines the source generated JSON serialization contract metadata for a given type.
+            </summary>
+        </member>
+        <member name="P:Microsoft.Kiota.Serialization.Json.KiotaJsonSerializationContext.NullableDateTimeOffset">
+            <summary>
+            Defines the source generated JSON serialization contract metadata for a given type.
+            </summary>
+        </member>
+        <member name="P:Microsoft.Kiota.Serialization.Json.KiotaJsonSerializationContext.Guid">
+            <summary>
+            Defines the source generated JSON serialization contract metadata for a given type.
+            </summary>
+        </member>
+        <member name="P:Microsoft.Kiota.Serialization.Json.KiotaJsonSerializationContext.NullableGuid">
+            <summary>
+            Defines the source generated JSON serialization contract metadata for a given type.
+            </summary>
+        </member>
+        <member name="P:Microsoft.Kiota.Serialization.Json.KiotaJsonSerializationContext.TimeSpan">
+            <summary>
+            Defines the source generated JSON serialization contract metadata for a given type.
+            </summary>
+        </member>
+        <member name="P:Microsoft.Kiota.Serialization.Json.KiotaJsonSerializationContext.NullableTimeSpan">
+            <summary>
+            Defines the source generated JSON serialization contract metadata for a given type.
+            </summary>
+        </member>
+        <member name="P:Microsoft.Kiota.Serialization.Json.KiotaJsonSerializationContext.Int32">
+            <summary>
+            Defines the source generated JSON serialization contract metadata for a given type.
+            </summary>
+        </member>
+        <member name="P:Microsoft.Kiota.Serialization.Json.KiotaJsonSerializationContext.NullableInt32">
+            <summary>
+            Defines the source generated JSON serialization contract metadata for a given type.
+            </summary>
+        </member>
+        <member name="P:Microsoft.Kiota.Serialization.Json.KiotaJsonSerializationContext.Int64">
+            <summary>
+            Defines the source generated JSON serialization contract metadata for a given type.
+            </summary>
+        </member>
+        <member name="P:Microsoft.Kiota.Serialization.Json.KiotaJsonSerializationContext.NullableInt64">
+            <summary>
+            Defines the source generated JSON serialization contract metadata for a given type.
+            </summary>
+        </member>
+        <member name="P:Microsoft.Kiota.Serialization.Json.KiotaJsonSerializationContext.SByte">
+            <summary>
+            Defines the source generated JSON serialization contract metadata for a given type.
+            </summary>
+        </member>
+        <member name="P:Microsoft.Kiota.Serialization.Json.KiotaJsonSerializationContext.NullableSByte">
+            <summary>
+            Defines the source generated JSON serialization contract metadata for a given type.
+            </summary>
+        </member>
+        <member name="P:Microsoft.Kiota.Serialization.Json.KiotaJsonSerializationContext.String">
+            <summary>
+            Defines the source generated JSON serialization contract metadata for a given type.
+            </summary>
+        </member>
+        <member name="P:Microsoft.Kiota.Serialization.Json.KiotaJsonSerializationContext.Default">
+            <summary>
+            The default <see cref="T:System.Text.Json.Serialization.JsonSerializerContext"/> associated with a default <see cref="T:System.Text.Json.JsonSerializerOptions"/> instance.
+            </summary>
+        </member>
+        <member name="P:Microsoft.Kiota.Serialization.Json.KiotaJsonSerializationContext.GeneratedSerializerOptions">
+            <summary>
+            The source-generated options associated with this context.
+            </summary>
+        </member>
+        <member name="M:Microsoft.Kiota.Serialization.Json.KiotaJsonSerializationContext.#ctor">
+            <inheritdoc/>
+        </member>
+        <member name="M:Microsoft.Kiota.Serialization.Json.KiotaJsonSerializationContext.#ctor(System.Text.Json.JsonSerializerOptions)">
+            <inheritdoc/>
+        </member>
+        <member name="M:Microsoft.Kiota.Serialization.Json.KiotaJsonSerializationContext.GetTypeInfo(System.Type)">
+            <inheritdoc/>
         </member>
         <member name="T:Microsoft.Kiota.Serialization.ParsableJsonExtensions">
             <summary>

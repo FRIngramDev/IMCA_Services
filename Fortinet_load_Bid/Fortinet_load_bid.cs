@@ -1,4 +1,5 @@
-﻿using ClosedXML.Excel;
+﻿using Azure.Identity;
+using ClosedXML.Excel;
 using Microsoft.Exchange.WebServices.Data;
 using Microsoft.Graph;
 using Microsoft.Graph.Models;
@@ -18,6 +19,7 @@ using System.Text.RegularExpressions;
 
 namespace IMCA_Services
 {
+
     public class Fortinet_load_bid
     {
         private string pays = "";
@@ -1480,7 +1482,7 @@ namespace IMCA_Services
             global_session_name = session_name;
 
             // Get the global parameters of the ACTION
-            global_parameters = get_IMCA_paramters(sql_con, "FORTINET_BID_LOAD");
+            global_parameters = get_IMCA_paramters(sql_con, "FORTINET_LOAD_BID");
 
             var param = new JSON_file();
             param = JsonConvert.DeserializeObject<JSON_file>(global_parameters);
@@ -1509,6 +1511,7 @@ namespace IMCA_Services
                 setbuyer_email_cc(p.buyer_email_cc);
                 setsku_creation_template(p.sku_creation_template);
                 setParamAppend_FC_Quote_ID_To_Bid_Number(p.Append_FC_Quote_ID_To_Bid_Number);
+
 
                 if (active.ToUpper() == "TRUE")
                 {

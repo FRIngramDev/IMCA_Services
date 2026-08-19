@@ -4,9 +4,10 @@
         <name>Microsoft.Identity.Client.Extensions.Msal</name>
     </assembly>
     <members>
-        <member name="M:Microsoft.Identity.Client.Extensions.Msal.Accessors.FileWithPermissions.PosixCreate(System.String,System.Int32)">
+        <member name="M:Microsoft.Identity.Client.Extensions.Msal.Accessors.FileWithPermissions.PosixOpen(System.String,System.Int32,System.Int32)">
             <summary>
-            Equivalent to calling open() with flags  O_CREAT|O_WRONLY|O_TRUNC. O_TRUNC will truncate the file. 
+            Calls open(2) with caller-supplied flags and mode. Used instead of creat(2) so that
+            O_NOFOLLOW can be included to atomically reject symlinks at the kernel level.
             See https://man7.org/linux/man-pages/man2/open.2.html
             </summary>
         </member>
@@ -25,6 +26,18 @@
             Based on https://stackoverflow.com/questions/45132081/file-permissions-on-linux-unix-with-net-core and on 
             https://github.com/NuGet/NuGet.Client/commit/d62db666c710bf95121fe8f5c6a6cbe01985456f
             </summary>
+            <remarks>
+            <paramref name="path"/> must not be a symbolic link. Two layers enforce this:
+            <list type="number">
+              <item>The caller (<see cref="M:Microsoft.Identity.Client.Extensions.Msal.FileIOWithRetries.CreateAndWriteToFile(System.String,System.Byte[],System.Boolean,Microsoft.Identity.Client.Extensions.Msal.TraceSourceLogger)"/> with
+              <c>setChmod600: true</c>) runs a pre-check via <c>lstat(2)</c> before entering the
+              retry loop, throwing <see cref="T:System.InvalidOperationException"/> with a clear message for
+              the non-adversarial case.</item>
+              <item><c>open(2)</c> is called with <c>O_NOFOLLOW</c> so the kernel atomically rejects
+              a symlink that appears in the race window between the pre-check and the write,
+              returning <c>ELOOP</c> which is also surfaced as <see cref="T:System.InvalidOperationException"/>.</item>
+            </list>
+            </remarks>
         </member>
         <member name="M:Microsoft.Identity.Client.Extensions.Msal.Accessors.FileWithPermissions.WriteToNewFileWithOwnerRWPermissionsWindows(System.String,System.Byte[])">
             <summary>
@@ -90,6 +103,19 @@
             <remarks>
             Creates the file if it does not exist.
             This operation will enable a <see cref="T:System.IO.FileSystemWatcher"/> to fire.
+            </remarks>
+        </member>
+        <member name="M:Microsoft.Identity.Client.Extensions.Msal.FileIOWithRetries.ThrowIfCacheFileIsSymlink(System.String)">
+            <summary>
+            Throws <see cref="T:System.InvalidOperationException"/> if <paramref name="filePath"/> is a
+            symbolic link. Called on non-Windows platforms before writing or touching the cache
+            file to prevent a symlink from being used as a write-anywhere primitive.
+            </summary>
+            <remarks>
+            Uses <see cref="M:System.IO.File.GetAttributes(System.String)"/> which maps to <c>lstat(2)</c> on Unix and
+            therefore returns <see cref="F:System.IO.FileAttributes.ReparsePoint"/> for the symlink itself
+            rather than following it to the target. If the path does not yet exist the method
+            returns silently — the caller will create the file normally.
             </remarks>
         </member>
         <member name="T:Microsoft.Identity.Client.Extensions.Msal.MsalCacheHelper">

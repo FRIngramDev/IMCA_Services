@@ -93,7 +93,7 @@ namespace Brother_load_Bid
             return GraphService;
         }
 
-        public void Read_Email_with_Graph(string sql_con, string logs, string temp_folder, string session_name)
+        public void Read_Email_with_Graph(string sql_con, string logs, string tmp_folder, string session_name)
         {
             string global_parameters = "";
             string service_path = Path.GetDirectoryName(System.Reflection.Assembly.GetEntryAssembly().Location);
@@ -101,7 +101,7 @@ namespace Brother_load_Bid
 
 
             setlogs_folder(service_path + "\\" + logs);
-            settemp_folder(service_path + "\\" + temp_folder);
+            settemp_folder(service_path + "\\" + tmp_folder);
             global_session_name = session_name;
 
             try

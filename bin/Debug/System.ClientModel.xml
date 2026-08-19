@@ -39,6 +39,77 @@
             Gets the time when the token should be refreshed.
             </summary>
         </member>
+        <member name="T:System.ClientModel.Primitives.CredentialResolver">
+            <summary>
+            Plug-in point for resolving an <see cref="T:System.ClientModel.AuthenticationTokenProvider" /> from
+            an <see cref="T:Microsoft.Extensions.Configuration.IConfigurationSection" /> that describes a credential. Credential
+            libraries derive from this class and ship a typed
+            <c>Add{Brand}CredentialResolver()</c> registration extension.
+            </summary>
+        </member>
+        <member name="M:System.ClientModel.Primitives.CredentialResolver.TryResolve(Microsoft.Extensions.Configuration.IConfigurationSection,System.ClientModel.AuthenticationTokenProvider@)">
+            <summary>
+            Attempts to construct an <see cref="T:System.ClientModel.AuthenticationTokenProvider" /> for
+            the supplied credential configuration section.
+            </summary>
+            <param name="credentialSection">The credential configuration section
+            (post-overlay if any overrides were applied by the caller).</param>
+            <param name="provider">When this method returns <see langword="true" />,
+            contains the constructed provider; otherwise <see langword="null" />.</param>
+            <returns><see langword="true" /> if this resolver recognized and handled
+            the section; <see langword="false" /> to defer to the next resolver in the
+            chain.</returns>
+        </member>
+        <member name="M:System.ClientModel.Primitives.CredentialResolver.TryResolve(Microsoft.Extensions.Configuration.IConfigurationSection,System.Func{Microsoft.Extensions.Configuration.IConfigurationSection,System.ClientModel.AuthenticationTokenProvider},System.ClientModel.AuthenticationTokenProvider@)">
+            <summary>
+            Attempts to construct an <see cref="T:System.ClientModel.AuthenticationTokenProvider" /> for
+            the supplied credential configuration section, with access to a callback
+            that recursively resolves child sections through the same active resolver
+            chain.
+            </summary>
+            <param name="credentialSection">The credential configuration section
+            (post-overlay if any overrides were applied by the caller).</param>
+            <param name="resolveChild">A callback that resolves a child
+            <see cref="T:Microsoft.Extensions.Configuration.IConfigurationSection" /> through the active resolver chain
+            (including caching, normalization, and ordering). Returns the resolved
+            <see cref="T:System.ClientModel.AuthenticationTokenProvider" />, or <see langword="null" /> if
+            no resolver in the chain claims the child section. Always non-null;
+            resolvers that do not need the chain can ignore the callback.
+            Must only be invoked synchronously during this call; capturing the
+            callback and invoking it after <c>TryResolve</c> returns will throw
+            <see cref="T:System.InvalidOperationException" />.</param>
+            <param name="provider">When this method returns <see langword="true" />,
+            contains the constructed provider; otherwise <see langword="null" />.</param>
+            <returns><see langword="true" /> if this resolver recognized and handled
+            the section; <see langword="false" /> to defer to the next resolver in the
+            chain.</returns>
+            <remarks>
+            This overload exists so chain-owning resolvers (e.g., a resolver that
+            builds a <c>ChainedTokenCredential</c> from child <c>Sources[]</c>
+            entries) can recurse back into the active engine for each child entry
+            without re-implementing the engine's caching, normalization, or
+            ordering logic — and without requiring the resolver to know about
+            credential sources owned by other packages. Subclasses override
+            <see cref="M:System.ClientModel.Primitives.CredentialResolver.TryResolveCore(Microsoft.Extensions.Configuration.IConfigurationSection,System.Func{Microsoft.Extensions.Configuration.IConfigurationSection,System.ClientModel.AuthenticationTokenProvider},System.ClientModel.AuthenticationTokenProvider@)" /> to participate; this method wraps
+            <paramref name="resolveChild" /> with a guard that enforces the
+            synchronous-use contract and then forwards to <c>TryResolveCore</c>.
+            </remarks>
+        </member>
+        <member name="M:System.ClientModel.Primitives.CredentialResolver.TryResolveCore(Microsoft.Extensions.Configuration.IConfigurationSection,System.Func{Microsoft.Extensions.Configuration.IConfigurationSection,System.ClientModel.AuthenticationTokenProvider},System.ClientModel.AuthenticationTokenProvider@)">
+            <summary>
+            Override to implement chain-aware resolution. The default implementation
+            ignores <paramref name="resolveChild" /> and forwards to
+            <see cref="M:System.ClientModel.Primitives.CredentialResolver.TryResolve(Microsoft.Extensions.Configuration.IConfigurationSection,System.ClientModel.AuthenticationTokenProvider@)" />.
+            </summary>
+            <param name="credentialSection">The credential configuration section.</param>
+            <param name="resolveChild">The chain callback (already guarded by the
+            public <see cref="M:System.ClientModel.Primitives.CredentialResolver.TryResolve(Microsoft.Extensions.Configuration.IConfigurationSection,System.Func{Microsoft.Extensions.Configuration.IConfigurationSection,System.ClientModel.AuthenticationTokenProvider},System.ClientModel.AuthenticationTokenProvider@)" />
+            wrapper). Invoke synchronously to recurse into the chain; do not
+            capture for later use.</param>
+            <param name="provider">When this method returns <see langword="true" />,
+            contains the constructed provider; otherwise <see langword="null" />.</param>
+            <returns><see langword="true" /> if this resolver handled the section.</returns>
+        </member>
         <member name="T:System.ClientModel.Primitives.GetTokenOptions">
             <summary>
             An interface implemented by auth flow interfaces supporting scopes.
@@ -316,6 +387,37 @@
             Gets the cache for subclients to optimize performance by reusing client instances.
             </summary>
         </member>
+        <member name="T:System.ClientModel.Primitives.ClientDiagnostics">
+            <summary>
+            Provides distributed tracing support for client libraries built on System.ClientModel.
+            This class mirrors the API of Azure.Core.Pipeline.ClientDiagnostics to allow shared
+            code generation patterns between Azure and non-Azure clients.
+            </summary>
+            <remarks>
+            This class is intended to be used by client library authors only.
+            Applications should use the System.Diagnostics package directly for custom tracing.
+            </remarks>
+        </member>
+        <member name="M:System.ClientModel.Primitives.ClientDiagnostics.#ctor(System.ClientModel.Primitives.ClientPipelineOptions,System.Boolean)">
+            <summary>
+            Creates a new instance of <see cref="T:System.ClientModel.Primitives.ClientDiagnostics" />.
+            </summary>
+            <param name="options">The client pipeline options containing tracing configuration.</param>
+            <param name="suppressNestedClientActivities">
+            Whether to suppress nested client activities. When true (recommended for new clients),
+            nested Azure SDK client method calls will not create additional spans.
+            </param>
+        </member>
+        <member name="M:System.ClientModel.Primitives.ClientDiagnostics.#ctor(System.String,System.ClientModel.Primitives.ClientPipelineOptions,System.Boolean)">
+            <summary>
+            Creates a new instance of <see cref="T:System.ClientModel.Primitives.ClientDiagnostics" /> with explicit namespace.
+            </summary>
+            <param name="clientNamespace">The namespace of the client.</param>
+            <param name="options">The client pipeline options containing tracing configuration.</param>
+            <param name="suppressNestedClientActivities">
+            Whether to suppress nested client activities.
+            </param>
+        </member>
         <member name="T:System.ClientModel.Primitives.ClientSettings">
             <summary>
             Represents the settings used to configure a client that can be loaded from an <see cref="T:Microsoft.Extensions.Configuration.IConfigurationSection" />.
@@ -419,12 +521,29 @@
             </summary>
             <param name="section">The <see cref="T:Microsoft.Extensions.Configuration.IConfigurationSection" /> to load from.</param>
         </member>
+        <member name="P:System.ClientModel.Primitives.CredentialSettings.Item(System.String)">
+            <summary>
+            Reads an arbitrary value from the underlying credential configuration
+            section. Library authors can extend the credential schema with custom
+            properties (for example, a service-specific name or region) and surface
+            them via extension methods that read through this indexer, without
+            exposing the underlying <see cref="T:Microsoft.Extensions.Configuration.IConfigurationSection" />. Supports
+            the standard configuration <c>:</c> delimiter for nested paths. Returns
+            <see langword="null" /> when no section was bound or if the specified value does not exist.
+            </summary>
+            <param name="key">The configuration key to read, relative to the credential section.</param>
+        </member>
         <member name="P:System.ClientModel.Primitives.CredentialSettings.CredentialSource">
             <summary>
             Gets or sets the source of the credential.
             </summary>
             <remarks>
             This value determines the type of authentication policy to use. For example, "ApiKeyCredential" creates an <see cref="T:System.ClientModel.Primitives.ApiKeyAuthenticationPolicy" />.
+            <para>
+            Matching is case-insensitive: values read from configuration are normalized to lowercase before storage,
+            so resolvers should compare against lowercase constants. Each resolver decides which forms it accepts
+            (for example, both short <c>"broker"</c> and long <c>"brokercredential"</c>).
+            </para>
             </remarks>
         </member>
         <member name="P:System.ClientModel.Primitives.CredentialSettings.Key">
@@ -437,6 +556,134 @@
             Gets or sets additional properties for the credential.
             </summary>
         </member>
+        <member name="P:System.ClientModel.Primitives.CredentialSettings.TokenProvider">
+            <summary>
+            Gets or sets the <see cref="T:System.ClientModel.AuthenticationTokenProvider" /> for this credential.
+            </summary>
+        </member>
+        <member name="T:System.ClientModel.Primitives.DiagnosticScope">
+            <summary>
+            A lightweight wrapper around <see cref="T:System.Diagnostics.Activity" /> that provides a consistent
+            pattern for creating, starting, and completing diagnostic scopes in client libraries.
+            </summary>
+            <remarks>
+            This struct is intended to be used by client library authors only.
+            Applications should use the System.Diagnostics package directly for custom tracing.
+            </remarks>
+        </member>
+        <member name="P:System.ClientModel.Primitives.DiagnosticScope.IsEnabled">
+            <summary>
+            Gets a value indicating whether this scope is enabled and will record tracing data.
+            </summary>
+        </member>
+        <member name="M:System.ClientModel.Primitives.DiagnosticScope.Start">
+            <summary>
+            Starts the scope by starting the underlying <see cref="T:System.Diagnostics.Activity" />.
+            Must be called after adding any links, trace context, or pre-start attributes.
+            </summary>
+        </member>
+        <member name="M:System.ClientModel.Primitives.DiagnosticScope.AddAttribute(System.String,System.String)">
+            <summary>
+            Adds a tag to the underlying activity.
+            </summary>
+            <param name="name">The tag name.</param>
+            <param name="value">The tag value.</param>
+        </member>
+        <member name="M:System.ClientModel.Primitives.DiagnosticScope.AddAttribute``1(System.String,``0,System.Func{``0,System.String})">
+            <summary>
+            Adds a typed tag to the underlying activity using a custom formatter.
+            </summary>
+            <typeparam name="T">The type of the tag value.</typeparam>
+            <param name="name">The tag name.</param>
+            <param name="value">The tag value.</param>
+            <param name="format">A function to format the value as a string.</param>
+        </member>
+        <member name="M:System.ClientModel.Primitives.DiagnosticScope.AddIntegerAttribute(System.String,System.Int32)">
+            <summary>
+            Adds an integer tag to the underlying activity.
+            </summary>
+            <param name="name">The tag name.</param>
+            <param name="value">The tag value.</param>
+        </member>
+        <member name="M:System.ClientModel.Primitives.DiagnosticScope.AddLongAttribute(System.String,System.Int64)">
+            <summary>
+            Adds a long tag to the underlying activity.
+            </summary>
+            <param name="name">The tag name.</param>
+            <param name="value">The tag value.</param>
+        </member>
+        <member name="M:System.ClientModel.Primitives.DiagnosticScope.AddLink(System.String,System.String,System.Collections.Generic.IDictionary{System.String,System.Object})">
+            <summary>
+            Adds a distributed tracing link to the scope. Must be called before <see cref="M:System.ClientModel.Primitives.DiagnosticScope.Start" />.
+            </summary>
+            <param name="traceparent">The W3C traceparent header value for the link.</param>
+            <param name="tracestate">The W3C tracestate header value for the link.</param>
+            <param name="attributes">Optional attributes to associate with the link.</param>
+        </member>
+        <member name="M:System.ClientModel.Primitives.DiagnosticScope.SetTraceContext(System.String,System.String)">
+            <summary>
+            Sets the W3C trace context for this scope. Must be called before <see cref="M:System.ClientModel.Primitives.DiagnosticScope.Start" />.
+            </summary>
+            <param name="traceparent">The W3C traceparent header value.</param>
+            <param name="tracestate">The W3C tracestate header value.</param>
+        </member>
+        <member name="M:System.ClientModel.Primitives.DiagnosticScope.SetDisplayName(System.String)">
+            <summary>
+            Sets the display name of the underlying activity.
+            </summary>
+            <param name="displayName">The display name to set.</param>
+        </member>
+        <member name="M:System.ClientModel.Primitives.DiagnosticScope.SetStartTime(System.DateTime)">
+            <summary>
+            Sets the start time of the underlying activity.
+            </summary>
+            <param name="dateTime">The start time to set.</param>
+        </member>
+        <member name="M:System.ClientModel.Primitives.DiagnosticScope.Failed(System.Exception)">
+            <summary>
+            Marks the scope as failed with the specified exception.
+            </summary>
+            <param name="exception">The exception that caused the failure.</param>
+        </member>
+        <member name="M:System.ClientModel.Primitives.DiagnosticScope.Failed(System.String)">
+            <summary>
+            Marks the scope as failed with a low-cardinality error code.
+            </summary>
+            <param name="errorCode">The error code to associate with the failure.</param>
+        </member>
+        <member name="M:System.ClientModel.Primitives.DiagnosticScope.Dispose">
+            <summary>
+            Disposes the scope and stops the underlying activity.
+            </summary>
+        </member>
+        <member name="T:System.ClientModel.Primitives.DiagnosticScopeFactory">
+            <summary>
+            A factory for creating <see cref="T:System.ClientModel.Primitives.DiagnosticScope" /> instances that provide
+            distributed tracing support for client libraries built on System.ClientModel.
+            </summary>
+            <remarks>
+            This class is intended to be used by client library authors only.
+            Applications should use the System.Diagnostics package directly for custom tracing.
+            </remarks>
+        </member>
+        <member name="M:System.ClientModel.Primitives.DiagnosticScopeFactory.#ctor(System.String,System.Boolean,System.Boolean)">
+            <summary>
+            Creates a new instance of <see cref="T:System.ClientModel.Primitives.DiagnosticScopeFactory" />.
+            </summary>
+            <param name="clientNamespace">The namespace of the client, used as prefix for ActivitySource names.</param>
+            <param name="isActivityEnabled">Whether distributed tracing is enabled.</param>
+            <param name="suppressNestedClientActivities">Whether to suppress nested client activities.</param>
+        </member>
+        <member name="M:System.ClientModel.Primitives.DiagnosticScopeFactory.CreateScope(System.String,System.Diagnostics.ActivityKind)">
+            <summary>
+            Creates a new <see cref="T:System.ClientModel.Primitives.DiagnosticScope" /> with the specified name.
+            The scope is not started until <see cref="M:System.ClientModel.Primitives.DiagnosticScope.Start" /> is called,
+            allowing links, trace context, and attributes to be added before starting.
+            </summary>
+            <param name="name">The name of the scope (typically "ClientName.MethodName").</param>
+            <param name="kind">The kind of activity to create.</param>
+            <returns>A new <see cref="T:System.ClientModel.Primitives.DiagnosticScope" /> instance.</returns>
+        </member>
         <member name="T:System.ClientModel.Primitives.IClientBuilder">
             <summary>
             Provides a builder interface for configuring client applications.
@@ -447,6 +694,16 @@
             Adds a configuration action to be executed after the initial configuration of <see cref="T:System.ClientModel.Primitives.ClientSettings" />.
             </summary>
             <param name="configure">Factory method to modify the <see cref="T:System.ClientModel.Primitives.ClientSettings" />.</param>
+        </member>
+        <member name="M:System.ClientModel.Primitives.IClientBuilder.ConfigureCredential(System.Action{Microsoft.Extensions.Configuration.IConfigurationSection})">
+            <summary>
+            Adds a configuration action that mutates the <c>Credential</c>
+            configuration section before it is handed to the registered
+            <see cref="T:System.ClientModel.Primitives.CredentialResolver" /> chain. Use this to override values
+            such as <c>TenantId</c> or <c>ClientId</c> at registration time.
+            </summary>
+            <param name="configureOverrides">Callback that receives a writable
+            view of the credential section.</param>
         </member>
         <member name="T:System.ClientModel.Primitives.OperationResult">
             <summary>
@@ -583,6 +840,99 @@
             </summary>
             <param name="response">The <see cref="T:System.ClientModel.Primitives.PipelineResponse" /> to return
             from <see cref="M:System.ClientModel.Primitives.OperationResult.GetRawResponse" />.</param>
+        </member>
+        <member name="T:System.ClientModel.Primitives.CredentialCache">
+            <summary>
+            Process-wide cache of resolved <see cref="T:System.ClientModel.Primitives.CredentialSettings" /> instances
+            keyed by a hash of the merged credential section content. Resolver-matched
+            entries are additionally keyed by the reference-identity hash of the
+            resolver instance that produced the provider, so two callers with
+            identical effective config that share a resolver instance also share one
+            settings instance (and the token-layer cache inside the provider).
+            Distinct resolver instances (even of the same type) get distinct cache
+            entries — a custom resolver carrying instance state (e.g., per-host
+            secrets) cannot leak its provider into another caller's chain.
+            Chain-owning resolvers — identified by invoking
+            <c>resolveChild</c> during <c>TryResolve</c> — are NOT cached; each
+            resolution builds a fresh wrapper that composes cached leaf providers via
+            <c>resolveChild</c>, so the token-layer cache lives on the leaves where
+            it belongs and a chain wrapper cannot leak its captured chain across
+            callers. Inline credential sections that no resolver claims are cached
+            under a single section-only key, so the inline-ApiKey path benefits from
+            caching too.
+            </summary>
+        </member>
+        <member name="M:System.ClientModel.Primitives.CredentialCache.GetOrTryResolve(Microsoft.Extensions.Configuration.IConfigurationSection,System.ClientModel.Primitives.CredentialResolver,System.Func{Microsoft.Extensions.Configuration.IConfigurationSection,System.ClientModel.AuthenticationTokenProvider})">
+            <summary>
+            Look up a cached <see cref="T:System.ClientModel.Primitives.CredentialSettings" /> for
+            (<paramref name="mergedSection" />, <paramref name="resolver" />); on
+            miss, call <see cref="M:System.ClientModel.Primitives.CredentialResolver.TryResolve(Microsoft.Extensions.Configuration.IConfigurationSection,System.Func{Microsoft.Extensions.Configuration.IConfigurationSection,System.ClientModel.AuthenticationTokenProvider},System.ClientModel.AuthenticationTokenProvider@)" />.
+            If the resolver matches and produces a non-null provider, build a
+            <see cref="T:System.ClientModel.Primitives.CredentialSettings" /> for it. The result is cached only
+            when the provider is non-disposable and the resolver did NOT invoke
+            <paramref name="resolveChild" /> (i.e., is not a chain owner);
+            otherwise the freshly built settings are returned without caching.
+            Returns <see langword="null" /> when the resolver does not match
+            (the no-match case is handled by <see cref="M:System.ClientModel.Primitives.CredentialCache.GetOrCreateInline(Microsoft.Extensions.Configuration.IConfigurationSection)" />).
+            </summary>
+            <param name="mergedSection">The credential section to resolve (already
+            merged with any overrides).</param>
+            <param name="resolver">The resolver to invoke on cache miss.</param>
+            <param name="resolveChild">A callback that recursively resolves child
+            sections through the active engine. Passed (wrapped with a usage
+            tracker) to the chain-aware
+            <see cref="M:System.ClientModel.Primitives.CredentialResolver.TryResolve(Microsoft.Extensions.Configuration.IConfigurationSection,System.Func{Microsoft.Extensions.Configuration.IConfigurationSection,System.ClientModel.AuthenticationTokenProvider},System.ClientModel.AuthenticationTokenProvider@)" />
+            overload so chain-owning resolvers can recurse without re-implementing
+            engine logic. Invoking it during <c>TryResolve</c> opts the resolver
+            out of caching. Required — callers without a chain pass a no-op
+            (<c><![CDATA[static _ => null]]></c>) to honor the resolver's non-null
+            contract.</param>
+        </member>
+        <member name="M:System.ClientModel.Primitives.CredentialCache.GetOrCreateInline(Microsoft.Extensions.Configuration.IConfigurationSection)">
+            <summary>
+            Returns a cached <see cref="T:System.ClientModel.Primitives.CredentialSettings" /> for the inline
+            credential data in <paramref name="mergedSection" /> — the no-resolver
+            match path. The settings has <see cref="P:System.ClientModel.Primitives.CredentialSettings.TokenProvider" />
+            set to <see langword="null" /> and exposes the section's bound
+            metadata (<c>Key</c>, <c>CredentialSource</c>, <c>AdditionalProperties</c>,
+            indexer). Repeated calls for the same section content return the same
+            instance.
+            </summary>
+        </member>
+        <member name="T:System.ClientModel.Primitives.CredentialResolverEngine">
+            <summary>
+            Internal core resolution logic shared by the public
+            <c>GetCredentialSettings</c> overloads, <c>GetClientSettings&lt;T&gt;</c>
+            overloads, and the DI <c>AddClient</c> auto-resolve hook.
+            </summary>
+        </member>
+        <member name="M:System.ClientModel.Primitives.CredentialResolverEngine.Resolve(Microsoft.Extensions.Configuration.IConfigurationSection,System.Collections.Generic.IEnumerable{System.ClientModel.Primitives.CredentialResolver},System.Action{Microsoft.Extensions.Configuration.IConfigurationSection})">
+            <summary>
+            Walks the supplied <see cref="T:System.ClientModel.Primitives.CredentialResolver" /> chain (after
+            optionally applying <paramref name="configureOverrides" /> to a
+            writable overlay of <paramref name="credentialSection" />) and returns
+            a cached <see cref="T:System.ClientModel.Primitives.CredentialSettings" /> bound to the section the
+            chain saw, with <see cref="P:System.ClientModel.Primitives.CredentialSettings.TokenProvider" />
+            populated when a resolver matches. When no resolver matches, returns
+            the cached inline-only settings for that section. Returns
+            <see langword="null" /> only when the section does not exist. The
+            returned instance is shared across callers — treat it as read-only.
+            </summary>
+        </member>
+        <member name="T:System.ClientModel.Primitives.CredentialSectionHasher">
+            <summary>
+            Computes a stable cache key for a credential section by canonically
+            serializing the merged content (sorted leaf paths) and hashing it.
+            </summary>
+        </member>
+        <member name="T:System.ClientModel.Primitives.CredentialSectionOverlay">
+            <summary>
+            Builds a writable <see cref="T:Microsoft.Extensions.Configuration.IConfigurationSection" /> wrapper backed by an
+            in-memory dictionary that is initialized from the original credential
+            section. Writes go to the dictionary; reads return the merged view.
+            Setting a key to <see langword="null" /> removes it (standard
+            <see cref="T:Microsoft.Extensions.Configuration.IConfiguration" /> semantics).
+            </summary>
         </member>
         <member name="T:System.ClientModel.Primitives.PipelineMessage">
             <summary>
@@ -3699,6 +4049,109 @@
              that creates them and pass that token to any <c>async</c> methods
              called from this method.</remarks>
         </member>
+        <member name="T:System.ClientModel.AsyncStreamingClientResult">
+            <summary>
+            Creates asynchronous streaming results for established service responses.
+            </summary>
+            <remarks>
+            The supplied <see cref="T:System.ClientModel.Primitives.PipelineResponse" /> must already be established and
+            have a non-null <see cref="P:System.ClientModel.Primitives.PipelineResponse.ContentStream" />. Factories do
+            not send a request or process response establishment errors.
+            </remarks>
+        </member>
+        <member name="M:System.ClientModel.AsyncStreamingClientResult.Create``1(System.ClientModel.Primitives.PipelineResponse,System.Func{System.IO.Stream,System.Threading.CancellationToken,System.Collections.Generic.IAsyncEnumerable{``0}},System.Threading.CancellationToken)">
+            <summary>
+            Creates a result whose values are produced from the response content stream.
+            </summary>
+            <typeparam name="T">The type of values in the stream.</typeparam>
+            <param name="response">An established response containing the stream.</param>
+            <param name="producer">The function that reads values from the stream.
+            The producer must observe cancellation or stream closure. Otherwise,
+            <see cref="M:System.ClientModel.AsyncStreamingClientResult`1.DisposeAsync" /> can wait indefinitely
+            for an active read to complete.</param>
+            <param name="operationCancellationToken">The cancellation token for the operation.</param>
+            <returns>A one-shot asynchronous streaming result.</returns>
+        </member>
+        <member name="M:System.ClientModel.AsyncStreamingClientResult.CreateSse``1(System.ClientModel.Primitives.PipelineResponse,System.Net.ServerSentEvents.SseItemParser{``0},System.Func{System.Net.ServerSentEvents.SseItem{System.BinaryData},System.Boolean},System.Threading.CancellationToken)">
+            <summary>
+            Creates a result that parses server-sent events.
+            </summary>
+            <typeparam name="T">The type of data in each event.</typeparam>
+            <param name="response">An established response containing the stream.</param>
+            <param name="itemParser">The parser for each event payload.</param>
+            <param name="isTerminal">An optional predicate that receives each raw
+            <c>SseItem&lt;BinaryData&gt;</c> and identifies the terminal event from
+            its envelope and payload before
+            <paramref name="itemParser" /> is invoked.
+            The terminal event is not returned. If provided, reaching the end of the
+            stream before a terminal event throws <see cref="T:System.IO.InvalidDataException" />.</param>
+            <param name="operationCancellationToken">The cancellation token for the operation.</param>
+            <returns>A one-shot asynchronous streaming result.</returns>
+        </member>
+        <member name="M:System.ClientModel.AsyncStreamingClientResult.CreateSse(System.ClientModel.Primitives.PipelineResponse,System.Func{System.Net.ServerSentEvents.SseItem{System.BinaryData},System.Boolean},System.Threading.CancellationToken)">
+            <summary>
+            Creates a result that parses raw server-sent events.
+            </summary>
+            <param name="response">An established response containing the stream.</param>
+            <param name="isTerminal">An optional predicate identifying the terminal event.
+            The terminal event is not returned. If provided, reaching the end of the
+            stream before a terminal event throws <see cref="T:System.IO.InvalidDataException" />.</param>
+            <param name="operationCancellationToken">The cancellation token for the operation.</param>
+            <returns>A one-shot asynchronous streaming result.</returns>
+        </member>
+        <member name="M:System.ClientModel.AsyncStreamingClientResult.CreateJsonLines``1(System.ClientModel.Primitives.PipelineResponse,System.Func{System.BinaryData,``0},System.Threading.CancellationToken)">
+            <summary>
+            Creates a result that parses newline-delimited JSON values.
+            </summary>
+            <typeparam name="T">The type of parsed values.</typeparam>
+            <param name="response">An established response containing the stream.</param>
+            <param name="itemParser">The parser for each JSON line.</param>
+            <param name="operationCancellationToken">The cancellation token for the operation.</param>
+            <returns>A one-shot asynchronous streaming result.</returns>
+        </member>
+        <member name="M:System.ClientModel.AsyncStreamingClientResult.CreateJsonLines(System.ClientModel.Primitives.PipelineResponse,System.Threading.CancellationToken)">
+            <summary>
+            Creates a result that parses raw newline-delimited JSON values.
+            </summary>
+            <param name="response">An established response containing the stream.</param>
+            <param name="operationCancellationToken">The cancellation token for the operation.</param>
+            <returns>A one-shot asynchronous streaming result.</returns>
+        </member>
+        <member name="T:System.ClientModel.AsyncStreamingClientResult`1">
+            <summary>
+            Represents an asynchronous sequence of values read from a streaming service
+            response.
+            </summary>
+            <typeparam name="T">The type of values in the response stream.</typeparam>
+            <remarks>
+            An <see cref="T:System.ClientModel.AsyncStreamingClientResult`1" /> can be enumerated only once.
+            Disposing the enumerator or the result disposes the underlying response.
+            The operation cancellation token remains active for the lifetime of the
+            stream and is combined with the token supplied when enumeration begins.
+            Custom producers must observe cancellation or stream closure to terminate;
+            code that ignores both cannot be forcibly stopped by this abstraction.
+            Enumerating a disposed result throws <see cref="T:System.ObjectDisposedException" />;
+            requesting a second enumerator throws <see cref="T:System.InvalidOperationException" />.
+            </remarks>
+        </member>
+        <member name="P:System.ClientModel.AsyncStreamingClientResult`1.Status">
+            <summary>Gets the status code of the service response.</summary>
+            <exception cref="T:System.ObjectDisposedException">The result has been disposed.</exception>
+        </member>
+        <member name="P:System.ClientModel.AsyncStreamingClientResult`1.ReasonPhrase">
+            <summary>Gets the reason phrase of the service response.</summary>
+            <exception cref="T:System.ObjectDisposedException">The result has been disposed.</exception>
+        </member>
+        <member name="P:System.ClientModel.AsyncStreamingClientResult`1.Headers">
+            <summary>Gets the headers of the service response.</summary>
+            <exception cref="T:System.ObjectDisposedException">The result has been disposed.</exception>
+        </member>
+        <member name="M:System.ClientModel.AsyncStreamingClientResult`1.System#Collections#Generic#IAsyncEnumerable{T}#GetAsyncEnumerator(System.Threading.CancellationToken)">
+            <summary>Returns an enumerator that iterates asynchronously through the collection.</summary><param name="cancellationToken">A <see cref="T:System.Threading.CancellationToken" /> that may be used to cancel the asynchronous iteration.</param><returns>An enumerator that can be used to iterate asynchronously through the collection.</returns>
+        </member>
+        <member name="M:System.ClientModel.AsyncStreamingClientResult`1.DisposeAsync">
+            <summary>Asynchronously disposes the result and its response.</summary>
+        </member>
         <member name="T:System.ClientModel.ClientResult">
             <summary>
             Represents the result of a cloud service operation.
@@ -3912,6 +4365,89 @@
             <typeparam name="T">The type of <see cref="T:System.ClientModel.Primitives.ClientSettings" /> to create.</typeparam>
             <param name="configuration">The <see cref="T:Microsoft.Extensions.Configuration.IConfiguration" /> to bind the properties of <typeparamref name="T" /> from.</param>
             <param name="sectionName">The section of <see cref="T:Microsoft.Extensions.Configuration.IConfiguration" /> to bind from.</param>
+        </member>
+        <member name="M:System.ClientModel.ConfigurationExtensions.GetClientSettings``1(Microsoft.Extensions.Configuration.IConfiguration,System.String,System.ClientModel.Primitives.CredentialResolver[])">
+            <summary>
+            Creates an instance of <typeparamref name="T" /> and sets its properties
+            from the specified <see cref="T:Microsoft.Extensions.Configuration.IConfiguration" />, additionally
+            resolving <see cref="P:System.ClientModel.Primitives.ClientSettings.CredentialProvider" /> from the
+            supplied <see cref="T:System.ClientModel.Primitives.CredentialResolver" /> chain.
+            </summary>
+        </member>
+        <member name="M:System.ClientModel.ConfigurationExtensions.GetClientSettings``1(Microsoft.Extensions.Configuration.IConfiguration,System.String,System.Collections.Generic.IEnumerable{System.ClientModel.Primitives.CredentialResolver},System.Action{Microsoft.Extensions.Configuration.IConfigurationSection})">
+            <summary>
+            Creates an instance of <typeparamref name="T" /> and sets its properties
+            from the specified <see cref="T:Microsoft.Extensions.Configuration.IConfiguration" />, additionally
+            resolving <see cref="P:System.ClientModel.Primitives.ClientSettings.CredentialProvider" /> from the
+            supplied <see cref="T:System.ClientModel.Primitives.CredentialResolver" /> chain after applying
+            <paramref name="configureOverrides" /> to the credential section.
+            </summary>
+        </member>
+        <member name="M:System.ClientModel.ConfigurationExtensions.GetCredentialSettings(Microsoft.Extensions.Configuration.IConfiguration,System.String)">
+            <summary>
+            Returns a <see cref="T:System.ClientModel.Primitives.CredentialSettings" /> bound from the named
+            credential section. The supplied <paramref name="sectionName" /> is
+            treated as the credential section itself (not a parent client
+            section). The returned settings expose the inline
+            <see cref="P:System.ClientModel.Primitives.CredentialSettings.Key" /> (for ApiKey sections) and the
+            resolver-supplied <see cref="P:System.ClientModel.Primitives.CredentialSettings.TokenProvider" />
+            (for token sections, when a resolver matches), so standalone callers
+            can dispatch on either without binding a <see cref="T:System.ClientModel.Primitives.ClientSettings" />.
+            Returns <see langword="null" /> only when the named section does not
+            exist; when the section exists but no resolver claims it, returns a
+            populated <see cref="T:System.ClientModel.Primitives.CredentialSettings" /> with
+            <see cref="P:System.ClientModel.Primitives.CredentialSettings.TokenProvider" /> set to
+            <see langword="null" />. Never throws.
+            </summary>
+        </member>
+        <member name="M:System.ClientModel.ConfigurationExtensions.GetCredentialSettings(Microsoft.Extensions.Configuration.IConfiguration,System.String,System.ClientModel.Primitives.CredentialResolver[])">
+            <summary>
+            Walks the supplied <see cref="T:System.ClientModel.Primitives.CredentialResolver" /> chain in order
+            (first match wins) against the named credential section and returns
+            a <see cref="T:System.ClientModel.Primitives.CredentialSettings" /> populated with both the bound
+            metadata (<c>Key</c>, <c>CredentialSource</c>,
+            <c>AdditionalProperties</c>) and the resolver-supplied
+            <see cref="P:System.ClientModel.Primitives.CredentialSettings.TokenProvider" />. The supplied
+            <paramref name="sectionName" /> is treated as the credential section
+            itself. Returns <see langword="null" /> only when the named section
+            does not exist; when the section exists but no resolver claims it,
+            returns settings with <see cref="P:System.ClientModel.Primitives.CredentialSettings.TokenProvider" />
+            set to <see langword="null" />. Never throws.
+            </summary>
+        </member>
+        <member name="M:System.ClientModel.ConfigurationExtensions.GetCredentialSettings(Microsoft.Extensions.Configuration.IConfiguration,System.String,System.Collections.Generic.IEnumerable{System.ClientModel.Primitives.CredentialResolver},System.Action{Microsoft.Extensions.Configuration.IConfigurationSection})">
+            <summary>
+            Applies <paramref name="configureOverrides" /> to a writable overlay of
+            the named credential section, then walks the supplied
+            <see cref="T:System.ClientModel.Primitives.CredentialResolver" /> chain to populate
+            <see cref="P:System.ClientModel.Primitives.CredentialSettings.TokenProvider" />. Unlike
+            <see cref="M:System.ClientModel.ConfigurationExtensions.GetClientSettings``1(Microsoft.Extensions.Configuration.IConfiguration,System.String,System.Collections.Generic.IEnumerable{System.ClientModel.Primitives.CredentialResolver},System.Action{Microsoft.Extensions.Configuration.IConfigurationSection})" />
+            — which binds the surrounding <c>ClientSettings</c> from the original
+            (non-overlaid) configuration and only feeds the overlay to the
+            resolver chain — the returned <see cref="T:System.ClientModel.Primitives.CredentialSettings" /> here
+            reflects the post-overlay merged view for <c>Key</c>,
+            <c>CredentialSource</c>, <c>AdditionalProperties</c>, and the
+            <see cref="P:System.ClientModel.Primitives.CredentialSettings.Item(System.String)" /> indexer. The supplied
+            <paramref name="sectionName" /> is treated as the credential section
+            itself. Returns <see langword="null" /> only when the original section
+            does not exist; overrides cannot synthesize a credential into a
+            missing section. Never throws.
+            </summary>
+        </member>
+        <member name="M:System.ClientModel.ConfigurationExtensions.AddCredentialResolver``1(Microsoft.Extensions.DependencyInjection.IServiceCollection)">
+            <summary>
+            Registers <typeparamref name="T" /> as a <see cref="T:System.ClientModel.Primitives.CredentialResolver" />
+            service. Idempotent by implementation type — calling twice with the
+            same <typeparamref name="T" /> registers a single instance.
+            </summary>
+            <exception cref="T:System.ArgumentNullException">Thrown when <paramref name="services" /> is null.</exception>
+        </member>
+        <member name="M:System.ClientModel.ConfigurationExtensions.AddCredentialResolver``1(Microsoft.Extensions.Hosting.IHostApplicationBuilder)">
+            <summary>
+            Registers <typeparamref name="T" /> as a <see cref="T:System.ClientModel.Primitives.CredentialResolver" />
+            service on the host's service collection.
+            </summary>
+            <exception cref="T:System.ArgumentNullException">Thrown when <paramref name="builder" /> is null.</exception>
         </member>
         <member name="M:System.ClientModel.ConfigurationExtensions.AddKeyedClient``2(Microsoft.Extensions.Hosting.IHostApplicationBuilder,System.String,System.String)">
             <summary>
@@ -4255,6 +4791,292 @@
             use for the write operation.</param>
         </member>
         <member name="M:System.ClientModel.BinaryContent.Dispose">
+            <summary>Performs application-defined tasks associated with freeing, releasing, or resetting unmanaged resources.</summary>
+        </member>
+        <member name="T:System.ClientModel.FileBinaryContent">
+            <summary>
+            Represents file content that can be sent to a cloud service as part of
+            a <see cref="T:System.ClientModel.Primitives.PipelineRequest" />.
+            </summary>
+        </member>
+        <member name="M:System.ClientModel.FileBinaryContent.#ctor(System.BinaryData,System.String)">
+            <summary>
+            Initializes a new instance of <see cref="T:System.ClientModel.FileBinaryContent" /> that contains
+            the bytes held in the provided <see cref="T:System.BinaryData" /> instance.
+            </summary>
+            <param name="data">The <see cref="T:System.BinaryData" /> containing the bytes
+            this <see cref="T:System.ClientModel.FileBinaryContent" /> will hold.</param>
+            <param name="mediaType">The media type of the content. Ignored if
+            <paramref name="data" /> already specifies a media type via
+            <see cref="P:System.BinaryData.MediaType" />.</param>
+        </member>
+        <member name="M:System.ClientModel.FileBinaryContent.#ctor(System.IO.Stream,System.String)">
+            <summary>
+            Initializes a new instance of <see cref="T:System.ClientModel.FileBinaryContent" /> that contains
+            the bytes held in the provided <see cref="T:System.IO.Stream" /> instance.
+            </summary>
+            <param name="stream">The <see cref="T:System.IO.Stream" /> containing the bytes
+            this <see cref="T:System.ClientModel.FileBinaryContent" /> will hold.</param>
+            <param name="mediaType">The media type of the content.</param>
+        </member>
+        <member name="M:System.ClientModel.FileBinaryContent.#ctor(System.String,System.String)">
+            <summary>
+            Initializes a new instance of <see cref="T:System.ClientModel.FileBinaryContent" /> that contains
+            the bytes held in the file at the provided path.
+            </summary>
+            <remarks>
+            The file's existence is verified eagerly so that an invalid path fails
+            fast at construction time.
+            </remarks>
+            <param name="path">The path to the file containing the bytes
+            this <see cref="T:System.ClientModel.FileBinaryContent" /> will hold.</param>
+            <param name="mediaType">The media type of the content.</param>
+            <exception cref="T:System.IO.FileNotFoundException">No file exists at <paramref name="path" />.</exception>
+        </member>
+        <member name="P:System.ClientModel.FileBinaryContent.Filename">
+            <summary>
+            Gets or sets the file name associated with this file content.
+            </summary>
+        </member>
+        <member name="M:System.ClientModel.FileBinaryContent.TryComputeLength(System.Int64@)">
+            <summary>
+            Attempts to compute the length of the underlying body content, if available.
+            </summary>
+            <param name="length">The length of the underlying data.</param>
+        </member>
+        <member name="M:System.ClientModel.FileBinaryContent.WriteTo(System.IO.Stream,System.Threading.CancellationToken)">
+            <summary>
+            Writes contents of this <see cref="T:System.ClientModel.BinaryContent" /> instance to the
+            provided <see cref="T:System.IO.Stream" />.
+            </summary>
+            <param name="stream">The stream to write the binary content to.</param>
+            <param name="cancellationToken">To <see cref="T:System.Threading.CancellationToken" /> to
+            use for the write operation.</param>
+        </member>
+        <member name="M:System.ClientModel.FileBinaryContent.WriteToAsync(System.IO.Stream,System.Threading.CancellationToken)">
+            <summary>
+            Writes contents of this <see cref="T:System.ClientModel.BinaryContent" /> instance to the
+            provided <see cref="T:System.IO.Stream" />.
+            </summary>
+            <param name="stream">The stream to write the binary content to.</param>
+            <param name="cancellationToken">To <see cref="T:System.Threading.CancellationToken" /> to
+            use for the write operation.</param>
+        </member>
+        <member name="M:System.ClientModel.FileBinaryContent.Dispose">
+            <summary>Performs application-defined tasks associated with freeing, releasing, or resetting unmanaged resources.</summary>
+        </member>
+        <member name="T:System.ClientModel.MultiPartFormContent">
+            <summary>
+            Represents <c>multipart/form-data</c> content that can be sent to a cloud
+            service as part of a <see cref="T:System.ClientModel.Primitives.PipelineRequest" />.
+            </summary>
+        </member>
+        <member name="M:System.ClientModel.MultiPartFormContent.#ctor">
+            <summary>
+            Initializes a new instance of <see cref="T:System.ClientModel.MultiPartFormContent" /> with a
+            randomly generated boundary.
+            </summary>
+        </member>
+        <member name="M:System.ClientModel.MultiPartFormContent.Add(System.String,System.ClientModel.FileBinaryContent)">
+            <summary>
+            Adds the provided <see cref="T:System.ClientModel.FileBinaryContent" /> as a part of this
+            <see cref="T:System.ClientModel.MultiPartFormContent" /> and transfers ownership of
+            <paramref name="fileContent" /> to this instance.
+            </summary>
+            <param name="name">The form field name for the part.</param>
+            <param name="fileContent">The <see cref="T:System.ClientModel.FileBinaryContent" /> to add as a part.</param>
+        </member>
+        <member name="M:System.ClientModel.MultiPartFormContent.Add``1(System.String,System.ClientModel.Primitives.IPersistableModel{``0},System.ClientModel.Primitives.ModelReaderWriterContext,System.ClientModel.Primitives.ModelReaderWriterOptions,System.String)">
+            <summary>
+            Adds the provided <see cref="T:System.ClientModel.Primitives.IPersistableModel`1" /> as a part of this
+            <see cref="T:System.ClientModel.MultiPartFormContent" />.
+            </summary>
+            <typeparam name="T">The model type.</typeparam>
+            <param name="name">The form field name for the part.</param>
+            <param name="model">The <see cref="T:System.ClientModel.Primitives.IPersistableModel`1" /> to add as a part.</param>
+            <param name="context">The <see cref="T:System.ClientModel.Primitives.ModelReaderWriterContext" /> used to write the model.</param>
+            <param name="options">The <see cref="T:System.ClientModel.Primitives.ModelReaderWriterOptions" /> that indicates what format the <paramref name="model" /> will be written in.</param>
+            <param name="mediaType">The media type for the part.</param>
+        </member>
+        <member name="M:System.ClientModel.MultiPartFormContent.Add``1(System.String,System.ClientModel.Primitives.IPersistableModel{``0})">
+            <summary>
+            Adds the provided <see cref="T:System.ClientModel.Primitives.IPersistableModel`1" /> as a part of this
+            <see cref="T:System.ClientModel.MultiPartFormContent" /> using the default wire-format options
+            and an <c>application/json</c> media type.
+            </summary>
+            <typeparam name="T">The model type.</typeparam>
+            <param name="name">The form field name for the part.</param>
+            <param name="model">The <see cref="T:System.ClientModel.Primitives.IPersistableModel`1" /> to add as a part.</param>
+        </member>
+        <member name="M:System.ClientModel.MultiPartFormContent.Add(System.String,System.BinaryData)">
+            <summary>
+            Adds the bytes held in the provided <see cref="T:System.BinaryData" /> as a part
+            of this <see cref="T:System.ClientModel.MultiPartFormContent" />. The media type from
+            <see cref="P:System.BinaryData.MediaType" />, if any, is used for the part.
+            </summary>
+            <param name="name">The form field name for the part.</param>
+            <param name="content">The <see cref="T:System.BinaryData" /> to add as a part.</param>
+        </member>
+        <member name="M:System.ClientModel.MultiPartFormContent.Add(System.String,System.Byte[],System.String)">
+            <summary>
+            Adds the provided byte array as a part of this
+            <see cref="T:System.ClientModel.MultiPartFormContent" />.
+            </summary>
+            <param name="name">The form field name for the part.</param>
+            <param name="content">The byte array to add as a part.</param>
+            <param name="mediaType">The media type for the part.</param>
+        </member>
+        <member name="M:System.ClientModel.MultiPartFormContent.Add(System.String,System.String,System.String)">
+            <summary>
+            Adds the provided <see cref="T:System.String" /> as a part of this
+            <see cref="T:System.ClientModel.MultiPartFormContent" />.
+            </summary>
+            <param name="name">The form field name for the part.</param>
+            <param name="content">The <see cref="T:System.String" /> to add as a part.</param>
+            <param name="mediaType">The media type for the part.</param>
+        </member>
+        <member name="M:System.ClientModel.MultiPartFormContent.Add(System.String,System.Int32,System.String)">
+            <summary>
+            Adds the provided <see cref="T:System.Int32" /> as a part of this
+            <see cref="T:System.ClientModel.MultiPartFormContent" />.
+            </summary>
+            <param name="name">The form field name for the part.</param>
+            <param name="content">The <see cref="T:System.Int32" /> to add as a part.</param>
+            <param name="mediaType">The media type for the part.</param>
+        </member>
+        <member name="M:System.ClientModel.MultiPartFormContent.Add(System.String,System.Int64,System.String)">
+            <summary>
+            Adds the provided <see cref="T:System.Int64" /> as a part of this
+            <see cref="T:System.ClientModel.MultiPartFormContent" />.
+            </summary>
+            <param name="name">The form field name for the part.</param>
+            <param name="content">The <see cref="T:System.Int64" /> to add as a part.</param>
+            <param name="mediaType">The media type for the part.</param>
+        </member>
+        <member name="M:System.ClientModel.MultiPartFormContent.Add(System.String,System.Single,System.String)">
+            <summary>
+            Adds the provided <see cref="T:System.Single" /> as a part of this
+            <see cref="T:System.ClientModel.MultiPartFormContent" />.
+            </summary>
+            <param name="name">The form field name for the part.</param>
+            <param name="content">The <see cref="T:System.Single" /> to add as a part.</param>
+            <param name="mediaType">The media type for the part.</param>
+        </member>
+        <member name="M:System.ClientModel.MultiPartFormContent.Add(System.String,System.Double,System.String)">
+            <summary>
+            Adds the provided <see cref="T:System.Double" /> as a part of this
+            <see cref="T:System.ClientModel.MultiPartFormContent" />.
+            </summary>
+            <param name="name">The form field name for the part.</param>
+            <param name="content">The <see cref="T:System.Double" /> to add as a part.</param>
+            <param name="mediaType">The media type for the part.</param>
+        </member>
+        <member name="M:System.ClientModel.MultiPartFormContent.Add(System.String,System.Decimal,System.String)">
+            <summary>
+            Adds the provided <see cref="T:System.Decimal" /> as a part of this
+            <see cref="T:System.ClientModel.MultiPartFormContent" />.
+            </summary>
+            <param name="name">The form field name for the part.</param>
+            <param name="content">The <see cref="T:System.Decimal" /> to add as a part.</param>
+            <param name="mediaType">The media type for the part.</param>
+        </member>
+        <member name="M:System.ClientModel.MultiPartFormContent.Add(System.String,System.Boolean,System.String)">
+            <summary>
+            Adds the provided <see cref="T:System.Boolean" /> as a part of this
+            <see cref="T:System.ClientModel.MultiPartFormContent" />.
+            </summary>
+            <param name="name">The form field name for the part.</param>
+            <param name="content">The <see cref="T:System.Boolean" /> to add as a part.</param>
+            <param name="mediaType">The media type for the part.</param>
+        </member>
+        <member name="M:System.ClientModel.MultiPartFormContent.Add(System.String,System.Byte,System.String)">
+            <summary>
+            Adds the provided <see cref="T:System.Byte" /> as a part of this
+            <see cref="T:System.ClientModel.MultiPartFormContent" />.
+            </summary>
+            <param name="name">The form field name for the part.</param>
+            <param name="content">The <see cref="T:System.Byte" /> to add as a part.</param>
+            <param name="mediaType">The media type for the part.</param>
+        </member>
+        <member name="M:System.ClientModel.MultiPartFormContent.Add(System.String,System.SByte,System.String)">
+            <summary>
+            Adds the provided <see cref="T:System.SByte" /> as a part of this
+            <see cref="T:System.ClientModel.MultiPartFormContent" />.
+            </summary>
+            <param name="name">The form field name for the part.</param>
+            <param name="content">The <see cref="T:System.SByte" /> to add as a part.</param>
+            <param name="mediaType">The media type for the part.</param>
+        </member>
+        <member name="M:System.ClientModel.MultiPartFormContent.Add(System.String,System.Char,System.String)">
+            <summary>
+            Adds the provided <see cref="T:System.Char" /> as a part of this
+            <see cref="T:System.ClientModel.MultiPartFormContent" />.
+            </summary>
+            <param name="name">The form field name for the part.</param>
+            <param name="content">The <see cref="T:System.Char" /> to add as a part.</param>
+            <param name="mediaType">The media type for the part.</param>
+        </member>
+        <member name="M:System.ClientModel.MultiPartFormContent.Add(System.String,System.Int16,System.String)">
+            <summary>
+            Adds the provided <see cref="T:System.Int16" /> as a part of this
+            <see cref="T:System.ClientModel.MultiPartFormContent" />.
+            </summary>
+            <param name="name">The form field name for the part.</param>
+            <param name="content">The <see cref="T:System.Int16" /> to add as a part.</param>
+            <param name="mediaType">The media type for the part.</param>
+        </member>
+        <member name="M:System.ClientModel.MultiPartFormContent.Add(System.String,System.UInt16,System.String)">
+            <summary>
+            Adds the provided <see cref="T:System.UInt16" /> as a part of this
+            <see cref="T:System.ClientModel.MultiPartFormContent" />.
+            </summary>
+            <param name="name">The form field name for the part.</param>
+            <param name="content">The <see cref="T:System.UInt16" /> to add as a part.</param>
+            <param name="mediaType">The media type for the part.</param>
+        </member>
+        <member name="M:System.ClientModel.MultiPartFormContent.Add(System.String,System.UInt32,System.String)">
+            <summary>
+            Adds the provided <see cref="T:System.UInt32" /> as a part of this
+            <see cref="T:System.ClientModel.MultiPartFormContent" />.
+            </summary>
+            <param name="name">The form field name for the part.</param>
+            <param name="content">The <see cref="T:System.UInt32" /> to add as a part.</param>
+            <param name="mediaType">The media type for the part.</param>
+        </member>
+        <member name="M:System.ClientModel.MultiPartFormContent.Add(System.String,System.UInt64,System.String)">
+            <summary>
+            Adds the provided <see cref="T:System.UInt64" /> as a part of this
+            <see cref="T:System.ClientModel.MultiPartFormContent" />.
+            </summary>
+            <param name="name">The form field name for the part.</param>
+            <param name="content">The <see cref="T:System.UInt64" /> to add as a part.</param>
+            <param name="mediaType">The media type for the part.</param>
+        </member>
+        <member name="M:System.ClientModel.MultiPartFormContent.TryComputeLength(System.Int64@)">
+            <summary>
+            Attempts to compute the length of the underlying body content, if available.
+            </summary>
+            <param name="length">The length of the underlying data.</param>
+        </member>
+        <member name="M:System.ClientModel.MultiPartFormContent.WriteTo(System.IO.Stream,System.Threading.CancellationToken)">
+            <summary>
+            Writes contents of this <see cref="T:System.ClientModel.BinaryContent" /> instance to the
+            provided <see cref="T:System.IO.Stream" />.
+            </summary>
+            <param name="stream">The stream to write the binary content to.</param>
+            <param name="cancellationToken">To <see cref="T:System.Threading.CancellationToken" /> to
+            use for the write operation.</param>
+        </member>
+        <member name="M:System.ClientModel.MultiPartFormContent.WriteToAsync(System.IO.Stream,System.Threading.CancellationToken)">
+            <summary>
+            Writes contents of this <see cref="T:System.ClientModel.BinaryContent" /> instance to the
+            provided <see cref="T:System.IO.Stream" />.
+            </summary>
+            <param name="stream">The stream to write the binary content to.</param>
+            <param name="cancellationToken">To <see cref="T:System.Threading.CancellationToken" /> to
+            use for the write operation.</param>
+        </member>
+        <member name="M:System.ClientModel.MultiPartFormContent.Dispose">
             <summary>Performs application-defined tasks associated with freeing, releasing, or resetting unmanaged resources.</summary>
         </member>
         <member name="T:System.Diagnostics.CodeAnalysis.ExperimentalAttribute">

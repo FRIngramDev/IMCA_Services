@@ -539,14 +539,6 @@
             <param name="partValue">The value of the part.</param>
             <param name="fileName">An optional file name for the part.</param>
         </member>
-        <member name="M:Microsoft.Kiota.Abstractions.MultipartBody.GetPartValue``1(System.String)">
-            <summary>
-            Gets the value of a part from the multipart body.
-            </summary>
-            <typeparam name="T">The type of the part value.</typeparam>
-            <param name="partName">The name of the part.</param>
-            <returns>The value of the part.</returns>
-        </member>
         <member name="M:Microsoft.Kiota.Abstractions.MultipartBody.GetPartValue``1(System.String,System.String)">
             <summary>
             Gets the value of a part from the multipart body.
@@ -555,13 +547,6 @@
             <param name="partName">The name of the part.</param>
             <param name="fileName">An optional file name for the part.</param>
             <returns>The value of the part.</returns>
-        </member>
-        <member name="M:Microsoft.Kiota.Abstractions.MultipartBody.RemovePart(System.String)">
-            <summary>
-            Removes a part from the multipart body.
-            </summary>
-            <param name="partName">The name of the part.</param>
-            <returns>True if the part was removed, false otherwise.</returns>   
         </member>
         <member name="M:Microsoft.Kiota.Abstractions.MultipartBody.RemovePart(System.String,System.String)">
             <summary>
@@ -947,20 +932,6 @@
              Stores the additional data for this object that did not belong to the properties.
             </summary>
         </member>
-        <member name="T:Microsoft.Kiota.Abstractions.Serialization.IAsyncParseNodeFactory">
-            <summary>
-            Defines the contract for a factory that creates parse nodes in an sync and async way.
-            </summary>
-        </member>
-        <member name="M:Microsoft.Kiota.Abstractions.Serialization.IAsyncParseNodeFactory.GetRootParseNodeAsync(System.String,System.IO.Stream,System.Threading.CancellationToken)">
-            <summary>
-            Create a parse node from the given stream and content type.
-            </summary>
-            <param name="content">The stream to read the parse node from.</param>
-            <param name="contentType">The content type of the parse node.</param>
-            <param name="cancellationToken">The cancellation token for the task</param>
-            <returns>A parse node.</returns>
-        </member>
         <member name="T:Microsoft.Kiota.Abstractions.Serialization.IComposedTypeWrapper">
             <summary>
             Tags the current type as a composed type wrapper.
@@ -1138,12 +1109,13 @@
             Returns the content type this factory's parse nodes can deserialize.
             </summary>
         </member>
-        <member name="M:Microsoft.Kiota.Abstractions.Serialization.IParseNodeFactory.GetRootParseNode(System.String,System.IO.Stream)">
+        <member name="M:Microsoft.Kiota.Abstractions.Serialization.IParseNodeFactory.GetRootParseNodeAsync(System.String,System.IO.Stream,System.Threading.CancellationToken)">
             <summary>
             Create a parse node from the given stream and content type.
             </summary>
             <param name="content">The stream to read the parse node from.</param>
             <param name="contentType">The content type of the parse node.</param>
+            <param name="cancellationToken">The cancellation token for the task.</param>
             <returns>A parse node.</returns>
         </member>
         <member name="T:Microsoft.Kiota.Abstractions.Serialization.ISerializationWriter">
@@ -1347,58 +1319,6 @@
             Set of helper methods for JSON serialization
             </summary>
         </member>
-        <member name="M:Microsoft.Kiota.Abstractions.Serialization.KiotaJsonSerializer.Deserialize``1(System.String,Microsoft.Kiota.Abstractions.Serialization.ParsableFactory{``0})">
-            <summary>
-            Deserializes the given stream into an object.
-            </summary>
-            <param name="parsableFactory">The factory to create the object.</param>
-            <param name="serializedRepresentation">The serialized representation of the object.</param>
-        </member>
-        <member name="M:Microsoft.Kiota.Abstractions.Serialization.KiotaJsonSerializer.Deserialize``1(System.IO.Stream,Microsoft.Kiota.Abstractions.Serialization.ParsableFactory{``0})">
-            <summary>
-            Deserializes the given stream into an object.
-            </summary>
-            <param name="stream">The stream to deserialize.</param>
-            <param name="parsableFactory">The factory to create the object.</param>
-        </member>
-        <member name="M:Microsoft.Kiota.Abstractions.Serialization.KiotaJsonSerializer.Deserialize``1(System.IO.Stream)">
-            <summary>
-            Deserializes the given stream into an object.
-            </summary>
-            <param name="stream">The stream to deserialize.</param>
-        </member>
-        <member name="M:Microsoft.Kiota.Abstractions.Serialization.KiotaJsonSerializer.Deserialize``1(System.String)">
-            <summary>
-            Deserializes the given stream into an object.
-            </summary>
-            <param name="serializedRepresentation">The serialized representation of the object.</param>
-        </member>
-        <member name="M:Microsoft.Kiota.Abstractions.Serialization.KiotaJsonSerializer.DeserializeCollection``1(System.IO.Stream,Microsoft.Kiota.Abstractions.Serialization.ParsableFactory{``0})">
-            <summary>
-            Deserializes the given stream into a collection of objects based on the content type.
-            </summary>
-            <param name="stream">The stream to deserialize.</param>
-            <param name="parsableFactory">The factory to create the object.</param>
-        </member>
-        <member name="M:Microsoft.Kiota.Abstractions.Serialization.KiotaJsonSerializer.DeserializeCollection``1(System.String,Microsoft.Kiota.Abstractions.Serialization.ParsableFactory{``0})">
-            <summary>
-            Deserializes the given stream into a collection of objects based on the content type.
-            </summary>
-            <param name="serializedRepresentation">The serialized representation of the objects.</param>
-            <param name="parsableFactory">The factory to create the object.</param>
-        </member>
-        <member name="M:Microsoft.Kiota.Abstractions.Serialization.KiotaJsonSerializer.DeserializeCollection``1(System.IO.Stream)">
-            <summary>
-            Deserializes the given stream into a collection of objects based on the content type.
-            </summary>
-            <param name="stream">The stream to deserialize.</param>
-        </member>
-        <member name="M:Microsoft.Kiota.Abstractions.Serialization.KiotaJsonSerializer.DeserializeCollection``1(System.String)">
-            <summary>
-            Deserializes the given stream into a collection of objects based on the content type.
-            </summary>
-            <param name="serializedRepresentation">The serialized representation of the object.</param>
-        </member>
         <member name="M:Microsoft.Kiota.Abstractions.Serialization.KiotaJsonSerializer.DeserializeAsync``1(System.String,Microsoft.Kiota.Abstractions.Serialization.ParsableFactory{``0},System.Threading.CancellationToken)">
             <summary>
             Deserializes the given stream into an object.
@@ -1567,66 +1487,6 @@
             <summary>
             Set of helper methods for serialization
             </summary>
-        </member>
-        <member name="M:Microsoft.Kiota.Abstractions.Serialization.KiotaSerializer.Deserialize``1(System.String,System.String,Microsoft.Kiota.Abstractions.Serialization.ParsableFactory{``0})">
-            <summary>
-            Deserializes the given stream into an object based on the content type.
-            </summary>
-            <param name="contentType">The content type of the stream.</param>
-            <param name="parsableFactory">The factory to create the object.</param>
-            <param name="serializedRepresentation">The serialized representation of the object.</param>
-        </member>
-        <member name="M:Microsoft.Kiota.Abstractions.Serialization.KiotaSerializer.Deserialize``1(System.String,System.IO.Stream,Microsoft.Kiota.Abstractions.Serialization.ParsableFactory{``0})">
-            <summary>
-            Deserializes the given stream into an object based on the content type.
-            </summary>
-            <param name="contentType">The content type of the stream.</param>
-            <param name="stream">The stream to deserialize.</param>
-            <param name="parsableFactory">The factory to create the object.</param>
-        </member>
-        <member name="M:Microsoft.Kiota.Abstractions.Serialization.KiotaSerializer.Deserialize``1(System.String,System.IO.Stream)">
-            <summary>
-            Deserializes the given stream into an object based on the content type.
-            </summary>
-            <param name="contentType">The content type of the stream.</param>
-            <param name="stream">The stream to deserialize.</param>
-        </member>
-        <member name="M:Microsoft.Kiota.Abstractions.Serialization.KiotaSerializer.Deserialize``1(System.String,System.String)">
-            <summary>
-            Deserializes the given stream into an object based on the content type.
-            </summary>
-            <param name="contentType">The content type of the stream.</param>
-            <param name="serializedRepresentation">The serialized representation of the object.</param>
-        </member>
-        <member name="M:Microsoft.Kiota.Abstractions.Serialization.KiotaSerializer.DeserializeCollection``1(System.String,System.IO.Stream,Microsoft.Kiota.Abstractions.Serialization.ParsableFactory{``0})">
-            <summary>
-            Deserializes the given stream into a collection of objects based on the content type.
-            </summary>
-            <param name="contentType">The content type of the stream.</param>
-            <param name="stream">The stream to deserialize.</param>
-            <param name="parsableFactory">The factory to create the object.</param>
-        </member>
-        <member name="M:Microsoft.Kiota.Abstractions.Serialization.KiotaSerializer.DeserializeCollection``1(System.String,System.String,Microsoft.Kiota.Abstractions.Serialization.ParsableFactory{``0})">
-            <summary>
-            Deserializes the given stream into a collection of objects based on the content type.
-            </summary>
-            <param name="contentType">The content type of the stream.</param>
-            <param name="serializedRepresentation">The serialized representation of the objects.</param>
-            <param name="parsableFactory">The factory to create the object.</param>
-        </member>
-        <member name="M:Microsoft.Kiota.Abstractions.Serialization.KiotaSerializer.DeserializeCollection``1(System.String,System.IO.Stream)">
-            <summary>
-            Deserializes the given stream into a collection of objects based on the content type.
-            </summary>
-            <param name="contentType">The content type of the stream.</param>
-            <param name="stream">The stream to deserialize.</param>
-        </member>
-        <member name="M:Microsoft.Kiota.Abstractions.Serialization.KiotaSerializer.DeserializeCollection``1(System.String,System.String)">
-            <summary>
-            Deserializes the given stream into a collection of objects based on the content type.
-            </summary>
-            <param name="contentType">The content type of the stream.</param>
-            <param name="serializedRepresentation">The serialized representation of the object.</param>
         </member>
         <member name="M:Microsoft.Kiota.Abstractions.Serialization.KiotaSerializer.DeserializeAsync``1(System.String,System.String,Microsoft.Kiota.Abstractions.Serialization.ParsableFactory{``0},System.Threading.CancellationToken)">
             <summary>
@@ -1842,14 +1702,6 @@
             List of factories that are registered by content type.
             </summary>
         </member>
-        <member name="M:Microsoft.Kiota.Abstractions.Serialization.ParseNodeFactoryRegistry.GetRootParseNode(System.String,System.IO.Stream)">
-            <summary>
-            Get the <see cref="T:Microsoft.Kiota.Abstractions.Serialization.IParseNode"/> instance that is the root of the content
-            </summary>
-            <param name="contentType">The content type of the stream</param>
-            <param name="content">The <see cref="T:System.IO.Stream"/> to parse</param>
-            <returns></returns>
-        </member>
         <member name="M:Microsoft.Kiota.Abstractions.Serialization.ParseNodeFactoryRegistry.GetRootParseNodeAsync(System.String,System.IO.Stream,System.Threading.CancellationToken)">
             <summary>
             Get the <see cref="T:Microsoft.Kiota.Abstractions.Serialization.IParseNode"/> instance that is the root of the content
@@ -1859,15 +1711,13 @@
             <param name="cancellationToken">The cancellation token for the task</param>
             <returns></returns>
         </member>
-        <member name="M:Microsoft.Kiota.Abstractions.Serialization.ParseNodeFactoryRegistry.GetFactory``1(System.String)">
+        <member name="M:Microsoft.Kiota.Abstractions.Serialization.ParseNodeFactoryRegistry.GetFactory(System.String)">
             <summary>
-            Get the <typeparamref name="T"/> instance for the given <paramref name="contentType"/>.
+            Get the <see cref="T:Microsoft.Kiota.Abstractions.Serialization.IParseNodeFactory"/> instance for the given <paramref name="contentType"/>.
             </summary>
-            <typeparam name="T">Type of the <see cref="T:Microsoft.Kiota.Abstractions.Serialization.IParseNodeFactory"/>.</typeparam>
             <param name="contentType">The content type of the stream</param>
             <returns></returns>
             <exception cref="T:System.InvalidOperationException"></exception>
-            <exception cref="T:System.Exception"></exception>
         </member>
         <member name="T:Microsoft.Kiota.Abstractions.Serialization.ParseNodeHelper">
             <summary>
@@ -1898,27 +1748,13 @@
             <param name="onBefore">The callback to invoke before the deserialization of any model object.</param>
             <param name="onAfter">The callback to invoke after the deserialization of any model object.</param>
         </member>
-        <member name="M:Microsoft.Kiota.Abstractions.Serialization.ParseNodeProxyFactory.GetRootParseNode(System.String,System.IO.Stream)">
-            <summary>
-            Create a parse node from the given stream and content type.
-            </summary>
-            <param name="content">The stream to read the parse node from.</param>
-            <param name="contentType">The content type of the parse node.</param>
-            <returns>A parse node.</returns>
-        </member>
-        <member name="M:Microsoft.Kiota.Abstractions.Serialization.ParseNodeProxyFactory.WireParseNode(Microsoft.Kiota.Abstractions.Serialization.IParseNode)">
-            <summary>
-            Wires node to before and after actions.
-            </summary>
-            <param name="node">A parse node to wire.</param>
-        </member>
         <member name="M:Microsoft.Kiota.Abstractions.Serialization.ParseNodeProxyFactory.GetRootParseNodeAsync(System.String,System.IO.Stream,System.Threading.CancellationToken)">
             <summary>
             Create a parse node from the given stream and content type.
             </summary>
             <param name="content">The stream to read the parse node from.</param>
             <param name="contentType">The content type of the parse node.</param>
-            <param name="cancellationToken">The cancellation token for the task</param>
+            <param name="cancellationToken">The cancellation token for the task.</param>
             <returns>A parse node.</returns>
         </member>
         <member name="T:Microsoft.Kiota.Abstractions.Serialization.SerializationWriterFactoryRegistry">
@@ -2215,7 +2051,7 @@
         </member>
         <member name="T:Microsoft.Kiota.Abstractions.Store.BackingStoreParseNodeFactory">
             <summary>
-            Proxy implementation of <see cref="T:Microsoft.Kiota.Abstractions.Serialization.IAsyncParseNodeFactory"/> for the <see cref="T:Microsoft.Kiota.Abstractions.Store.IBackingStore">backing store</see> that automatically sets the state of the backing store when deserializing.
+            Proxy implementation of <see cref="T:Microsoft.Kiota.Abstractions.Serialization.IParseNodeFactory"/> for the <see cref="T:Microsoft.Kiota.Abstractions.Store.IBackingStore">backing store</see> that automatically sets the state of the backing store when deserializing.
             </summary>
         </member>
         <member name="M:Microsoft.Kiota.Abstractions.Store.BackingStoreParseNodeFactory.#ctor(Microsoft.Kiota.Abstractions.Serialization.IParseNodeFactory)">

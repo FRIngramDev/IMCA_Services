@@ -86,13 +86,10 @@
         </member>
         <member name="T:Microsoft.Kiota.Serialization.Form.FormParseNodeFactory">
             <summary>
-            The <see cref="T:Microsoft.Kiota.Abstractions.Serialization.IAsyncParseNodeFactory"/> implementation for form content types
+            The <see cref="T:Microsoft.Kiota.Abstractions.Serialization.IParseNodeFactory"/> implementation for form content types
             </summary>
         </member>
         <member name="P:Microsoft.Kiota.Serialization.Form.FormParseNodeFactory.ValidContentType">
-            <inheritdoc/>
-        </member>
-        <member name="M:Microsoft.Kiota.Serialization.Form.FormParseNodeFactory.GetRootParseNode(System.String,System.IO.Stream)">
             <inheritdoc/>
         </member>
         <member name="M:Microsoft.Kiota.Serialization.Form.FormParseNodeFactory.GetRootParseNodeAsync(System.String,System.IO.Stream,System.Threading.CancellationToken)">

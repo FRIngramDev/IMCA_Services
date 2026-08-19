@@ -342,6 +342,12 @@
             <exception cref="T:Microsoft.IdentityModel.Tokens.SecurityTokenEncryptionFailedException">Thrown if encryption fails using the <see cref="P:Microsoft.IdentityModel.Tokens.EncryptingCredentials.Enc"/> (algorithm), <see cref="P:Microsoft.IdentityModel.Tokens.EncryptingCredentials.Key"/> pair.</exception>
             <exception cref="T:Microsoft.IdentityModel.Tokens.SecurityTokenEncryptionFailedException">Thrown if not using one of the supported content encryption key (CEK) algorithms: 128, 384 or 512 AesCbcHmac (this applies in the case of key wrap only, not direct encryption).</exception>
         </member>
+        <member name="M:Microsoft.IdentityModel.JsonWebTokens.JsonWebTokenHandler.GetExpectedCekSizeInBytes(System.String)">
+            <summary>
+            Returns the expected Content Encryption Key (CEK) size in bytes for
+            the given content encryption algorithm (JWE "enc" header value).
+            </summary>
+        </member>
         <member name="F:Microsoft.IdentityModel.JsonWebTokens.JsonWebTokenHandler.DefaultInboundClaimTypeMap">
             <summary>
             Default claim type mapping for inbound claims.
@@ -493,6 +499,26 @@
             <para>
             The token is NOT validated and no security decisions should be made about the contents.
             Use <see cref="M:Microsoft.IdentityModel.JsonWebTokens.JsonWebTokenHandler.ValidateToken(System.String,Microsoft.IdentityModel.Tokens.TokenValidationParameters)"/> or <see cref="M:Microsoft.IdentityModel.JsonWebTokens.JsonWebTokenHandler.ValidateTokenAsync(System.String,Microsoft.IdentityModel.Tokens.TokenValidationParameters)"/> to ensure the token is acceptable.
+            </para>
+            </remarks>
+        </member>
+        <member name="M:Microsoft.IdentityModel.JsonWebTokens.JsonWebTokenHandler.ReplaceTokenHeader(Microsoft.IdentityModel.JsonWebTokens.JsonWebToken,System.String)">
+            <summary>
+            Creates a new <see cref="T:Microsoft.IdentityModel.JsonWebTokens.JsonWebToken"/> by replacing the header of an existing <see cref="T:Microsoft.IdentityModel.JsonWebTokens.JsonWebToken"/>, reusing its already parsed payload and signature.
+            </summary>
+            <param name="jsonWebToken">The signed <see cref="T:Microsoft.IdentityModel.JsonWebTokens.JsonWebToken"/> (JWS) whose payload and signature are reused.</param>
+            <param name="encodedHeader">The Base64UrlEncoded header that replaces the header of <paramref name="jsonWebToken"/>.</param>
+            <returns>A <see cref="T:Microsoft.IdentityModel.JsonWebTokens.JsonWebToken"/> formed as 'encodedHeader.EncodedPayload.EncodedSignature'.</returns>
+            <exception cref="T:System.ArgumentNullException">Thrown if <paramref name="jsonWebToken"/> is null.</exception>
+            <exception cref="T:System.ArgumentNullException">Thrown if <paramref name="encodedHeader"/> is null or empty.</exception>
+            <exception cref="T:System.ArgumentException">Thrown if <paramref name="jsonWebToken"/> is an encrypted token (JWE), as its payload cannot be reused.</exception>
+            <remarks>
+            This is an intentional transform for header-only rewrites (for example, hashing a Protected Forwarded Token nonce). Only the replacement header is decoded and parsed; the payload is reused from <paramref name="jsonWebToken"/> without re-parsing.
+            <para>
+            The signature of <paramref name="jsonWebToken"/> is reused verbatim and is NOT recomputed. The resulting token therefore only validates when <paramref name="encodedHeader"/> reconstructs the header over which the original signature was computed; supplying an arbitrary header produces a token whose signature will fail validation.
+            </para>
+            <para>
+            The returned token is NOT validated. Use <see cref="M:Microsoft.IdentityModel.JsonWebTokens.JsonWebTokenHandler.ValidateToken(System.String,Microsoft.IdentityModel.Tokens.TokenValidationParameters)"/> or <see cref="M:Microsoft.IdentityModel.JsonWebTokens.JsonWebTokenHandler.ValidateTokenAsync(System.String,Microsoft.IdentityModel.Tokens.TokenValidationParameters)"/> to ensure the token is acceptable.
             </para>
             </remarks>
         </member>
@@ -804,6 +830,25 @@
             </remarks>
             <exception cref="T:System.ArgumentNullException">Thrown if <paramref name="header"/> is null or empty.</exception>
             <exception cref="T:System.ArgumentNullException">Thrown if <paramref name="payload"/> is null.</exception>
+        </member>
+        <member name="M:Microsoft.IdentityModel.JsonWebTokens.JsonWebToken.#ctor(Microsoft.IdentityModel.JsonWebTokens.JsonWebToken,System.String)">
+            <summary>
+            Initializes a new instance of the <see cref="T:Microsoft.IdentityModel.JsonWebTokens.JsonWebToken"/> class by replacing the header of an existing <see cref="T:Microsoft.IdentityModel.JsonWebTokens.JsonWebToken"/> while reusing its payload and signature.
+            </summary>
+            <param name="jsonWebToken">The <see cref="T:Microsoft.IdentityModel.JsonWebTokens.JsonWebToken"/> whose payload and signature are reused. Must be a JWS, not a JWE.</param>
+            <param name="encodedHeader">The Base64UrlEncoded header that replaces the header of <paramref name="jsonWebToken"/>.</param>
+            <remarks>
+            This is the implementation behind <see cref="M:Microsoft.IdentityModel.JsonWebTokens.JsonWebTokenHandler.ReplaceTokenHeader(Microsoft.IdentityModel.JsonWebTokens.JsonWebToken,System.String)"/>; use that method to perform a header replacement.
+            The new token is formed as 'encodedHeader.EncodedPayload.EncodedSignature' using the <see cref="P:Microsoft.IdentityModel.JsonWebTokens.JsonWebToken.EncodedPayload"/> and <see cref="P:Microsoft.IdentityModel.JsonWebTokens.JsonWebToken.EncodedSignature"/> from <paramref name="jsonWebToken"/>.
+            The already parsed payload of <paramref name="jsonWebToken"/> is reused, so the payload is not decoded or parsed again; only the replacement header is decoded and parsed.
+            The signature is reused verbatim, so it only remains valid when <paramref name="encodedHeader"/> reconstructs the originally signed header.
+            <para>
+            The contents of the returned <see cref="T:Microsoft.IdentityModel.JsonWebTokens.JsonWebToken"/> have not been validated, the JSON Web Token is simply decoded. Validation can be accomplished using the validation methods in <see cref="T:Microsoft.IdentityModel.JsonWebTokens.JsonWebTokenHandler"/>
+            </para>
+            </remarks>
+            <exception cref="T:System.ArgumentNullException">Thrown if <paramref name="jsonWebToken"/> is null.</exception>
+            <exception cref="T:System.ArgumentNullException">Thrown if <paramref name="encodedHeader"/> is null or empty.</exception>
+            <exception cref="T:System.ArgumentException">Thrown if <paramref name="jsonWebToken"/> is an encrypted token (JWE), as its payload cannot be reused.</exception>
         </member>
         <member name="P:Microsoft.IdentityModel.JsonWebTokens.JsonWebToken.TryReadJwtClaim">
             <summary>

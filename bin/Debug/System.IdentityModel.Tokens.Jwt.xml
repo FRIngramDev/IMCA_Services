@@ -1646,6 +1646,12 @@
             <exception cref="T:Microsoft.IdentityModel.Tokens.SecurityTokenEncryptionKeyNotFoundException">if 'jwtToken.Header.kid' is not null AND decryption fails.</exception>
             <exception cref="T:Microsoft.IdentityModel.Tokens.SecurityTokenDecryptionFailedException">if the JWE was not able to be decrypted.</exception>
         </member>
+        <member name="M:System.IdentityModel.Tokens.Jwt.JwtSecurityTokenHandler.GetExpectedCekSizeInBytes(System.String)">
+            <summary>
+            Returns the expected Content Encryption Key (CEK) size in bytes for
+            the given content encryption algorithm (JWE "enc" header value).
+            </summary>
+        </member>
         <member name="M:System.IdentityModel.Tokens.Jwt.JwtSecurityTokenHandler.ValidateIssuerSecurityKey(Microsoft.IdentityModel.Tokens.SecurityKey,System.IdentityModel.Tokens.Jwt.JwtSecurityToken,Microsoft.IdentityModel.Tokens.TokenValidationParameters)">
             <summary>
             Validates the <see cref="P:System.IdentityModel.Tokens.Jwt.JwtSecurityToken.SigningKey"/> is an expected value.
