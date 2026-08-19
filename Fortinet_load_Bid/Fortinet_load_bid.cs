@@ -1,4 +1,5 @@
-﻿using ClosedXML.Excel;
+﻿using Azure.Identity;
+using ClosedXML.Excel;
 using Microsoft.Exchange.WebServices.Data;
 using Microsoft.Graph;
 using Microsoft.Graph.Models;
@@ -18,6 +19,7 @@ using System.Text.RegularExpressions;
 
 namespace IMCA_Services
 {
+
     public class Fortinet_load_bid
     {
         private string pays = "";
@@ -28,10 +30,8 @@ namespace IMCA_Services
         private string start_date_scan = "";
         private string number_of_mails = "10";
         private string sharedmailbox_name = "";
-        private string sharedmailbox_account = "";
-        private string sharedmailbox_password = "";
-        private string sharedmailbox_server = "";
         private string logs_folder = "";
+        private string temp_folder = "";
         private string api_url = "";
         private string sender_email_adress = "";
         private string email_sharing_folder = "";
@@ -205,7 +205,6 @@ namespace IMCA_Services
         }
         public class JSON_file
         {
-            public string logs_folder { get; set; }
             public List<Country> countries { get; set; }
         }
         public void setParamCountry(string country)
@@ -260,22 +259,15 @@ namespace IMCA_Services
         {
             this.sharedmailbox_name = sharedmailbox_name;
         }
-        public void setSharedMailboxAccount(string sharedmailbox_account)
-        {
-            this.sharedmailbox_account = sharedmailbox_account;
-        }
-        public void setSharedMailboxPassword(string sharedmailbox_password)
-        {
-            this.sharedmailbox_password = sharedmailbox_password;
-        }
-        public void setSharedMailboxServer(string sharedmailbox__server)
-        {
-            this.sharedmailbox_server = sharedmailbox__server;
-        }
         public void setlogs_folder(string logs_folder)
         {
             this.logs_folder = logs_folder;
         }
+        public void settemp_folder(string temp_folder)
+        {
+            this.temp_folder = temp_folder;
+        }
+
         public void setapi_url(string api_url)
         {
             this.api_url = api_url;
@@ -902,24 +894,7 @@ namespace IMCA_Services
 
             return null;
         }
-        private ExchangeService Connexion_Au_Service_Exchange_O365(string la_boite_mail)
-        {
-            System.Net.ServicePointManager.SecurityProtocol = System.Net.SecurityProtocolType.Tls12;
 
-            // On utilise EWS API MANAGED REFERENCE 2.1
-            ExchangeService service = new ExchangeService(ExchangeVersion.Exchange2013_SP1);
-            service.Timeout = 120000;
-            //service.ImpersonatedUserId = new ImpersonatedUserId(ConnectingIdType.SmtpAddress, la_boite_mail);
-
-            class_dev_tools.Ews_Modern_Auth Ews_Modern_Auth = new class_dev_tools.Ews_Modern_Auth();
-            Ews_Modern_Auth.boite_mail = la_boite_mail;
-            Ews_Modern_Auth.email = sharedmailbox_account;
-            Ews_Modern_Auth.password = sharedmailbox_password;
-            Ews_Modern_Auth.serveur_mail = sharedmailbox_server;
-            service = Ews_Modern_Auth.Get_EWS_Service();
-
-            return service;
-        }
         private GraphServiceClient Connexion_Microsoft_Graph()
         {
             System.Net.ServicePointManager.SecurityProtocol = System.Net.SecurityProtocolType.Tls12;
@@ -1496,273 +1471,18 @@ namespace IMCA_Services
 
 
         }
-        public void Read_Email(string sql_con, string logs, string session_name)
-        {
-            string global_parameters = "";
-            string service_path = Path.GetDirectoryName(System.Reflection.Assembly.GetEntryAssembly().Location);
-            int nb_mail = 0;
-            Item Item_move;
-            setlogs_folder(service_path + "\\" + logs);
 
-            global_session_name = session_name;
-
-            // Get the global parameters of the ACTION
-            global_parameters = get_IMCA_paramters(sql_con, "FORTINET_BID_LOAD");
-
-            var param = new JSON_file();
-            param = JsonConvert.DeserializeObject<JSON_file>(global_parameters);
-
-            foreach (var p in param.countries) // For each country
-            {
-
-                setParamCountry(p.country);
-                setParamSK_Valid(p.sk_valid);
-                setParamName(p.name);
-                setParamActive(p.active);
-                setParamDebug(p.debug);
-                setStartDateScan(p.start_date_scan);
-                setSharedMailboxName(p.sharedmailbox_name);
-                setSharedMailboxAccount(p.sharedmailbox_account);
-                setSharedMailboxPassword(DecodeFrom64(p.sharedmailbox_password));
-                setSharedMailboxServer(p.sharedmailbox_server);
-                setsharedmailbox_folder_in(p.sharedmailbox_folder_in);
-                setNumber_of_mails(p.number_of_mails);
-                setsharedmailbox_folder_out(p.sharedmailbox_folder_out);
-                setsender_email_adress(p.sender_email_adress);
-                setemail_sharing_folder(p.email_sharing_folder);
-                setapi_url(p.api_url);
-                setEmail_Sku_Management(p.email_sku_management);
-                setEmail_in_case_of_technical_issue(p.email_in_case_of_technical_issue);
-                setbuyer_email_to(p.buyer_email_to);
-                setbuyer_email_cc(p.buyer_email_cc);
-                setsku_creation_template(p.sku_creation_template);
-                setParamAppend_FC_Quote_ID_To_Bid_Number(p.Append_FC_Quote_ID_To_Bid_Number);
-
-                if (active.ToUpper() == "TRUE")
-                {
-
-                    try
-                    {
-
-                        // On utilise EWS API MANAGED REFERENCE 2.2
-                        ExchangeService service = new ExchangeService(ExchangeVersion.Exchange2013_SP1);
-
-                        ServicePointManager.ServerCertificateValidationCallback = (Object obj, X509Certificate certificate, X509Chain chain, SslPolicyErrors errors) =>
-                        {
-                            return true;
-                        };
-
-                        WriteToFile(name.ToUpper() + "(" + pays.ToUpper() + ")" + " at " + DateTime.Now.ToString("dd/MM/yyyy HH:mm:ss"));
-                        WriteToFile("   Debug Parameter is set to " + debug.ToUpper() + " at " + DateTime.Now.ToString("dd/MM/yyyy HH:mm:ss"));
-
-                        if (debug.ToUpper() == "TRUE")
-                        {
-                            WriteToFile("   Connexion to " + sharedmailbox_name + " at " + DateTime.Now.ToString("dd/MM/yyyy HH:mm:ss"));
-                        }
-                        service = Connexion_Au_Service_Exchange_O365(sharedmailbox_name);
-
-
-                        if (debug.ToUpper() == "TRUE")
-                        {
-                            WriteToFile("   Sender_email_adress      : " + sender_email_adress);
-                            WriteToFile("   Sharedmailbox_folder_in  : " + sharedmailbox_folder_in);
-                            WriteToFile("   Sharedmailbox_folder_out : " + sharedmailbox_folder_out);
-                            WriteToFile("   StartDateScan            : " + start_date_scan);
-                            WriteToFile("   Extracting the " + number_of_mails + " most recent messages");
-                        }
-
-                        Microsoft.Exchange.WebServices.Data.Folder inbox = Microsoft.Exchange.WebServices.Data.Folder.Bind(service, Find_Folder(service, sharedmailbox_folder_in));
-                        ItemView view = new ItemView(int.Parse(number_of_mails));
-                        view.PropertySet = new PropertySet(BasePropertySet.IdOnly, ItemSchema.DateTimeReceived);
-                        view.OrderBy.Add(ItemSchema.DateTimeReceived, SortDirection.Descending);
-
-                        SearchFilter.ContainsSubstring subjectFilter = new SearchFilter.ContainsSubstring(ItemSchema.Subject, "FTQ-", ContainmentMode.Substring, ComparisonMode.IgnoreCase);
-                        SearchFilter senderFilter = new SearchFilter.IsEqualTo(EmailMessageSchema.From, sender_email_adress);
-
-                        DateTime searchdate = new DateTime(int.Parse(Strings.Left(start_date_scan, 4)), int.Parse(Strings.Mid(start_date_scan, 5, 2)), int.Parse(Strings.Right(start_date_scan, 2))); //Year, month, day
-                        SearchFilter greaterthanfilter = new SearchFilter.IsGreaterThanOrEqualTo(ItemSchema.DateTimeReceived, searchdate);
-
-                        SearchFilter allFilters = new SearchFilter.SearchFilterCollection(LogicalOperator.And, subjectFilter, senderFilter, greaterthanfilter);
-
-                        // This results in a FindItem call to EWS.
-                        FindItemsResults<Item> results = inbox.FindItems(allFilters, view);
-                        nb_mail = 0;
-                        if (results.TotalCount > 0)
-                        {
-                            if (debug.ToUpper() == "TRUE")
-                            {
-                                WriteToFile("   " + results.TotalCount + " Email(s) found at " + DateTime.Now.ToString("dd/MM/yyyy HH:mm:ss"));
-                            }
-
-                            foreach (Item item in results)
-                            {
-                                try
-                                {
-                                    PropertySet props = new PropertySet(BasePropertySet.FirstClassProperties, EmailMessageSchema.MimeContent);
-
-                                    EmailMessage email = EmailMessage.Bind(service, item.Id, props);
-
-                                    string emlFileName = email_sharing_folder + "\\" + CleanFileName(email.Subject) + ".eml";
-                                    emlFileName = CleanPathName(emlFileName);
-                                    emlFileName = emlFileName.Replace(";", "");
-
-                                    // Save the email as a EML file
-                                    using (var fs = new FileStream(emlFileName, FileMode.Create, FileAccess.Write))
-                                    {
-                                        fs.Write(email.MimeContent.Content, 0, email.MimeContent.Content.Length);
-                                    }
-
-                                    string user_email = email.From.Address;
-                                    string body = email.Body.Text;
-
-                                    if (debug.ToUpper() == "TRUE")
-                                    {
-                                        WriteToFile("       Subject : " + email.Subject + " at " + DateTime.Now.ToString("dd/MM/yyyy HH:mm:ss"));
-                                    }
-
-                                    COP_BID Fortinet_BID = new COP_BID();
-                                    Fortinet_BID = traitement_mail_fortinet(email.Body, emlFileName, p.country, sql_con, p.sk_valid);
-
-                                    // 
-                                    ///  Check missing skus and send a mail to sku management team
-                                    //
-                                    if (email_sku_management.Trim() != "" && email_sku_management.Contains("@"))
-                                    {
-                                        send_missing_or_duplicates_skus_to_sku_management_or_buyer(service, sql_con, Fortinet_BID);
-                                    }
-
-                                    string result = "";
-                                    if (Append_FC_Quote_ID_To_Bid_Number == "TRUE")
-                                    {
-                                        // 
-                                        ///  Check if multiple FC-QUOTE ID
-                                        //
-
-                                        string list_fc_quote_id = "";
-
-                                        foreach (BidLine lignes in Fortinet_BID.bid_lines)
-                                        {
-                                            if (lignes.IM_COMMENT.ToString().Trim() != "")
-                                            {
-                                                if (list_fc_quote_id.Contains(lignes.IM_COMMENT.ToString().Trim()) == false)
-                                                {
-                                                    list_fc_quote_id += lignes.IM_COMMENT.ToString().Trim() + "#";
-                                                }
-                                            }
-                                        }
-
-                                        if (list_fc_quote_id == "")
-                                        {
-                                            // We create the FORTINET BID
-                                            result = "";
-                                            result = create_fortinet_BID_in_COP(create_JSON(Fortinet_BID), service, Fortinet_BID.bid_header.BID_NBR_ERP);
-                                        }
-                                        else
-                                        {
-                                            string[] fc_quote_id = list_fc_quote_id.Split('#');
-
-                                            foreach (var quote_id in fc_quote_id)
-                                            {
-                                                if (quote_id != "")
-                                                {
-                                                    var Fortinet_BID_quote_ID = new COP_BID();
-                                                    Fortinet_BID_quote_ID = DeepCopy(Fortinet_BID);
-
-                                                    Fortinet_BID_quote_ID.bid_header.BID_NBR = Fortinet_BID_quote_ID.bid_header.BID_NBR + "/" + quote_id;
-                                                    Fortinet_BID_quote_ID.bid_header.BID_NBR_ERP = "";
-
-                                                    foreach (BidLine lignes in Fortinet_BID_quote_ID.bid_lines.ToList())
-                                                    {
-                                                        if (lignes.IM_COMMENT.ToString().Trim() != quote_id)
-                                                        {
-                                                            // We remove the lignes
-                                                            Fortinet_BID_quote_ID.bid_lines.Remove(lignes);
-                                                        }
-                                                    }
-
-                                                    // We create the FORTINET BID
-                                                    result = "";
-                                                    result = create_fortinet_BID_in_COP(create_JSON(Fortinet_BID_quote_ID), service, Fortinet_BID.bid_header.BID_NBR_ERP);
-                                                    if (result == "ERROR")
-                                                    {
-                                                        break;
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                    else
-                                    {
-                                        // We create the FORTINET BID
-                                        result = "";
-                                        result = create_fortinet_BID_in_COP(create_JSON(Fortinet_BID), service, Fortinet_BID.bid_header.BID_NBR_ERP);
-
-                                    }
-
-                                    if (result == "ERROR")
-                                    {
-                                        // Once processed we move the email to Archive folder
-                                        Item_move = email.Move(Find_Folder(service, "Erreur"));
-                                    }
-                                    else
-                                    {
-                                        // Once processed we move the email to Archive folder
-                                        Item_move = email.Move(Find_Folder(service, sharedmailbox_folder_out));
-                                    }
-
-                                    Item_move = null;
-
-                                    nb_mail = nb_mail + 1;
-                                    System.Threading.Thread.Sleep(500);
-                                }
-                                catch (Exception)
-                                {
-
-                                    // On archive le mail dans le dossier ERREUR
-                                    Item_move = item.Move(Find_Folder(service, "Erreur"));
-                                    Item_move = null;
-
-                                }
-                            }
-
-                            if (debug.ToUpper() == "TRUE")
-                            {
-                                WriteToFile("   " + nb_mail + " Email(s) have been processed at " + DateTime.Now.ToString("dd/MM/yyyy HH:mm:ss"));
-                            }
-                        }
-                        else
-                        {
-                            if (debug.ToUpper() == "TRUE")
-                            {
-                                WriteToFile("   No emails found");
-                            }
-                        }
-
-                        results = null;
-                    }
-                    catch (Exception e)
-                    {
-                        if (debug.ToUpper() == "TRUE")
-                        {
-                            WriteToFile("   Error get emails         : " + e.Message);
-                        }
-                    }
-                }
-            }
-
-            System.GC.Collect();
-            System.GC.WaitForPendingFinalizers();
-        }
-        public void Read_Email_with_Graph(string sql_con, string logs, string session_name)
+        public void Read_Email_with_Graph(string sql_con, string logs, string temp_folder, string session_name)
         {
             string global_parameters = "";
             string service_path = Path.GetDirectoryName(System.Reflection.Assembly.GetEntryAssembly().Location);
             int nb_mail = 0;
             setlogs_folder(service_path + "\\" + logs);
+            settemp_folder(service_path + "\\" + temp_folder);
             global_session_name = session_name;
 
             // Get the global parameters of the ACTION
-            global_parameters = get_IMCA_paramters(sql_con, "FORTINET_BID_LOAD");
+            global_parameters = get_IMCA_paramters(sql_con, "FORTINET_LOAD_BID");
 
             var param = new JSON_file();
             param = JsonConvert.DeserializeObject<JSON_file>(global_parameters);
@@ -1779,9 +1499,6 @@ namespace IMCA_Services
                 setParamDebug(p.debug);
                 setStartDateScan(p.start_date_scan);
                 setSharedMailboxName(p.sharedmailbox_name);
-                setSharedMailboxAccount(p.sharedmailbox_account);
-                setSharedMailboxPassword(DecodeFrom64(p.sharedmailbox_password));
-                setSharedMailboxServer(p.sharedmailbox_server);
                 setsharedmailbox_folder_in(p.sharedmailbox_folder_in);
                 setNumber_of_mails(p.number_of_mails);
                 setsharedmailbox_folder_out(p.sharedmailbox_folder_out);
@@ -1794,6 +1511,7 @@ namespace IMCA_Services
                 setbuyer_email_cc(p.buyer_email_cc);
                 setsku_creation_template(p.sku_creation_template);
                 setParamAppend_FC_Quote_ID_To_Bid_Number(p.Append_FC_Quote_ID_To_Bid_Number);
+
 
                 if (active.ToUpper() == "TRUE")
                 {
