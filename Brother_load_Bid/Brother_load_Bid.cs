@@ -44,7 +44,7 @@ namespace Brother_load_Bid
         private string sql_connexion_parameter_global = "";
         private string dss_con_openrowset_parameter_global = "";
 
-        private GraphServiceClient current_graph_service = null;
+        private GraphServiceClient graphService = null;
 
         public Brother_load_Bid()
         {
@@ -165,9 +165,9 @@ namespace Brother_load_Bid
                             WriteToFile("   Connexion to " + sharedmailbox_name + " at " + DateTime.Now.ToString("dd/MM/yyyy HH:mm:ss"));
                         }
 
-                        GraphServiceClient graphService = Connexion_Microsoft_Graph();
+                        graphService = Connexion_Microsoft_Graph();
 
-                        current_graph_service = graphService;
+            
 
                         ValidateRequiredParameters();
 
@@ -606,7 +606,7 @@ namespace Brother_load_Bid
                 using (SqlCommand cmd = new SqlCommand())
                 {
                     cmd.Connection = con;
-                    cmd.CommandTimeout = 0;
+                    cmd.CommandTimeout = 300;
                     cmd.CommandText = @"
                         SELECT ISNULL(VALUE, '') AS VALUE
                         FROM [PCM_TAB_IMCA_PARAMETER_GLOBAL]
@@ -987,7 +987,7 @@ namespace Brother_load_Bid
 
                 using (SqlCommand cmd = new SqlCommand(selectSql, con))
                 {
-                    cmd.CommandTimeout = 0;
+                    cmd.CommandTimeout = 300;
 
                     using (SqlDataReader dr = cmd.ExecuteReader())
                     {
@@ -1025,7 +1025,7 @@ namespace Brother_load_Bid
 
             using (SqlCommand cmd = new SqlCommand(sql, con))
             {
-                cmd.CommandTimeout = 0;
+                cmd.CommandTimeout = 300;
                 cmd.Parameters.AddWithValue("@numCotaVendor", numCotaVendor.ToUpper().Trim());
 
                 return Convert.ToInt32(cmd.ExecuteScalar());
@@ -1042,7 +1042,7 @@ namespace Brother_load_Bid
 
             using (SqlCommand cmd = new SqlCommand(sql, con))
             {
-                cmd.CommandTimeout = 0;
+                cmd.CommandTimeout = 300;
                 cmd.Parameters.AddWithValue("@dateSelloutEnd", dateFinValidite);
                 cmd.Parameters.AddWithValue("@numCotaVendor", numCotaVendor.ToUpper().Trim());
                 cmd.ExecuteNonQuery();
@@ -1314,7 +1314,7 @@ namespace Brother_load_Bid
 
             using (SqlCommand cmd = new SqlCommand(insertSql, con))
             {
-                cmd.CommandTimeout = 0;
+                cmd.CommandTimeout = 300 ;
                 cmd.Parameters.AddWithValue("@numCotaVendor", numCotaVendor);
                 cmd.Parameters.AddWithValue("@version", Convert.ToInt32(numVersion));
                 cmd.Parameters.AddWithValue("@eu", nomEu ?? "");
@@ -1333,7 +1333,7 @@ namespace Brother_load_Bid
 
             using (SqlCommand cmd = new SqlCommand(selectSql, con))
             {
-                cmd.CommandTimeout = 0;
+                cmd.CommandTimeout = 300;
                 cmd.Parameters.AddWithValue("@numCotaVendor", numCotaVendor);
 
                 return Convert.ToInt32(cmd.ExecuteScalar());
@@ -1728,7 +1728,7 @@ namespace Brother_load_Bid
             {
                 using (SqlCommand cmd = new SqlCommand(sql, con))
                 {
-                    cmd.CommandTimeout = 0;
+                    cmd.CommandTimeout = 300;
 
                     if (parameters != null)
                     {
@@ -1759,14 +1759,14 @@ namespace Brother_load_Bid
                     return;
                 }
 
-                if (current_graph_service == null)
+                if (graphService == null)
                 {
-                    WriteToFile("Functional Brother email not sent because current_graph_service is null. Message : " + message);
+                    WriteToFile("Functional Brother email not sent because graphService is null. Message : " + message);
                     return;
                 }
 
                 EnvoiEmail_with_Graph(
-                    current_graph_service,
+                    graphService,
                     "Importation des cotations Brother",
                     message,
                     recipient
@@ -1784,7 +1784,7 @@ namespace Brother_load_Bid
             {
                 WriteToFile("SQL error in " + methodName + " : " + ex.Message);
 
-                if (current_graph_service == null)
+                if (graphService == null)
                 {
                     WriteToFile("Unable to send SQL technical issue email because GraphServiceClient is null");
                     return;
@@ -1800,10 +1800,10 @@ namespace Brother_load_Bid
                     return;
                 }
 
-                string subject = "BROTHER_LOAD_BID - Erreur SQL dans " + methodName;
+                string subject = global_application_name + " - Erreur SQL dans " + methodName;
 
                 string body =
-                    "Une erreur SQL est survenue dans BROTHER_LOAD_BID.<br/><br/>" +
+                    "Une erreur SQL est survenue dans " + global_application_name + ".<br/><br/>" +
                     "<b>Méthode :</b> " + methodName + "<br/>" +
                     "<b>Timeout configuré :</b> " + 300 + " secondes<br/>" +
                     "<b>Message :</b> " + ex.Message + "<br/><br/>" +
@@ -1811,7 +1811,7 @@ namespace Brother_load_Bid
                     "<pre>" + SanitizeSqlForMail(sql) + "</pre>";
 
                 EnvoiEmail_with_Graph(
-                    current_graph_service,
+                    graphService,
                     subject,
                     body,
                     recipient
