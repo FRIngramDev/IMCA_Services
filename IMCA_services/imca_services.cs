@@ -1497,7 +1497,7 @@ namespace IMCA_Services
                             cmd2.CommandText = "select getdate()";
 
                             DateTime dteSysSQL = (DateTime)cmd2.ExecuteScalar();
-                            dteSysSQL = new DateTime(dteSysSQL.Year, dteSysSQL.Month, dteSysSQL.Day, dteSysSQL.Hour, dteSysSQL.Minute, 0, 0);
+                            dteSysSQL = new DateTime(dteSysSQL.Year, dteSysSQL.Month, dteSysSQL.Day, dteSysSQL.Hour, dteSysSQL.Minute, dteSysSQL.Second, 0);
                             DateTime dteNextToDodate = dteSysSQL;
 
                             int DateInterval_value = 0;

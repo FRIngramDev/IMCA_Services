@@ -38,7 +38,7 @@ namespace SoCOP_FR
 
         private string sql_connexion_parameter_global = "";
 
-        private GraphServiceClient current_graph_service = null;
+        private GraphServiceClient graphService = null;
 
         public SoCOP_FR()
         {
@@ -151,7 +151,7 @@ namespace SoCOP_FR
                             WriteToFile("   Connexion to " + sharedmailbox_name + " at " + DateTime.Now.ToString("dd/MM/yyyy HH:mm:ss"));
                         }
 
-                        GraphServiceClient graphService = Connexion_Microsoft_Graph();
+                        graphService = Connexion_Microsoft_Graph();
 
                   
                         ValidateRequiredParameters();
@@ -195,36 +195,61 @@ namespace SoCOP_FR
                                         WriteToFile("       Subject : " + email.Subject + " at " + DateTime.Now.ToString("dd/MM/yyyy HH:mm:ss"));
                                     }
 
-                                    if (email.HasAttachments == true)
+                                    if (!string.IsNullOrWhiteSpace(email.Subject) && email.Subject.ToUpper().Contains("CISCO")==false && email.Subject.ToUpper().Contains("RE:") == false)
                                     {
-                                        List<string> attachments = DownloadExcelAttachmentsWithGraph(
-                                            graphService,
-                                            sharedmailbox_name,
-                                            email.Id
-                                        );
-
-                                        if (attachments.Count == 0)
+                                        if (!string.IsNullOrWhiteSpace(email.From.EmailAddress.Address.ToString()) && email.From.EmailAddress.Address.ToString().ToLower().Trim() != "automail@ingrammicro.com")
                                         {
-                                            WriteToFile("       No Excel attachment found for email : " + email.Subject);
+                                            //On archive pour l'instant les mails 
+
+                                            //Flague le mail comme lu
+                                            MarkEmailAsRead(graphService, sharedmailbox_name, email.Id);
+
+                                            // Déplace le mail dans le dossier Erreur
+                                            MoveEmail(graphService, sharedmailbox_name, email.Id, errorFolder.Id);
                                         }
-
-                                        foreach (string strAttachment in attachments)
+                                        else
                                         {
-                                            if (debug.ToUpper() == "TRUE")
+                                            if (!string.IsNullOrWhiteSpace(email.Subject) && email.Subject.ToUpper().Contains("SO COP COMPLETED") == false)
                                             {
-                                                WriteToFile("       Attachment : " + strAttachment);
+                                                //Flague le mail comme lu
+                                                MarkEmailAsRead(graphService, sharedmailbox_name, email.Id);
+
+                                                // Déplace le mail dans le dossier Erreur
+                                                MoveEmail(graphService, sharedmailbox_name, email.Id, errorFolder.Id);
+
+                                            }
+                                            else
+                                            {
+                                                //Numero du BL dans le bon format + les personnes en copie pour T_deblocage_sales
+                                                string num_bl = email.Subject.Substring(25, 11).Replace("-", "");
+
+                                                // On recupére l'adresse du /(des) destinataire(s)
+                                                string list_recipients = email.ToRecipients != null ? string.Join(";", email.ToRecipients.Select(r => r.EmailAddress.Address)) : "";
+
+                                                // On insert dans T_deblocage_sales
+                                                UpdateT_deblocage_sales(sql_connexion, num_bl, list_recipients);
+
+                                                //Flague le mail comme lu
+                                                MarkEmailAsRead(graphService, sharedmailbox_name, email.Id);
+
+                                                // Déplace le mail dans le dossier Archive
+                                                MoveEmail(graphService, sharedmailbox_name, email.Id, archiveFolder.Id);
+
                                             }
 
-                                            ImportationFichierExcelEnBase(strAttachment);
                                         }
+
+
                                     }
                                     else
                                     {
-                                        WriteToFile("       No attachment found for email : " + email.Subject);
-                                    }
+                                        //Flague le mail comme lu
+                                        MarkEmailAsRead(graphService, sharedmailbox_name, email.Id);
 
-                                    MarkEmailAsRead(graphService, sharedmailbox_name, email.Id);
-                                    MoveEmail(graphService, sharedmailbox_name, email.Id, archiveFolder.Id);
+                                        // Déplace le mail dans le dossier Archive
+                                        MoveEmail(graphService, sharedmailbox_name, email.Id, archiveFolder.Id);
+
+                                    }
 
                                     nb_mail++;
 
@@ -234,17 +259,14 @@ namespace SoCOP_FR
                                 {
                                     WriteToFile("   Error processing email : " + ex.Message + " at " + DateTime.Now.ToString("dd/MM/yyyy HH:mm:ss"));
 
+
                                     try
                                     {
-                                        string recipient = !string.IsNullOrWhiteSpace(email_in_case_of_technical_issue)
-                                            ? email_in_case_of_technical_issue
-                                            : email_to;
-
                                         EnvoiEmail_with_Graph(
                                             graphService,
-                                            "Importation des cotations Brother",
-                                            "import_cotation_brother - Une erreur (" + ex.Message + ") est survenue lors du traitement d'un fichier. Le mail a été déplacé dans le dossier Erreur.",
-                                            recipient
+                                            global_application_name,
+                                            global_application_name + " - Une erreur (" + ex.Message + ") est survenue lors du traitement du mail. Le mail a été déplacé dans le dossier Erreur.",
+                                            email_in_case_of_technical_issue
                                         );
                                     }
                                     catch (Exception mailEx)
@@ -295,6 +317,279 @@ namespace SoCOP_FR
             }
         }
 
+
+        private void UpdateT_deblocage_sales(string con, string num_bl, string Destinataires)
+        {
+            string sql = @"INSERT INTO T_deblocage_sales(nom_user, date_demande, num_bl, type_demande, top_traite, email_demandeur) VALUES ('macro_socop', getdate(), @num_bl, 'AUTO', 'N', @email_demandeur)" ;
+
+            try
+            {
+                using (SqlConnection conn = new SqlConnection(con))
+                {
+                    conn.Open();
+                    using (SqlCommand cmd = new SqlCommand(sql, conn))
+                    {
+                        cmd.CommandTimeout = 300;
+                        cmd.Parameters.AddWithValue("@num_bl", num_bl);
+                        cmd.Parameters.AddWithValue("@email_demandeur", Destinataires);
+                        cmd.ExecuteNonQuery();
+                    }
+                    conn.Close();
+                }
+            }
+            catch (Exception ex)
+            {
+                SendSqlTechnicalIssueMail("UpdateT_deblocage_sales", sql, ex);
+                throw;
+            }
+        }
+
+        private void SendSqlTechnicalIssueMail(string methodName, string sql, Exception ex)
+        {
+            try
+            {
+                WriteToFile("SQL error in " + methodName + " : " + ex.Message);
+
+
+
+                string subject = global_application_name + " - Erreur SQL dans " + methodName;
+
+                string body =
+                    "Une erreur SQL est survenue dans " + global_application_name + ".<br/><br/>" +
+                    "<b>Méthode :</b> " + methodName + "<br/>" +
+                    "<b>Timeout configuré :</b> " + 300 + " secondes<br/>" +
+                    "<b>Message :</b> " + ex.Message + "<br/><br/>" +
+                    "<b>Requête SQL :</b><br/>" +
+                    "<pre>" + sql + "</pre>";
+
+                EnvoiEmail_with_Graph(
+                    graphService,
+                    subject,
+                    body,
+                    email_in_case_of_technical_issue
+                );
+            }
+            catch (Exception mailEx)
+            {
+                WriteToFile("Error sending SQL technical issue email : " + mailEx.Message);
+            }
+        }
+
+
+        private void EnvoiEmail_with_Graph(GraphServiceClient graphService, string subject, string body, string recipient)
+        {
+            if (string.IsNullOrWhiteSpace(recipient) || !recipient.Contains("@"))
+            {
+                return;
+            }
+
+            List<Recipient> toRecipients = BuildRecipients(recipient);
+           // List<Recipient> ccRecipients = BuildRecipients(email_cc);
+
+            Message message = new Message
+            {
+                Subject = subject,
+                Body = new ItemBody
+                {
+                    ContentType = BodyType.Html,
+                    Content = body.Replace(Environment.NewLine, "<br/>")
+                },
+                ToRecipients = toRecipients
+            };
+
+            /*
+            if (ccRecipients.Count > 0)
+            {
+                message.CcRecipients = ccRecipients;
+            }
+            */
+            var requestBody = new Microsoft.Graph.Users.Item.SendMail.SendMailPostRequestBody
+            {
+                Message = message,
+                SaveToSentItems = true
+            };
+
+            graphService.Users[sharedmailbox_name]
+                .SendMail
+                .PostAsync(requestBody)
+                .GetAwaiter()
+                .GetResult();
+        }
+
+
+        private List<Recipient> BuildRecipients(string emails)
+        {
+            List<Recipient> recipients = new List<Recipient>();
+
+            if (string.IsNullOrWhiteSpace(emails))
+            {
+                return recipients;
+            }
+
+            string[] splitEmails = emails.Split(new char[] { ';', ',' }, StringSplitOptions.RemoveEmptyEntries);
+
+            foreach (string email in splitEmails)
+            {
+                string address = email.Trim();
+
+                if (address.Contains("@"))
+                {
+                    recipients.Add(new Recipient
+                    {
+                        EmailAddress = new EmailAddress
+                        {
+                            Address = address
+                        }
+                    });
+                }
+            }
+
+            return recipients;
+        }
+
+        private void MarkEmailAsRead(GraphServiceClient graphService, string mailbox, string messageId)
+        {
+            Message messageUpdate = new Message
+            {
+                IsRead = true
+            };
+
+            graphService.Users[mailbox]
+                .Messages[messageId]
+                .PatchAsync(messageUpdate)
+                .GetAwaiter()
+                .GetResult();
+        }
+
+        private void MoveEmail(GraphServiceClient graphService, string mailbox, string messageId, string destinationFolderId)
+        {
+            var requestBody = new Microsoft.Graph.Users.Item.Messages.Item.Move.MovePostRequestBody
+            {
+                DestinationId = destinationFolderId
+            };
+
+            graphService.Users[mailbox]
+                .Messages[messageId]
+                .Move
+                .PostAsync(requestBody)
+                .GetAwaiter()
+                .GetResult();
+        }
+
+        private MessageCollectionResponse GetMessagesToProcess(GraphServiceClient graphService, string folderId)
+        {
+            int topEmails = 10;
+
+            if (!int.TryParse(number_of_mails, out topEmails))
+            {
+                topEmails = 10;
+            }
+
+            return graphService.Users[sharedmailbox_name]
+                .MailFolders[folderId]
+                .Messages
+                .GetAsync(config =>
+                {
+                    config.QueryParameters.Top = topEmails;
+                    config.QueryParameters.Orderby = new string[] { "receivedDateTime asc" };
+                    config.QueryParameters.Select = new string[]
+                    {
+                        "id",
+                        "subject",
+                        "from",
+                        "hasAttachments",
+                        "receivedDateTime",
+                        "isRead",
+                        "ToRecipients"
+                    };
+
+                    string filter = BuildMessageFilter();
+
+                    if (!string.IsNullOrWhiteSpace(filter))
+                    {
+                        config.QueryParameters.Filter = filter;
+                    }
+                })
+                .GetAwaiter()
+                .GetResult();
+        }
+
+        private string BuildMessageFilter()
+        {
+            if (string.IsNullOrWhiteSpace(start_date_scan))
+            {
+                return "";
+            }
+
+            DateTime searchDate;
+
+            if (DateTime.TryParse(start_date_scan, out searchDate))
+            {
+                return "receivedDateTime ge " + searchDate.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ");
+            }
+
+            if (start_date_scan.Length == 8)
+            {
+                searchDate = new DateTime(
+                    int.Parse(start_date_scan.Substring(0, 4)),
+                    int.Parse(start_date_scan.Substring(4, 2)),
+                    int.Parse(start_date_scan.Substring(6, 2))
+                );
+
+                return "receivedDateTime ge " + searchDate.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ");
+            }
+
+            return "";
+        }
+
+        private MailFolder GetInputFolder(GraphServiceClient graphService)
+        {
+            if (sharedmailbox_folder_in.ToUpper().Trim() == "INBOX")
+            {
+                return graphService.Users[sharedmailbox_name]
+                    .MailFolders["inbox"]
+                    .GetAsync()
+                    .GetAwaiter()
+                    .GetResult();
+            }
+
+            return GetChildFolderByName(graphService, sharedmailbox_name, sharedmailbox_folder_in);
+        }
+
+        private MailFolder GetChildFolderByName(GraphServiceClient graphService, string mailbox, string folderName)
+        {
+            string safeFolderName = EscapeODataString(folderName);
+
+            MailFolderCollectionResponse folders = graphService.Users[mailbox]
+                .MailFolders["inbox"]
+                .ChildFolders
+                .GetAsync(config =>
+                {
+                    config.QueryParameters.Filter = $"displayName eq '{safeFolderName}'";
+                })
+                .GetAwaiter()
+                .GetResult();
+
+            if (folders == null || folders.Value == null || folders.Value.Count == 0)
+            {
+                throw new Exception("Folder not found : " + folderName);
+            }
+
+            return folders.Value.First();
+        }
+
+        private string EscapeODataString(string value)
+        {
+            if (value == null)
+            {
+                return "";
+            }
+
+            return value.Replace("'", "''");
+        }
+
+
+
         private void ValidateRequiredParameters()
         {
             if (string.IsNullOrWhiteSpace(number_of_mails))
@@ -344,7 +639,7 @@ namespace SoCOP_FR
                 using (SqlCommand cmd = new SqlCommand())
                 {
                     cmd.Connection = con;
-                    cmd.CommandTimeout = 0;
+                    cmd.CommandTimeout = 300;
                     cmd.CommandText = @"
                         SELECT ISNULL(VALUE, '') AS VALUE
                         FROM [PCM_TAB_IMCA_PARAMETER_GLOBAL]
