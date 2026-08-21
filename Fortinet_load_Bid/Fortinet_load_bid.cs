@@ -1,6 +1,5 @@
 ﻿using Azure.Identity;
 using ClosedXML.Excel;
-using Microsoft.Exchange.WebServices.Data;
 using Microsoft.Graph;
 using Microsoft.Graph.Models;
 using Microsoft.VisualBasic;
