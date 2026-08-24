@@ -111,7 +111,7 @@ namespace Brother_load_Bid
 
                 if (string.IsNullOrWhiteSpace(global_parameters))
                 {
-                    WriteToFile("No parameters found for BROTHER_BID_LOAD");
+                    WriteToFile("No parameters found for " + global_application_name);
                     return;
                 }
 
@@ -119,7 +119,7 @@ namespace Brother_load_Bid
 
                 if (param == null || param.countries == null || param.countries.Count == 0)
                 {
-                    WriteToFile("BROTHER_BID_LOAD parameters are empty or invalid");
+                    WriteToFile(global_application_name + " parameters are empty or invalid");
                     return;
                 }
 
@@ -257,8 +257,8 @@ namespace Brother_load_Bid
 
                                         EnvoiEmail_with_Graph(
                                             graphService,
-                                            "Importation des cotations Brother",
-                                            "import_cotation_brother - Une erreur (" + ex.Message + ") est survenue lors du traitement d'un fichier. Le mail a été déplacé dans le dossier Erreur.",
+                                            global_application_name,
+                                            global_application_name + " - Une erreur (" + ex.Message + ") est survenue lors du traitement d'un fichier. Le mail a été déplacé dans le dossier Erreur.",
                                             recipient
                                         );
                                     }
@@ -643,7 +643,7 @@ namespace Brother_load_Bid
 
             string filePath = Path.Combine(
                 logs_folder,
-                "IMCA_" + global_session_name + "_" + DateTime.Now.ToString("dd_MM_yyyy") + "_" + country + "_BROTHER_BID_LOAD.txt"
+                "IMCA_" + global_session_name + "_" + DateTime.Now.ToString("dd_MM_yyyy") + "_" + country + "_" + global_application_name + ".txt"
             );
 
             File.AppendAllText(
@@ -759,7 +759,7 @@ namespace Brother_load_Bid
 
                     if (!topCotationBrother)
                     {
-                        string message = "Cotation BROTHER ignored because REVENDEUR was not found : " + filePath;
+                        string message = global_application_name + " ignored because REVENDEUR was not found : " + filePath;
                         WriteToFile(message);
                         return;
                     }
@@ -791,7 +791,7 @@ namespace Brother_load_Bid
 
                     if (string.IsNullOrWhiteSpace(numCotaVendor))
                     {
-                        string message = "Cotation BROTHER - Impossible de retrouver le n° de cotation dans le fichier Excel donné par Brother";
+                        string message = global_application_name + " - Impossible de retrouver le n° de cotation dans le fichier Excel donné par Brother";
                         WriteToFile(message);
                         SendFunctionalBrotherMail(message);
                         throw new Exception(message);
@@ -833,7 +833,7 @@ namespace Brother_load_Bid
                         }
                         catch (Exception ex)
                         {
-                            string message = "Cotation BROTHER " + numCotaVendor + " - " + ex.Message;
+                            string message = global_application_name + " " + numCotaVendor + " - " + ex.Message;
                             WriteToFile(message);
                             SendFunctionalBrotherMail(message);
                             throw;
@@ -841,7 +841,7 @@ namespace Brother_load_Bid
 
                         UpdateBrotherEndDate(con, numCotaVendor, prolongationEndDate);
 
-                        string messageProlongation = "Cotation BROTHER " + numCotaVendor + " - Prolongation de cette cotation";
+                        string messageProlongation = global_application_name + " " + numCotaVendor + " - Prolongation de cette cotation";
                         WriteToFile(messageProlongation);
                         SendFunctionalBrotherMail(messageProlongation);
 
@@ -856,7 +856,7 @@ namespace Brother_load_Bid
                     }
                     catch (Exception ex)
                     {
-                        string message = "Cotation BROTHER " + numCotaVendor + " - " + ex.Message;
+                        string message = global_application_name + " " + numCotaVendor + " - " + ex.Message;
                         WriteToFile(message);
                         SendFunctionalBrotherMail(message);
                         throw;
@@ -864,7 +864,7 @@ namespace Brother_load_Bid
 
                     if (lines.Count == 0)
                     {
-                        string message = "Cotation BROTHER " + numCotaVendor + " - Impossible de retrouver les références produits";
+                        string message = global_application_name + " " + numCotaVendor + " - Impossible de retrouver les références produits";
                         WriteToFile(message);
                         SendFunctionalBrotherMail(message);
                         throw new Exception(message);
@@ -876,7 +876,7 @@ namespace Brother_load_Bid
                     }
                     catch (Exception ex)
                     {
-                        string message = "Cotation BROTHER " + numCotaVendor + " - " + ex.Message;
+                        string message = global_application_name + " " + numCotaVendor + " - " + ex.Message;
                         WriteToFile(message);
                         SendFunctionalBrotherMail(message);
                         throw;
@@ -924,7 +924,7 @@ namespace Brother_load_Bid
 
                         if (!string.IsNullOrWhiteSpace(nomRevendeur))
                         {
-                            message = "Cotation BROTHER " + numCotaVendor + " - non matchée automatiquement pour " + nomRevendeur;
+                            message = global_application_name + " " + numCotaVendor + " - non matchée automatiquement pour " + nomRevendeur;
                         }
                         else
                         {
