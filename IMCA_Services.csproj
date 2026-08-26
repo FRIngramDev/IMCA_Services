@@ -306,6 +306,7 @@
     <Compile Include="Backorder_HP_FR\Backorder_HP_FR.cs" />
     <Compile Include="Brother_load_Bid\Brother_load_Bid.cs" />
     <Compile Include="Fortinet_load_Bid\Fortinet_load_bid.cs" />
+    <Compile Include="Gestion_Requete_FR\Gestion_Requete_FR.cs" />
     <Compile Include="Idep_FR\Idep_FR.cs" />
     <Compile Include="ProjectInstaller.cs">
       <SubType>Component</SubType>
