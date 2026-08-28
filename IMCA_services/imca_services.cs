@@ -197,61 +197,123 @@ namespace IMCA_Services
             }
 
         }
+        //protected override void OnStop()
+        //{
+        //    while (timer_check_TODO_is_running == true)
+        //    {
+        //        System.Threading.Thread.Sleep(500);
+        //        System.Windows.Forms.Application.DoEvents();
+        //    }
+
+        //    if (timer_check_TODO != null)
+        //    {
+        //        timer_check_TODO.Stop();
+        //        timer_check_TODO.Dispose();
+
+        //        RequestAdditionalTime(120000);
+
+        //        timer_check_TODO?.Stop();
+
+        //        while (timer_check_TODO_is_running ||
+        //               Volatile.Read(ref nb_created_thread) > 0)
+        //        {
+        //            RequestAdditionalTime(120000);
+        //            Thread.Sleep(500);
+        //        }
+
+        //        timer_check_TODO?.Dispose();
+
+
+        //    }
+
+        //    if (Volatile.Read(ref nb_created_thread) > 0 || HasDatabaseThreadedActions())
+        //    {
+        //        WriteToFile("Before stopping the service we check if threads are running at " + DateTime.Now.ToString("dd/MM/yyyy HH:mm:ss"));
+
+        //        Boolean bol_thread = true;
+        //        int nb_running_thread = 0;
+
+        //        using (SqlConnection con = new SqlConnection(sql_con))
+        //        {
+        //            con.Open();
+
+        //            using (SqlCommand cmd = new SqlCommand())
+        //            {
+        //                cmd.Connection = con;
+        //                cmd.CommandTimeout = 0;
+
+        //                while (bol_thread)
+        //                {
+        //                    cmd.CommandText = "select count(*) from [IMCA_BACKOFFICE].[dbo].PCM_TAB_IMCA_ACTION where TODO_BY='THREAD_" + session_name.ToUpper() + "'";
+        //                    nb_running_thread = int.Parse(cmd.ExecuteScalar().ToString());
+
+        //                    if (nb_running_thread > 0)
+        //                    {
+        //                        WriteToFile(nb_running_thread.ToString() + " Thread(s) is(are) running. We wait 10 secs at " + DateTime.Now.ToString("dd/MM/yyyy HH:mm:ss"));
+        //                        System.Threading.Thread.Sleep(10000);
+        //                        System.Windows.Forms.Application.DoEvents();
+        //                    }
+        //                    else
+        //                    {
+        //                        bol_thread = false;
+        //                    }
+        //                }
+        //            }
+
+        //            con.Close();
+        //        }
+
+        //    }
+
+        //    WriteToFile("IMCA Services stopped at " + DateTime.Now.ToString("dd/MM/yyyy HH:mm:ss"));
+        //}
+
         protected override void OnStop()
         {
-            while (timer_check_TODO_is_running == true)
+            WriteToFile(
+                "IMCA Services stopping at " +
+                DateTime.Now.ToString("dd/MM/yyyy HH:mm:ss"));
+
+            // Prevent the timer from starting another polling cycle.
+            timer_check_TODO?.Stop();
+
+            DateTime stopDeadline = DateTime.Now.AddMinutes(10);
+
+            // Wait for the timer callback and local action threads.
+            while ((timer_check_TODO_is_running ||
+                    Volatile.Read(ref nb_created_thread) > 0) &&
+                   DateTime.Now < stopDeadline)
             {
-                System.Threading.Thread.Sleep(500);
-                System.Windows.Forms.Application.DoEvents();
+                // Inform Windows that the stop operation is still progressing.
+                RequestAdditionalTime(30000);
+
+                WriteToFile(
+                    "Waiting for service tasks to stop. Timer running: " +
+                    timer_check_TODO_is_running +
+                    ", active threads: " +
+                    Volatile.Read(ref nb_created_thread));
+
+                Thread.Sleep(1000);
             }
 
-            if (timer_check_TODO != null)
+            timer_check_TODO?.Dispose();
+            timer_check_TODO = null;
+
+            // Do not wait forever if an application or macro is blocked.
+            if (timer_check_TODO_is_running ||
+                Volatile.Read(ref nb_created_thread) > 0 ||
+                HasDatabaseThreadedActions())
             {
-                timer_check_TODO.Stop();
-                timer_check_TODO.Dispose();
+                WriteToFile(
+                    "Service stop timeout reached. Some actions are still running.");
             }
 
-            if (Volatile.Read(ref nb_created_thread) > 0 || HasDatabaseThreadedActions())
-            {
-                WriteToFile("Before stopping the service we check if threads are running at " + DateTime.Now.ToString("dd/MM/yyyy HH:mm:ss"));
-
-                Boolean bol_thread = true;
-                int nb_running_thread = 0;
-
-                using (SqlConnection con = new SqlConnection(sql_con))
-                {
-                    con.Open();
-
-                    using (SqlCommand cmd = new SqlCommand())
-                    {
-                        cmd.Connection = con;
-                        cmd.CommandTimeout = 0;
-
-                        while (bol_thread)
-                        {
-                            cmd.CommandText = "select count(*) from [IMCA_BACKOFFICE].[dbo].PCM_TAB_IMCA_ACTION where TODO_BY='THREAD_" + session_name.ToUpper() + "'";
-                            nb_running_thread = int.Parse(cmd.ExecuteScalar().ToString());
-
-                            if (nb_running_thread > 0)
-                            {
-                                WriteToFile(nb_running_thread.ToString() + " Thread(s) is(are) running. We wait 10 secs at " + DateTime.Now.ToString("dd/MM/yyyy HH:mm:ss"));
-                                System.Threading.Thread.Sleep(10000);
-                                System.Windows.Forms.Application.DoEvents();
-                            }
-                            else
-                            {
-                                bol_thread = false;
-                            }
-                        }
-                    }
-
-                    con.Close();
-                }
-
-            }
-
-            WriteToFile("IMCA Services stopped at " + DateTime.Now.ToString("dd/MM/yyyy HH:mm:ss"));
+            WriteToFile(
+                "IMCA Services stopped at " +
+                DateTime.Now.ToString("dd/MM/yyyy HH:mm:ss"));
         }
+
+
         public void start_timer(string logs, string temp_folder)
         {
             timer_check_TODO = new System.Timers.Timer();
@@ -1342,7 +1404,7 @@ namespace IMCA_Services
                             cmd2.ExecuteNonQuery();
 
                             WriteToFile("       ACTION : " + dr["ACTION"].ToString() + " (ID : " + dr["ID"].ToString() + ") has been reserved. We can start it (using a THREAD) at " + DateTime.Now.ToString("dd/MM/yyyy HH:mm:ss") + " - Please check the associated log file of the task for details");
-                            WriteToFile("       ACTION : " + dr["ACTION"].ToString() + " (ID : " + dr["ID"].ToString() + ") has been reserved. We can start it at " + DateTime.Now.ToString("dd/MM/yyyy HH:mm:ss"), long.Parse(dr["ID"].ToString()));
+                            WriteToFile("       ACTION : " + dr["ACTION"].ToString() + " (ID : " + dr["ID"].ToString() + ") has been reserved. We can start it at " + DateTime.Now.ToString("dd/MM/yyyy HH:mm:ss"), long.Parse(dr["ID"].ToString()), logs_folder, dr["ACTION"].ToString());
                         }
                         else
                         {
@@ -1367,7 +1429,7 @@ namespace IMCA_Services
                             {
                                 case string x when x.StartsWith("SENDMAIL"):
 
-                                    WriteToFile("               FUNCTION to execute : SENDMAIL", id);
+                                    WriteToFile("               FUNCTION to execute : SENDMAIL", id, logs_folder, dr["ACTION"].ToString());
 
                                     func_to_execute = dt2["ClassName_Method"].ToString().Trim();
                                     func_to_execute = resolve_parameters(func_to_execute, long.Parse(dr["ID"].ToString()), long.Parse(dt2["ID"].ToString()), dr);
@@ -1376,7 +1438,7 @@ namespace IMCA_Services
 
                                     if (ret != "")
                                     {
-                                        WriteToFile("       ACTION : " + dr["ACTION"].ToString() + " - Unable to execute the SendMail Function : " + func_to_execute.Trim(), id);
+                                        WriteToFile("       ACTION : " + dr["ACTION"].ToString() + " - Unable to execute the SendMail Function : " + func_to_execute.Trim(), id, logs_folder, dr["ACTION"].ToString());
                                         at_least_one_error = true;
                                     }
 
@@ -1384,7 +1446,7 @@ namespace IMCA_Services
 
                                 case string x when x.StartsWith("EVALOPENQUERY"):
 
-                                    WriteToFile("               FUNCTION to execute : EVALOPENQUERY (ID : " + dt2["ID"].ToString() + ")", id);
+                                    WriteToFile("               FUNCTION to execute : EVALOPENQUERY (ID : " + dt2["ID"].ToString() + ")", id, logs_folder, dr["ACTION"].ToString());
 
                                     func_to_execute = dt2["ClassName_Method"].ToString().ToUpper().Trim();
                                     func_to_execute = resolve_parameters(func_to_execute, long.Parse(dr["ID"].ToString()), long.Parse(dt2["ID"].ToString()), dr);
@@ -1393,7 +1455,7 @@ namespace IMCA_Services
 
                                     if (ret != "")
                                     {
-                                        WriteToFile("       ACTION : " + dr["ACTION"].ToString() + " - Unable to execute the query : " + func_to_execute.Trim(), id);
+                                        WriteToFile("       ACTION : " + dr["ACTION"].ToString() + " - Unable to execute the query : " + func_to_execute.Trim(), id, logs_folder, dr["ACTION"].ToString());
                                         at_least_one_error = true;
                                     }
 
@@ -1405,10 +1467,10 @@ namespace IMCA_Services
 
                                     if (count == 2)
                                     {
-                                        WriteToFile("               FUNCTION to execute : " + dt2["ClassName_Method"].ToString() + " (ID : " + dt2["ID"].ToString() + ")", id);
-                                        WriteToFile("               NameSpace           : " + dt2["ClassName_Method"].ToString().Split('.')[0], id);
-                                        WriteToFile("               ClassName           : " + dt2["ClassName_Method"].ToString().Split('.')[1], id);
-                                        WriteToFile("               Method              : " + dt2["ClassName_Method"].ToString().Split('.')[2], id);
+                                        WriteToFile("               FUNCTION to execute : " + dt2["ClassName_Method"].ToString() + " (ID : " + dt2["ID"].ToString() + ")", id, logs_folder, dr["ACTION"].ToString());
+                                        WriteToFile("               NameSpace           : " + dt2["ClassName_Method"].ToString().Split('.')[0], id, logs_folder, dr["ACTION"].ToString());
+                                        WriteToFile("               ClassName           : " + dt2["ClassName_Method"].ToString().Split('.')[1], id, logs_folder, dr["ACTION"].ToString());
+                                        WriteToFile("               Method              : " + dt2["ClassName_Method"].ToString().Split('.')[2], id, logs_folder, dr["ACTION"].ToString());
 
                                         try
                                         {
@@ -1417,7 +1479,7 @@ namespace IMCA_Services
                                         }
                                         catch (Exception ex)
                                         {
-                                            WriteToFile("Unable to execute the function " + dt2["ClassName_Method"].ToString() + " - ACTION :  " + dr["ACTION"].ToString() + " - " + ex.Message, id);
+                                            WriteToFile("Unable to execute the function " + dt2["ClassName_Method"].ToString() + " - ACTION :  " + dr["ACTION"].ToString() + " - " + ex.Message, id, logs_folder, dr["ACTION"].ToString());
 
                                             at_least_one_error = true;
 
@@ -1444,7 +1506,7 @@ namespace IMCA_Services
                                     }
                                     else
                                     {
-                                        WriteToFile("   [FUNCTION] value (" + dt2["ClassName_Method"].ToString() + ") doesn't respect the following syntax : NameSpace.ClassName.MethodName", id);
+                                        WriteToFile("   [FUNCTION] value (" + dt2["ClassName_Method"].ToString() + ") doesn't respect the following syntax : NameSpace.ClassName.MethodName", id, logs_folder, dr["ACTION"].ToString());
 
                                         at_least_one_error = true;
                                         using (SqlConnection con_sql = new SqlConnection(sql_con))
@@ -1484,7 +1546,7 @@ namespace IMCA_Services
                             cmd2.CommandText = "UPDATE [IMCA_BACKOFFICE].[dbo].PCM_TAB_IMCA_ACTION set TODO_BY=replace(TODO_BY,'THREAD_',''),FINISHED=getdate(),SK_FINISH_DATE=DATEDIFF(d,'19951229',getdate()) where ID=" + dr["ID"].ToString();
                             cmd2.ExecuteNonQuery();
 
-                            WriteToFile("       ACTION : " + dr["ACTION"].ToString() + " (ID : " + dr["ID"].ToString() + ") finished at " + DateTime.Now.ToString("dd/MM/yyyy HH:mm:ss"), id);
+                            WriteToFile("       ACTION : " + dr["ACTION"].ToString() + " (ID : " + dr["ID"].ToString() + ") finished at " + DateTime.Now.ToString("dd/MM/yyyy HH:mm:ss"), id, logs_folder, dr["ACTION"].ToString());
 
                             // 
                             /// We add a new record for the next RUN
@@ -1664,27 +1726,27 @@ namespace IMCA_Services
                 try
                 {
                     WriteToFile(
-                        "       Starting action thread. Active threads : " +
-                        Volatile.Read(ref nb_created_thread) + "/" + maxThreads +
-                        " - ACTION : " + actionRow["ACTION"] +
-                        " (ID : " + actionRow["ID"] + ")");
+                        "       ACTION : " + actionRow["ACTION"] +
+                        " (ID : " + actionRow["ID"] + ")" + " - Starting action thread. Active threads : " +
+                        Volatile.Read(ref nb_created_thread) + "/" + maxThreads);
 
                     execute_IMCA_Action(actionRow, logs, tempFolder, true);
                 }
                 catch (Exception ex)
                 {
                     WriteToFile(
-                        "       Unhandled action thread error - ACTION : " + actionRow["ACTION"] +
-                        " (ID : " + actionRow["ID"] + ") - " + ex,
-                        Convert.ToInt64(actionRow["ID"]));
+                      "       ACTION : " + actionRow["ACTION"] +
+                      " (ID : " + actionRow["ID"] + ")" + " - Unhandled action thread error. " + ex, Convert.ToInt64(actionRow["ID"]));
+
                 }
                 finally
                 {
                     int remainingThreads = Interlocked.Decrement(ref nb_created_thread);
+
                     WriteToFile(
-                        "       Action thread released. Active threads : " + remainingThreads +
-                        " - ACTION : " + actionRow["ACTION"] +
-                        " (ID : " + actionRow["ID"] + ")");
+                         "       ACTION : " + actionRow["ACTION"] +
+                         " (ID : " + actionRow["ID"] + ")" + " - Action thread released. Active threads : " + remainingThreads);
+
                     actionTable.Dispose();
                 }
             });
@@ -1952,7 +2014,7 @@ namespace IMCA_Services
 
             timer_check_TODO_is_running = false;
         }
-        public void WriteToFile(string message, long id = 0, string logs_folder = "logs")
+        public void WriteToFile(string message, long id = 0, string logs_folder = "logs", string action_name = "")
         {
             logs_folder = service_path + "\\" + logs_folder;
 
@@ -1970,7 +2032,7 @@ namespace IMCA_Services
                     break;
 
                 default:
-                    filepath = logs_folder + "\\IMCA_" + session_name.ToUpper() + "_" + DateTime.Now.Date.ToString("dd_MM_yyyy") + "_ACTION_ID_" + id.ToString() + ".txt";
+                    filepath = logs_folder + "\\IMCA_" + session_name.ToUpper() + "_" + DateTime.Now.Date.ToString("dd_MM_yyyy") + "_XX_" + action_name.ToUpper() + "_ACTION_ID_" + id.ToString() + ".txt";
                     break;
             }
 
