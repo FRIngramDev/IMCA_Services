@@ -1,4 +1,6 @@
-﻿using Microsoft.Graph;
+﻿using ClosedXML.Excel;
+using ExcelDataReader;
+using Microsoft.Graph;
 using Microsoft.Graph.Models;
 using Newtonsoft.Json;
 using System;
@@ -9,9 +11,7 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text;
-using ExcelDataReader;
-using ClosedXML.Excel;
-using System.Threading.Tasks;
+using System.Threading;
 
 
 namespace ENCODAGE_SPLA_FR
@@ -57,6 +57,10 @@ namespace ENCODAGE_SPLA_FR
 
         // ----- Client Microsoft Graph (utilisé pour lecture/envoi emails) -----
         private GraphServiceClient graphService = null;
+
+        private string timer_attente_impulse = ""; // Timer pour attendre la fin de l'impulse
+
+
         /// <summary>
         /// Représentation du fichier JSON de configuration attendu.
         /// Contient le dossier de logs global et la liste des pays configurés.
@@ -91,6 +95,8 @@ namespace ENCODAGE_SPLA_FR
 
             public string sql_incentives_parameter_global { get; set; } = "";
             public string email_destinataire { get; set; } = "";       // Param nom chaine SQL incentives
+
+            public string timer_attente_impulse { get; set; } = ""; // Timer pour attendre la fin de l'impulse
         }
 
         /// <summary>
@@ -174,6 +180,8 @@ namespace ENCODAGE_SPLA_FR
 
                     sql_connexion = get_IMCA_paramters(sql_con, sql_connexion_parameter_global);
                     sql_connexion_macros = get_IMCA_paramters(sql_con, sql_macros_parameter_global);
+
+                    setTimerAttenteImpulse(p.timer_attente_impulse);
 
 
                     if (active.ToUpper().Trim() != "TRUE")
@@ -609,19 +617,81 @@ namespace ENCODAGE_SPLA_FR
 
         private void StartImpulseAndWait()
         {
-            const string startSql = "UPDATE T_SPLA_impulse SET imp_en_cours = 1";
-            const string statusSql = "SELECT TOP 1 ISNULL(imp_en_cours,0) FROM T_SPLA_impulse";
+            const string startSql =
+                "UPDATE T_SPLA_impulse SET imp_en_cours = 1";
 
-            ExecuteNonQuerySql(nameof(StartImpulseAndWait), sql_connexion, startSql);
+            const string statusSql =
+                "SELECT TOP 1 ISNULL(imp_en_cours, 0) " +
+                "FROM T_SPLA_impulse";
+
+            ExecuteNonQuerySql(
+                nameof(StartImpulseAndWait),
+                sql_connexion,
+                startSql);
 
             class_dev_tools.cls_ProcessActif_ala_Dde process =
-                new class_dev_tools.cls_ProcessActif_ala_Dde(sql_connexion_macros);
+                new class_dev_tools.cls_ProcessActif_ala_Dde(
+                    sql_connexion_macros);
+
             process.Id_appli = 195;
             process.InsertionDemande();
 
-            while (Convert.ToBoolean(ExecuteScalarSql(nameof(StartImpulseAndWait), sql_connexion, statusSql) ?? false))
+            DateTime startTime = DateTime.Now;
+            DateTime nextAlertTime = startTime.AddMinutes(Convert.ToInt32(timer_attente_impulse));
+
+            while (Convert.ToBoolean(
+                ExecuteScalarSql(
+                    nameof(StartImpulseAndWait),
+                    sql_connexion,
+                    statusSql) ?? false))
             {
-                System.Threading.Thread.Sleep(10000);
+                TimeSpan elapsed = DateTime.Now - startTime;
+
+                // Send another alert every XX ( timer_attente_impulse ) minutes while the macro is blocked.
+                if (DateTime.Now >= nextAlertTime)
+                {
+                    SendImpulseRestartAlert(elapsed);
+                    nextAlertTime = DateTime.Now.AddMinutes(Convert.ToInt32(timer_attente_impulse));
+                }
+
+                WriteToFile(
+                    "       Waiting for macro 195. Elapsed time : " +
+                    elapsed.ToString(@"hh\:mm\:ss"));
+
+                Thread.Sleep(30000);
+            }
+
+            WriteToFile(
+                "       Macro 195 completed after " +
+                (DateTime.Now - startTime).ToString(@"hh\:mm\:ss"));
+        }
+
+        private void SendImpulseRestartAlert(TimeSpan elapsed)
+        {
+            try
+            {
+                string body =
+                    "La macro Impulse 195 semble bloquée.<br/><br/>" +
+                    "<b>Application :</b> " + global_application_name + "<br/>" +
+                    "<b>Durée d'attente :</b> " +
+                    elapsed.ToString(@"hh\:mm\:ss") + "<br/><br/>" +
+                    "Merci de vérifier puis de relancer la macro 195.<br/>" +
+                    "Le traitement SPLA continuera à attendre sa fin.";
+
+                EnvoiEmail_with_Graph(
+                    graphService,
+                    global_application_name + " - Macro 195 à relancer",
+                    body,
+                    email_in_case_of_technical_issue);
+
+                WriteToFile(
+                    "       Macro 195 restart alert sent.");
+            }
+            catch (Exception ex)
+            {
+                WriteToFile(
+                    "       Unable to send macro 195 restart alert : " +
+                    ex.Message);
             }
         }
 
@@ -1299,6 +1369,12 @@ namespace ENCODAGE_SPLA_FR
         {
             this.sql_connexion_macros = sql_connexion_macros ?? "";
         }
+
+        public void setTimerAttenteImpulse(string timer_attente_impulse)
+        {
+            this.timer_attente_impulse = timer_attente_impulse ?? "";
+        }
+
 
     }
 }

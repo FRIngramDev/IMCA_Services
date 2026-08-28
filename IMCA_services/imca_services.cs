@@ -6,20 +6,15 @@ using System.Collections.Generic;
 using System.Data;
 using System.Data.SqlClient;
 using System.Diagnostics;
-using System.Drawing;
-using System.Drawing.Imaging;
 using System.IO;
 using System.Linq;
 using System.Reflection;
-using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.ServiceProcess;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
-using System.Windows.Automation;
-using System.Windows.Forms;
-using Task = System.Threading.Tasks.Task;
+
 
 
 namespace IMCA_Services
@@ -34,7 +29,9 @@ namespace IMCA_Services
         private string EXECUTE_IMCA_ACTION_USING_THREAD = "";
         private string Number_of_errors_allowed_per_query = "";
         private string NUMBER_OF_THREAD_MAX = "";
-        private Int16 nb_created_thread = 0;
+        // Number of action threads currently running in this service instance.
+        // Access this field only through Interlocked/Volatile operations.
+        private int nb_created_thread = 0;
         private Boolean timer_check_TODO_is_running = false;
         private string logs_folder = "";
         private string temp_folder = "";
@@ -113,7 +110,7 @@ namespace IMCA_Services
                 return Encoding.UTF8.GetString(decryptedBytes);
             }
         }
-        
+
         protected override void OnStart(string[] args)
         {
             var param = new JSON_file_config_services();
@@ -214,7 +211,7 @@ namespace IMCA_Services
                 timer_check_TODO.Dispose();
             }
 
-            if (EXECUTE_IMCA_ACTION_USING_THREAD.Trim().ToUpper() == "TRUE")
+            if (Volatile.Read(ref nb_created_thread) > 0 || HasDatabaseThreadedActions())
             {
                 WriteToFile("Before stopping the service we check if threads are running at " + DateTime.Now.ToString("dd/MM/yyyy HH:mm:ss"));
 
@@ -1297,9 +1294,6 @@ namespace IMCA_Services
         {
             SqlDataReader dt2;
 
-            if (using_thread == true)
-                nb_created_thread += 1;
-
             long id;
             switch (using_thread)
             {
@@ -1320,12 +1314,14 @@ namespace IMCA_Services
                     cmd2.Connection = con;
                     cmd2.CommandTimeout = 0;
 
-                    // Check the flags if all the "Other(s)" component(s) (ORACLE etc...) are available
-
-                    cmd2.CommandText = "SELECT FLAG from [PCM_TAB_IMCA_ACTION_FLAG] " +
-                                       "INNER JOIN (SELECT * FROM [PCM_TAB_IMCA_PARAMETER_GLOBAL] where PARAMETER like 'AVAIL_%' AND [VALUE]='0' and (SK_VALID=0 or SK_VALID=" + dr["SK_VALID"].ToString() + ")) [parameters] " +
-                                       "on PCM_TAB_IMCA_ACTION_FLAG.FLAG=[parameters].PARAMETER" +
-                                       " WHERE [ACTION_ID]=" + dr["ADMIN_ID"].ToString();
+                    // Check only availability flags. USE_THREAD is a control flag and must never block an action.
+                    cmd2.CommandText = "SELECT action_flag.FLAG FROM [PCM_TAB_IMCA_ACTION_FLAG] action_flag " +
+                                       "INNER JOIN (SELECT * FROM [PCM_TAB_IMCA_PARAMETER_GLOBAL] " +
+                                       "WHERE PARAMETER LIKE 'AVAIL_%' AND [VALUE]='0' " +
+                                       "AND (SK_VALID=0 OR SK_VALID=" + dr["SK_VALID"].ToString() + ")) [parameters] " +
+                                       "ON action_flag.FLAG=[parameters].PARAMETER " +
+                                       "WHERE action_flag.[ACTION_ID]=" + dr["ADMIN_ID"].ToString() + " " +
+                                       "AND UPPER(action_flag.FLAG)<>'USE_THREAD'";
                     dt2 = cmd2.ExecuteReader();
 
                     Boolean all_is_available = true;
@@ -1638,8 +1634,116 @@ namespace IMCA_Services
                 con.Close();
             }
 
-            if (using_thread == true)
-                nb_created_thread -= 1;
+        }
+
+        /// <summary>
+        /// Starts one IMCA action on a background STA thread when a thread slot is available.
+        /// The counter is always released in finally, including when the action throws an exception.
+        /// </summary>
+        private bool StartActionThread(DataRow sourceRow, string logs, string tempFolder)
+        {
+            int maxThreads;
+            if (!int.TryParse(NUMBER_OF_THREAD_MAX, out maxThreads) || maxThreads < 1)
+            {
+                maxThreads = 10;
+            }
+
+            if (!TryAcquireThreadSlot(maxThreads))
+            {
+                return false;
+            }
+
+            // Copy the row so the worker does not depend on the lifetime of the source DataTable.
+            DataTable actionTable = sourceRow.Table.Clone();
+            DataRow actionRow = actionTable.NewRow();
+            actionRow.ItemArray = (object[])sourceRow.ItemArray.Clone();
+            actionTable.Rows.Add(actionRow);
+
+            Thread actionThread = new Thread(() =>
+            {
+                try
+                {
+                    WriteToFile(
+                        "       Starting action thread. Active threads : " +
+                        Volatile.Read(ref nb_created_thread) + "/" + maxThreads +
+                        " - ACTION : " + actionRow["ACTION"] +
+                        " (ID : " + actionRow["ID"] + ")");
+
+                    execute_IMCA_Action(actionRow, logs, tempFolder, true);
+                }
+                catch (Exception ex)
+                {
+                    WriteToFile(
+                        "       Unhandled action thread error - ACTION : " + actionRow["ACTION"] +
+                        " (ID : " + actionRow["ID"] + ") - " + ex,
+                        Convert.ToInt64(actionRow["ID"]));
+                }
+                finally
+                {
+                    int remainingThreads = Interlocked.Decrement(ref nb_created_thread);
+                    WriteToFile(
+                        "       Action thread released. Active threads : " + remainingThreads +
+                        " - ACTION : " + actionRow["ACTION"] +
+                        " (ID : " + actionRow["ID"] + ")");
+                    actionTable.Dispose();
+                }
+            });
+
+            actionThread.IsBackground = true;
+            actionThread.SetApartmentState(ApartmentState.STA);
+
+            try
+            {
+                actionThread.Start();
+                return true;
+            }
+            catch
+            {
+                // Release the slot if the CLR cannot start the thread.
+                Interlocked.Decrement(ref nb_created_thread);
+                actionTable.Dispose();
+                throw;
+            }
+        }
+
+        /// <summary>
+        /// Atomically reserves one thread slot without exceeding NUMBER_OF_THREAD_MAX.
+        /// </summary>
+        private bool TryAcquireThreadSlot(int maxThreads)
+        {
+            while (true)
+            {
+                int current = Volatile.Read(ref nb_created_thread);
+                if (current >= maxThreads)
+                {
+                    return false;
+                }
+
+                if (Interlocked.CompareExchange(ref nb_created_thread, current + 1, current) == current)
+                {
+                    return true;
+                }
+            }
+        }
+
+        /// <summary>
+        /// Checks whether this service still owns database actions marked as threaded.
+        /// </summary>
+        private bool HasDatabaseThreadedActions()
+        {
+            const string sql = @"SELECT COUNT(*)
+                FROM [IMCA_BACKOFFICE].[dbo].[PCM_TAB_IMCA_ACTION]
+                WHERE TODO_BY=@TODO_BY AND SK_FINISH_DATE=0";
+
+            using (SqlConnection connection = new SqlConnection(sql_con))
+            using (SqlCommand command = new SqlCommand(sql, connection))
+            {
+                command.CommandTimeout = 120;
+                command.Parameters.Add("@TODO_BY", SqlDbType.VarChar, 100).Value =
+                    "THREAD_" + session_name.ToUpper();
+                connection.Open();
+                return Convert.ToInt32(command.ExecuteScalar()) > 0;
+            }
         }
 
         protected void check_if_TODO(string logs, string temp_folder)
@@ -1660,6 +1764,9 @@ namespace IMCA_Services
                     {
                         // Check if a action has been reserved (with the session name) and not started/finished
                         cmd.CommandText = " SET LANGUAGE FRENCH;SELECT action.ID,admin.ACTION,admin.ID as [ADMIN_ID],admin.SK_VALID," +
+                                          " CASE WHEN EXISTS (SELECT 1 FROM [IMCA_BACKOFFICE].[dbo].[PCM_TAB_IMCA_ACTION_FLAG] thread_flag " +
+                                          " WHERE thread_flag.ACTION_ID=admin.ID AND UPPER(thread_flag.FLAG)='USE_THREAD') " +
+                                          " THEN 1 ELSE 0 END AS USE_THREAD, " +
                                           " CASE WHEN isnull(admin.NEXT_RUN_DELAY_TYPE,'')='Y' THEN 'YYYY' ELSE isnull(admin.NEXT_RUN_DELAY_TYPE,'') END as NEXT_RUN_DELAY_TYPE,NEXT_RUN_DELAY, " +
                                           " action.[CREATED_FROM_AUTO],action.[TODO_DATE], CASE WHEN isnull(admin.NEXT_RUN_TODO_BY,'')='' THEN 'TODO' ELSE isnull(admin.NEXT_RUN_TODO_BY,'') END as NEXT_RUN_TODO_BY, " +
                                           " upper(action.CREATED_FROM) as CREATED_FROM, " +
@@ -1679,20 +1786,29 @@ namespace IMCA_Services
 
                         foreach (DataRow dr in row.Rows)
                         {
-                            if (EXECUTE_IMCA_ACTION_USING_THREAD.Trim().ToUpper() == "TRUE")
+                            // USE_THREAD is configured per action in PCM_TAB_IMCA_ACTION_FLAG.
+                            // The legacy global switch remains a fallback for actions without the flag.
+                            bool actionRequestsThread =
+                                dr.Table.Columns.Contains("USE_THREAD") &&
+                                Convert.ToInt32(dr["USE_THREAD"]) == 1;
+
+                            bool useThread = actionRequestsThread ||
+                                EXECUTE_IMCA_ACTION_USING_THREAD.Trim().Equals("TRUE", StringComparison.OrdinalIgnoreCase);
+
+                            if (useThread)
                             {
-                                if (nb_created_thread <= Int16.Parse(NUMBER_OF_THREAD_MAX))
+                                if (!StartActionThread(dr, logs, temp_folder))
                                 {
-                                    Thread new_IMCA_action_Thread = new Thread(() => execute_IMCA_Action(dr, logs, temp_folder, true));
-                                    new_IMCA_action_Thread.IsBackground = true;
-                                    new_IMCA_action_Thread.SetApartmentState(ApartmentState.STA);
-                                    new_IMCA_action_Thread.Start();
+                                    WriteToFile(
+                                        "       Thread limit reached. Action remains reserved for the next timer cycle : " +
+                                        dr["ACTION"] + " (ID : " + dr["ID"] + ")");
                                 }
                             }
                             else
                             {
                                 execute_IMCA_Action(dr, logs, temp_folder, false);
                             }
+
                             System.Threading.Thread.Sleep(500);
                         }
 
