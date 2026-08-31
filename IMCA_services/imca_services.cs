@@ -6,20 +6,15 @@ using System.Collections.Generic;
 using System.Data;
 using System.Data.SqlClient;
 using System.Diagnostics;
-using System.Drawing;
-using System.Drawing.Imaging;
 using System.IO;
 using System.Linq;
 using System.Reflection;
-using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.ServiceProcess;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
-using System.Windows.Automation;
-using System.Windows.Forms;
-using Task = System.Threading.Tasks.Task;
+
 
 
 namespace IMCA_Services
@@ -34,10 +29,18 @@ namespace IMCA_Services
         private string EXECUTE_IMCA_ACTION_USING_THREAD = "";
         private string Number_of_errors_allowed_per_query = "";
         private string NUMBER_OF_THREAD_MAX = "";
-        private Int16 nb_created_thread = 0;
+        // Number of action threads currently running in this service instance.
+        // Access this field only through Interlocked/Volatile operations.
+        private int nb_created_thread = 0;
         private Boolean timer_check_TODO_is_running = false;
+        // Set to 1 while Windows is stopping the service.
+        // The timer callback checks this value before starting a new cycle.
+        private int service_is_stopping = 0;
         private string logs_folder = "";
         private string temp_folder = "";
+
+        // Synchronizes log file writes performed by concurrent action threads.
+        private static readonly object logLock = new object();
 
         public class JSON_file_config_services
         {
@@ -113,9 +116,10 @@ namespace IMCA_Services
                 return Encoding.UTF8.GetString(decryptedBytes);
             }
         }
-        
+
         protected override void OnStart(string[] args)
         {
+            Interlocked.Exchange(ref service_is_stopping, 0);
             var param = new JSON_file_config_services();
             string json_file = "";
 
@@ -166,7 +170,18 @@ namespace IMCA_Services
                 WriteToFile("IMCA Services started at                   : " + DateTime.Now.ToString("dd/MM/yyyy HH:mm:ss"), 0, logs_folder);
                 WriteToFile("   Session Name                            : " + session_name.ToUpper(), 0, logs_folder);
                 WriteToFile("   Timer Interval                          : " + nb_sec + " second(s)", 0, logs_folder);
-                WriteToFile("   Connection String                       : " + sql_con, 0, logs_folder);
+                try
+                {
+                    SqlConnectionStringBuilder safeConnection = new SqlConnectionStringBuilder(sql_con);
+                    WriteToFile(
+                        "   SQL Server                              : " + safeConnection.DataSource +
+                        " / Database : " + safeConnection.InitialCatalog,
+                        0, logs_folder);
+                }
+                catch
+                {
+                    WriteToFile("   SQL connection configured               : TRUE", 0, logs_folder);
+                }
                 WriteToFile("   Number of Errors Allowed per query      : " + Number_of_errors_allowed_per_query, 0, logs_folder);
                 WriteToFile("   Execute IMCA Action using Thread        : " + EXECUTE_IMCA_ACTION_USING_THREAD, 0, logs_folder);
                 WriteToFile("   Mumber of Thread Max                    : " + NUMBER_OF_THREAD_MAX, 0, logs_folder);
@@ -200,90 +215,166 @@ namespace IMCA_Services
             }
 
         }
+        //protected override void OnStop()
+        //{
+        //    while (timer_check_TODO_is_running == true)
+        //    {
+        //        System.Threading.Thread.Sleep(500);
+        //        System.Windows.Forms.Application.DoEvents();
+        //    }
+
+        //    if (timer_check_TODO != null)
+        //    {
+        //        timer_check_TODO.Stop();
+        //        timer_check_TODO.Dispose();
+
+        //        RequestAdditionalTime(120000);
+
+        //        timer_check_TODO?.Stop();
+
+        //        while (timer_check_TODO_is_running ||
+        //               Volatile.Read(ref nb_created_thread) > 0)
+        //        {
+        //            RequestAdditionalTime(120000);
+        //            Thread.Sleep(500);
+        //        }
+
+        //        timer_check_TODO?.Dispose();
+
+
+        //    }
+
+        //    if (Volatile.Read(ref nb_created_thread) > 0 || HasDatabaseThreadedActions())
+        //    {
+        //        WriteToFile("Before stopping the service we check if threads are running at " + DateTime.Now.ToString("dd/MM/yyyy HH:mm:ss"));
+
+        //        Boolean bol_thread = true;
+        //        int nb_running_thread = 0;
+
+        //        using (SqlConnection con = new SqlConnection(sql_con))
+        //        {
+        //            con.Open();
+
+        //            using (SqlCommand cmd = new SqlCommand())
+        //            {
+        //                cmd.Connection = con;
+        //                cmd.CommandTimeout = 300;
+
+        //                while (bol_thread)
+        //                {
+        //                    cmd.CommandText = "select count(*) from [IMCA_BACKOFFICE].[dbo].PCM_TAB_IMCA_ACTION where TODO_BY='THREAD_" + session_name.ToUpper() + "'";
+        //                    nb_running_thread = int.Parse(cmd.ExecuteScalar().ToString());
+
+        //                    if (nb_running_thread > 0)
+        //                    {
+        //                        WriteToFile(nb_running_thread.ToString() + " Thread(s) is(are) running. We wait 10 secs at " + DateTime.Now.ToString("dd/MM/yyyy HH:mm:ss"));
+        //                        System.Threading.Thread.Sleep(10000);
+        //                        System.Windows.Forms.Application.DoEvents();
+        //                    }
+        //                    else
+        //                    {
+        //                        bol_thread = false;
+        //                    }
+        //                }
+        //            }
+
+        //            con.Close();
+        //        }
+
+        //    }
+
+        //    WriteToFile("IMCA Services stopped at " + DateTime.Now.ToString("dd/MM/yyyy HH:mm:ss"));
+        //}
+
         protected override void OnStop()
         {
-            while (timer_check_TODO_is_running == true)
+            // Prevent any new timer cycle from being started during shutdown.
+            Interlocked.Exchange(ref service_is_stopping, 1);
+
+            WriteToFile(
+                "IMCA Services stopping at " +
+                DateTime.Now.ToString("dd/MM/yyyy HH:mm:ss"));
+
+            // Prevent the timer from starting another polling cycle.
+            timer_check_TODO?.Stop();
+
+            DateTime stopDeadline = DateTime.Now.AddMinutes(10);
+
+            // Wait for the timer callback and local action threads.
+            while ((timer_check_TODO_is_running ||
+                    Volatile.Read(ref nb_created_thread) > 0) &&
+                   DateTime.Now < stopDeadline)
             {
-                System.Threading.Thread.Sleep(500);
-                System.Windows.Forms.Application.DoEvents();
+                // Inform Windows that the stop operation is still progressing.
+                RequestAdditionalTime(30000);
+
+                WriteToFile(
+                    "Waiting for service tasks to stop. Timer running: " +
+                    timer_check_TODO_is_running +
+                    ", active threads: " +
+                    Volatile.Read(ref nb_created_thread));
+
+                Thread.Sleep(1000);
             }
 
-            if (timer_check_TODO != null)
+            timer_check_TODO?.Dispose();
+            timer_check_TODO = null;
+
+            // Do not wait forever if an application or macro is blocked.
+            if (timer_check_TODO_is_running ||
+                Volatile.Read(ref nb_created_thread) > 0 ||
+                HasDatabaseThreadedActions())
             {
-                timer_check_TODO.Stop();
-                timer_check_TODO.Dispose();
+                WriteToFile(
+                    "Service stop timeout reached. Some actions are still running: " + timer_check_TODO_is_running + " , active threads: " + Volatile.Read(ref nb_created_thread));
             }
 
-            if (EXECUTE_IMCA_ACTION_USING_THREAD.Trim().ToUpper() == "TRUE")
-            {
-                WriteToFile("Before stopping the service we check if threads are running at " + DateTime.Now.ToString("dd/MM/yyyy HH:mm:ss"));
-
-                Boolean bol_thread = true;
-                int nb_running_thread = 0;
-
-                using (SqlConnection con = new SqlConnection(sql_con))
-                {
-                    con.Open();
-
-                    using (SqlCommand cmd = new SqlCommand())
-                    {
-                        cmd.Connection = con;
-                        cmd.CommandTimeout = 0;
-
-                        while (bol_thread)
-                        {
-                            cmd.CommandText = "select count(*) from [IMCA_BACKOFFICE].[dbo].PCM_TAB_IMCA_ACTION where TODO_BY='THREAD_" + session_name.ToUpper() + "'";
-                            nb_running_thread = int.Parse(cmd.ExecuteScalar().ToString());
-
-                            if (nb_running_thread > 0)
-                            {
-                                WriteToFile(nb_running_thread.ToString() + " Thread(s) is(are) running. We wait 10 secs at " + DateTime.Now.ToString("dd/MM/yyyy HH:mm:ss"));
-                                System.Threading.Thread.Sleep(10000);
-                                System.Windows.Forms.Application.DoEvents();
-                            }
-                            else
-                            {
-                                bol_thread = false;
-                            }
-                        }
-                    }
-
-                    con.Close();
-                }
-
-            }
-
-            WriteToFile("IMCA Services stopped at " + DateTime.Now.ToString("dd/MM/yyyy HH:mm:ss"));
+            WriteToFile(
+                "IMCA Services stopped at " +
+                DateTime.Now.ToString("dd/MM/yyyy HH:mm:ss"));
         }
+
+
         public void start_timer(string logs, string temp_folder)
         {
             timer_check_TODO = new System.Timers.Timer();
             timer_check_TODO.Elapsed += delegate { OnElaspedTime(logs, temp_folder); };
             timer_check_TODO.Interval = nb_sec * 1000;
+            timer_check_TODO.AutoReset = false;
             timer_check_TODO.Enabled = true;
         }
         private void OnElaspedTime(string logs, string temp_folder)
         {
+            // Ignore timer ticks received while the service is stopping.
+            if (Volatile.Read(ref service_is_stopping) == 1)
+            {
+                return;
+            }
+
             WriteToFile("   Start Checking TODO was ran at " + DateTime.Now.ToString("dd/MM/yyyy HH:mm:ss"));
+            timer_check_TODO?.Stop();
 
             try
             {
-                //timer_check_TODO.Enabled = false;
-                timer_check_TODO.Stop();
-
                 check_if_TODO(logs, temp_folder);
-
-                timer_check_TODO.Start();
-
-                //timer_check_TODO.Enabled = true;
             }
             catch (Exception ex)
             {
-                WriteToFile("Exception : " + ex + " at " + DateTime.Now.ToString("dd/MM/yyyy HH:mm:ss"));
+                WriteToFile("Exception while checking TODO : " + ex + " at " + DateTime.Now.ToString("dd/MM/yyyy HH:mm:ss"));
             }
+            finally
+            {
+                // This flag must always be released, including when SQL Server is unavailable.
+                Volatile.Write(ref timer_check_TODO_is_running, false);
 
-            WriteToFile("   End Checking TODO was ran at " + DateTime.Now.ToString("dd/MM/yyyy HH:mm:ss"));
+                // Restart polling only when Windows has not requested service shutdown.
+                if (Volatile.Read(ref service_is_stopping) == 0)
+                {
+                    timer_check_TODO?.Start();
+                }
 
+                WriteToFile("   End Checking TODO was ran at " + DateTime.Now.ToString("dd/MM/yyyy HH:mm:ss"));
+            }
         }
 
         public void InvokeOnNewThread(MethodInfo mi, object target, params object[] parameters)
@@ -306,30 +397,6 @@ namespace IMCA_Services
             //InvokeOnNewThread(m, obj, param);
 
             object value = m.Invoke(obj, param);
-
-        }
-
-        private string get_IMCA_paramters(string param_name)
-        {
-            string ret = "";
-
-            using (SqlConnection con = new SqlConnection(sql_con))
-            {
-                con.Open();
-
-                using (SqlCommand cmd = new SqlCommand())
-                {
-                    cmd.Connection = con;
-                    cmd.CommandTimeout = 0;
-
-                    cmd.CommandText = "SELECT isnull(VALUE,'') as VALUE from [PCM_TAB_IMCA_PARAMETER_GLOBAL] where SK_VALID=0 AND PARAMETER='" + param_name + "'";
-                    ret = cmd.ExecuteScalar().ToString();
-                }
-
-                con.Close();
-            }
-
-            return ret;
 
         }
 
@@ -368,49 +435,29 @@ namespace IMCA_Services
         }
         public long CurrentSKTime(string strType = "CD", string strISODate = "")
         {
-            long ret = 0;
-
-            List<string> list = new List<string>() { "CD", "FD", "FW", "CM", "FM", "CQ", "FQ", "CY", "FY" };
-
-
-            if (!list.Contains(strType))
+            List<string> allowedTypes = new List<string>() { "CD", "FD", "FW", "CM", "FM", "CQ", "FQ", "CY", "FY" };
+            if (!allowedTypes.Contains(strType)) strType = "CD";
+            if (string.IsNullOrWhiteSpace(strISODate) || !strISODate.All(char.IsNumber)) strISODate = DateTime.Now.ToString("yyyyMMdd");
+            string sql = "SELECT SKT_" + strType.ToUpperInvariant() + " FROM IMCA_BACKOFFICE.dbo.DSSIMPRT_TAB_SK_TIME " +
+                         "WHERE DATESTART=CONVERT(DATETIME,@ISO_DATE,112) AND TIMETYPE='CD'";
+            try
             {
-                strType = "CD";
-            }
-
-            if ((!strISODate.All(char.IsNumber)) || strISODate == "")
-            {
-                strISODate = DateAndTime.Now.ToString("yyyyMMdd");
-            }
-
-
-            using (SqlConnection con = new SqlConnection(sql_con))
-            {
-                con.Open();
-
-                using (SqlCommand cmd = new SqlCommand())
+                using (SqlConnection connection = new SqlConnection(sql_con))
+                using (SqlCommand command = new SqlCommand(sql, connection))
                 {
-                    cmd.Connection = con;
-                    cmd.CommandTimeout = 0;
-
-                    cmd.CommandText = "SELECT SKT_" + strType.ToString().ToUpper() + " FROM IMCA_BACKOFFICE.dbo.DSSIMPRT_TAB_SK_TIME WHERE DATESTART = CONVERT(DATETIME, '" + strISODate + "', 112) AND TIMETYPE = 'CD'";
-                    ret = (int)cmd.ExecuteScalar();
-
-                    if (ret == 0)
-                    {
-                        ret = -1;
-                    }
-
-                    cmd.Dispose();
-
+                    command.CommandTimeout = 300;
+                    command.Parameters.Add("@ISO_DATE", SqlDbType.VarChar, 8).Value = strISODate;
+                    connection.Open();
+                    object result = command.ExecuteScalar();
+                    long value = result == null || result == DBNull.Value ? 0 : Convert.ToInt64(result);
+                    return value == 0 ? -1 : value;
                 }
-
-                con.Close();
-
             }
-
-            return ret;
-
+            catch (Exception ex)
+            {
+                LogDatabaseError(nameof(CurrentSKTime), sql, ex);
+                throw;
+            }
         }
         public void AddIMCAAction(DateTime dtSysSql, long lngSK_VALID, string strAction, long lngPriority = -9999, DateTime dteTodo = default(DateTime), string strCreatedFrom = "", string strTodoBy = "", string strSK_TYPE = "", string strParam01 = "", string strParam02 = "", string strParam03 = "", string strParam04 = "", string strParam05 = "", string strParam06 = "", string strParam07 = "", string strParam08 = "", string strParam09 = "", string strParam10 = "", string strParam11 = "", string strParam12 = "", string strParam13 = "", string strParam14 = "", string strParam15 = "", string strParam16 = "", string strParam17 = "", string strParam18 = "", string strParam19 = "", string strParam20 = "", string strParamMemo = "", string lngCreatedFromAuto = "0", long lngSK_Value = 0)
         {
@@ -425,7 +472,7 @@ namespace IMCA_Services
                         using (SqlCommand cmd = new SqlCommand())
                         {
                             cmd.Connection = con;
-                            cmd.CommandTimeout = 0;
+                            cmd.CommandTimeout = 300;
                             cmd.CommandText = "SELECT NEXT_RUN_TODO_BY,DEFAULT_PRIORITY FROM IMCA_BACKOFFICE.dbo.PCM_TAB_IMCA_ACTION_ADMIN WHERE ACTION='" + strAction + "'";
 
                             SqlDataReader dr;
@@ -540,42 +587,35 @@ namespace IMCA_Services
             }
             catch (Exception ex)
             {
-                Debug.Print(ex.Message);
+                LogDatabaseError(nameof(AddIMCAAction), "Create next IMCA action", ex);
+                throw;
             }
 
 
         }
 
-        private string get_IMCA_paramters(string sql_con, string param_name)
+        private string get_IMCA_paramters(string sqlCon, string paramName)
         {
-            string ret = "";
-
-            using (SqlConnection con = new SqlConnection(sql_con))
+            const string sql = @"SELECT ISNULL(VALUE, '')
+FROM [PCM_TAB_IMCA_PARAMETER_GLOBAL]
+WHERE SK_VALID=0 AND PARAMETER=@PARAMETER";
+            try
             {
-                con.Open();
-
-                using (SqlCommand cmd = new SqlCommand())
+                using (SqlConnection connection = new SqlConnection(sqlCon))
+                using (SqlCommand command = new SqlCommand(sql, connection))
                 {
-                    cmd.Connection = con;
-                    cmd.CommandTimeout = 0;
-
-                    cmd.CommandText = "SELECT isnull(VALUE,'') as VALUE from [PCM_TAB_IMCA_PARAMETER_GLOBAL] where SK_VALID=0 AND PARAMETER='" + param_name + "'";
-                    try
-                    {
-                        ret = cmd.ExecuteScalar().ToString();
-                    }
-                    catch (Exception)
-                    {
-                        ret = "";
-                    }
-
+                    command.CommandTimeout = 300;
+                    command.Parameters.Add("@PARAMETER", SqlDbType.VarChar, 255).Value = paramName ?? "";
+                    connection.Open();
+                    object result = command.ExecuteScalar();
+                    return result == null || result == DBNull.Value ? "" : Convert.ToString(result);
                 }
-
-                con.Close();
             }
-
-            return ret;
-
+            catch (Exception ex)
+            {
+                LogDatabaseError(nameof(get_IMCA_paramters), sql, ex);
+                throw;
+            }
         }
 
 
@@ -732,7 +772,7 @@ namespace IMCA_Services
                             using (SqlCommand cmd = new SqlCommand())
                             {
                                 cmd.Connection = con_sql;
-                                cmd.CommandTimeout = 0;
+                                cmd.CommandTimeout = 300;
                                 cmd.CommandText = "SELECT TOP 1 VALUE FROM IMCA_BACKOFFICE.dbo.PCM_TAB_IMCA_PARAMETER_GLOBAL WHERE SK_VALID IN (0, " + lngSkValid.ToString() + ") AND PARAMETER IN ('MAIL_PRIORITY', 'MAIL_PRIORITY_" + strMailType + "') ORDER BY PARAMETER DESC, SK_VALID DESC";
                                 lngMailPriority = long.Parse(cmd.ExecuteScalar().ToString());
                             }
@@ -754,7 +794,7 @@ namespace IMCA_Services
                         using (SqlCommand cmd = new SqlCommand())
                         {
                             cmd.Connection = con_sql;
-                            cmd.CommandTimeout = 0;
+                            cmd.CommandTimeout = 300;
 
                             cmd.CommandText = "INSERT INTO IMCA_BACKOFFICE.dbo.PCM_TAB_IMCA_AUTOMAIL (SK_VALID, PRIORITY, TYPE, MAIL_FROM, MAIL_TO, MAIL_CC, MAIL_BCC, MAIL_SUBJECT, MAIL_BODY, MAIL_BODY_FORMAT, DEFAULT_MAIL_BODY, MAIL_ATTACHMENTS, ERROR_MAIL_TO, TODO_DATE, TODO_DATE_INT, TODO_BY, CREATED_FROM, CREATED, ERROR, SK_CREATE_DATE, SK_FINISH_DATE, SK_TYPE, SK_VALUE) VALUES (" +
                                               lngSkValid.ToString() + ", " + lngMailPriority.ToString() + ", '" + strMailType + "', '" + strMailFrom.Replace("'", "''") + "', '" + strMailTo.Replace("'", "''") + "', '" + strMailCc.Replace("'", "''") + "', '" + strMailBcc.Replace("'", "''") + "', '" + strMailSubject.Replace("'", "''") + "', '" + strMailBody.Replace("'", "''") + "', " +
@@ -769,27 +809,9 @@ namespace IMCA_Services
                 }
                 catch (Exception ex)
                 {
-                    using (SqlConnection con_sql = new SqlConnection(sql_con))
-                    {
-                        con_sql.Open();
-
-                        using (SqlCommand cmd_error = new SqlCommand())
-                        {
-                            cmd_error.Connection = con_sql;
-                            cmd_error.CommandTimeout = 0;
-                            cmd_error.CommandText = "update [IMCA_BACKOFFICE].[dbo].PCM_TAB_IMCA_ACTION set TODO_BY=@TODO_BY,ERROR=@ERROR_NUMBER,ERROR_TEXT=@ERROR_MSG where ID=@ID";
-                            cmd_error.Parameters.Clear();
-                            cmd_error.Parameters.AddWithValue("@TODO_BY", "ERROR_" + session_name.ToUpper());
-                            cmd_error.Parameters.AddWithValue("@ID", FUNCTION_ID.ToString());
-                            cmd_error.Parameters.AddWithValue("@ERROR_NUMBER", 0);
-                            cmd_error.Parameters.AddWithValue("@ERROR_MSG", Microsoft.VisualBasic.Strings.Left("FUNCTION_ID=" + FUNCTION_ID.ToString() + " - ERROR MSG=" + ex.Message, 1024));
-                            cmd_error.ExecuteNonQuery();
-                        }
-
-                        con_sql.Close();
-                    }
-
-                    ret = " Unable to execute the function SendMail (error : " + ex.Message + ") - " + list_args[1].ToString().Trim('"').Trim();
+                    LogDatabaseError(nameof(Execute_SendMail), "Insert email into PCM_TAB_IMCA_AUTOMAIL", ex, ACTION_ID);
+                    TryMarkActionAsError(ACTION_ID, FUNCTION_ID, ex);
+                    ret = " Unable to execute the function SendMail (error : " + ex.Message + ")";
                 }
             }
             else
@@ -803,479 +825,193 @@ namespace IMCA_Services
 
         protected string Execute_Query(string strSQL, long ACTION_ID, long FUNCTION_ID)
         {
-            string ret = "";
-            Int32 nb_error = 1;
-            Int32 lngMaxErrors = Int32.Parse(Number_of_errors_allowed_per_query);
-            Boolean bol_error = false;
+            int maxErrors;
+            if (!int.TryParse(Number_of_errors_allowed_per_query, out maxErrors) || maxErrors < 1)
+            {
+                maxErrors = 1;
+            }
 
             List<string> list_args = new List<string>();
             RegexOptions options = RegexOptions.Multiline;
-
-
             string pattern = @"([\w.$]+|""[^""]+""|'[^']+')";
-
 
             while (strSQL.IndexOf(",,") != -1)
             {
                 strSQL = strSQL.Replace(",,", ",\"OPTIONAL_VALUE_NOT_PROVIDED\",");
             }
 
-            string input = strSQL;
-
-            foreach (Match m in Regex.Matches(input, pattern, options))
+            foreach (Match match in Regex.Matches(strSQL, pattern, options))
             {
-                list_args.Add(m.Value);
+                list_args.Add(match.Value);
             }
 
-
-            if (list_args.Count >= 3)
+            if (list_args.Count < 3)
             {
-                // First Args contains Function name. We remove it
-                list_args.RemoveAt(0);
+                return " Too few parameters for EvalOpenQuery function - " + strSQL;
+            }
 
-                try
+            // The first argument contains the function name.
+            list_args.RemoveAt(0);
+
+            string queryText = list_args[0].ToString().Trim('"');
+            string connectionParameter = list_args[1].ToString()
+                .Replace(Microsoft.VisualBasic.Strings.Chr(34), ' ')
+                .Trim();
+
+            try
+            {
+                string connectionString = get_IMCA_paramters(sql_con, connectionParameter);
+
+                if (string.IsNullOrWhiteSpace(connectionString))
                 {
-                    // 2nd Parameter of EvalOpenQuery contains the name of the connexion
+                    return "Unable to find (Check the Global Parameters Table) the connection String for " +
+                           connectionParameter;
+                }
 
-                    string connection_string = get_IMCA_paramters(sql_con, list_args[1].ToString().Replace(Microsoft.VisualBasic.Strings.Chr(34), ' ').Trim());
-                    OracleConnectionStringBuilder builder = new OracleConnectionStringBuilder(connection_string);
-
-                    if (connection_string != "")
+                int commandTimeout = 120;
+                if (list_args.Count >= 7)
+                {
+                    int.TryParse(list_args[6].ToString(), out commandTimeout);
+                    if (commandTimeout <= 0)
                     {
-                        switch (connection_string.ToUpper().Trim())
+                        commandTimeout = 120;
+                    }
+                }
+
+                if (list_args.Count >= 8)
+                {
+                    int configuredMaxErrors;
+                    if (int.TryParse(list_args[7].ToString(), out configuredMaxErrors) && configuredMaxErrors > 0)
+                    {
+                        maxErrors = configuredMaxErrors;
+                    }
+                }
+
+                bool isOracle = Strings.Replace(connectionString.ToUpperInvariant(), " ", "")
+                    .StartsWith("DATASOURCE=(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST");
+
+                if (isOracle)
+                {
+                    // Oracle-specific objects are created only after the connection type is identified.
+                    OracleConnectionStringBuilder builder = new OracleConnectionStringBuilder(connectionString);
+
+                    using (OracleConnection connection = new OracleConnection(connectionString))
+                    {
+                        connection.Open();
+
+                        for (int attempt = 1; attempt <= maxErrors; attempt++)
                         {
-                            case string x when Strings.Replace(x, " ", "").StartsWith("DATASOURCE=(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST"):
+                            using (OracleTransaction transaction = connection.BeginTransaction())
+                            using (OracleCommand command = new OracleCommand(queryText, connection))
+                            {
+                                command.CommandType = CommandType.Text;
+                                command.CommandTimeout = commandTimeout;
+                                command.Transaction = transaction;
 
-                                // ORACLE QUERY
-
-                                OracleConnection conn_oracle = new OracleConnection(connection_string);
-                                OracleTransaction transaction;
-
-                                conn_oracle.Open();
-
-                                using (OracleCommand command = new OracleCommand())
+                                try
                                 {
-                                    command.Connection = conn_oracle;
-
-                                    if (list_args.Count >= 7)
-                                    {
-                                        command.CommandTimeout = Int32.Parse(list_args[6].ToString());
-                                    }
-                                    else
-                                    {
-                                        command.CommandTimeout = 120;
-                                    }
-
-                                    if (list_args.Count >= 8)
-                                    {
-                                        lngMaxErrors = Int32.Parse(list_args[7].ToString());
-                                    }
-
-                                    transaction = conn_oracle.BeginTransaction();
-                                    command.Transaction = transaction;
-                                    // First Parameter of EvalOpenQuery contains the query
-                                    command.CommandText = list_args[0].ToString().Trim('"');
-                                    command.CommandType = CommandType.Text;
-
-
+                                    command.ExecuteNonQuery();
+                                    transaction.Commit();
+                                    return "";
+                                }
+                                catch (OracleException ex)
+                                {
                                     try
                                     {
-                                        command.ExecuteNonQuery();
-                                        transaction.Commit();
-
+                                        transaction.Rollback();
                                     }
-                                    catch (OracleException ex)
+                                    catch
                                     {
-                                        WriteToFile("                                   : ConnectionState : " + conn_oracle.State.ToString());
-
-                                        if (conn_oracle.State == ConnectionState.Closed)
-                                        {
-                                            WriteToFile("                                   : We reopen Oracle Connection");
-                                            conn_oracle.OpenWithNewPassword(builder.Password);
-                                        }
-
-                                        while (nb_error < lngMaxErrors)
-                                        {
-                                            try
-                                            {
-                                                WriteToFile("                                   : ERROR : " + ex.Number.ToString() + " - WAIT 1 MINUTE BEFORE TRYING AGAIN - " + nb_error.ToString() + " in " + lngMaxErrors.ToString() + " tries");
-                                                // Wait 1 minute - 60 * 1 sec
-                                                for (int sec = 1; sec <= 60; sec++)
-                                                {
-                                                    System.Threading.Thread.Sleep(1000);
-                                                    System.Windows.Forms.Application.DoEvents();
-                                                }
-
-
-                                                command.ExecuteNonQuery();
-                                                transaction.Commit();
-                                                // We exit the loop
-                                                bol_error = false;
-                                                nb_error = lngMaxErrors;
-                                            }
-                                            catch (OracleException)
-                                            {
-                                                bol_error = true;
-                                                nb_error += 1;
-                                            }
-
-                                        }
-
-                                        if (bol_error == true)
-                                        {
-                                            WriteToFile("                                   : ERROR : " + ex.Number.ToString() + " - " + ex.Message);
-                                            //transaction.Rollback();
-                                            using (SqlConnection con = new SqlConnection(sql_con))
-                                            {
-                                                con.Open();
-
-                                                using (SqlCommand cmd = new SqlCommand())
-                                                {
-                                                    cmd.Connection = con;
-                                                    cmd.CommandTimeout = 0;
-                                                    cmd.CommandText = "update [IMCA_BACKOFFICE].[dbo].PCM_TAB_IMCA_ACTION set TODO_BY=@TODO_BY,ERROR=@ERROR_NUMBER,ERROR_TEXT=@ERROR_MSG where ID=@ID";
-                                                    cmd.Parameters.Clear();
-                                                    cmd.Parameters.AddWithValue("@TODO_BY", "ERROR_" + session_name.ToUpper());
-                                                    cmd.Parameters.AddWithValue("@ID", ACTION_ID);
-                                                    cmd.Parameters.AddWithValue("@ERROR_NUMBER", Strings.Replace(ex.Number.ToString(), "ORA-", ""));
-                                                    cmd.Parameters.AddWithValue("@ERROR_MSG", Microsoft.VisualBasic.Strings.Left("FUNCTION_ID=" + FUNCTION_ID + " - ORACLE ERROR MSG=" + ex.Message, 1024));
-                                                    cmd.ExecuteNonQuery();
-                                                }
-
-                                                con.Close();
-                                            }
-
-                                            ret = " Oracle Query error (" + ex.Number.ToString() + " - " + ex.Message + ") -  function - " + strSQL;
-                                        }
-                                        else
-                                        {
-                                            ret = "";
-                                        }
-                                        throw;
+                                        // The connection may already be unavailable.
                                     }
 
-                                }
+                                    WriteToFile(
+                                        "                                   : ORACLE ERROR : " + ex.Number +
+                                        " - attempt " + attempt + " of " + maxErrors +
+                                        " - " + ex.Message);
 
-
-                                transaction.Dispose();
-                                conn_oracle.Close();
-
-                                break;
-
-                            default:
-
-                                // SQL QUERY
-
-                                using (SqlConnection con = new SqlConnection(sql_con))
-                                {
-                                    con.Open();
-                                    using (SqlCommand command = new SqlCommand())
+                                    if (attempt >= maxErrors)
                                     {
-                                        command.Connection = con;
-                                        if (list_args.Count >= 7)
-                                        {
-                                            command.CommandTimeout = Int32.Parse(list_args[6].ToString());
-                                        }
-                                        else
-                                        {
-                                            command.CommandTimeout = 120;
-                                        }
-
-                                        if (list_args.Count >= 8)
-                                        {
-                                            lngMaxErrors = Int32.Parse(list_args[7].ToString());
-                                        }
-
-                                        command.CommandText = "";
-                                        command.CommandType = CommandType.Text;
-
-                                        try
-                                        {
-                                            command.ExecuteNonQuery();
-                                        }
-                                        catch (SqlException ex)
-                                        {
-                                            while (nb_error < lngMaxErrors)
-                                            {
-                                                try
-                                                {
-                                                    WriteToFile("                                   : WAIT 1 MINUTE BEFORE TRYING AGAIN - " + nb_error.ToString() + " in " + lngMaxErrors.ToString() + " tries");
-                                                    // Wait 1 minute - 60 * 1 sec
-                                                    for (int sec = 1; sec <= 60; sec++)
-                                                    {
-                                                        System.Threading.Thread.Sleep(1000);
-                                                        System.Windows.Forms.Application.DoEvents();
-                                                    }
-                                                    command.ExecuteNonQuery();
-                                                    // We exit the loop
-                                                    bol_error = false;
-                                                    nb_error = lngMaxErrors;
-                                                }
-                                                catch (OracleException)
-                                                {
-                                                    bol_error = true;
-                                                    nb_error += 1;
-                                                }
-
-                                            }
-
-                                            if (bol_error == true)
-                                            {
-                                                WriteToFile("                                   : ERROR : " + ex.Number.ToString() + " - " + ex.Message);
-
-                                                using (SqlConnection con_sql = new SqlConnection(sql_con))
-                                                {
-                                                    con_sql.Open();
-
-                                                    using (SqlCommand cmd = new SqlCommand())
-                                                    {
-                                                        cmd.Connection = con_sql;
-                                                        cmd.CommandTimeout = 0;
-                                                        cmd.CommandText = "update [IMCA_BACKOFFICE].[dbo].PCM_TAB_IMCA_ACTION set TODO_BY=@TODO_BY,ERROR=@ERROR_NUMBER,ERROR_TEXT=@ERROR_MSG where ID=@ID";
-                                                        cmd.Parameters.Clear();
-                                                        cmd.Parameters.AddWithValue("@TODO_BY", "ERROR_" + session_name.ToUpper());
-                                                        cmd.Parameters.AddWithValue("@ID", ACTION_ID);
-                                                        cmd.Parameters.AddWithValue("@ERROR_NUMBER", ex.Number);
-                                                        cmd.Parameters.AddWithValue("@ERROR_MSG", Microsoft.VisualBasic.Strings.Left("FUNCTION_ID=" + FUNCTION_ID + " - SQL ERROR MSG=" + ex.Message, 1024));
-                                                        cmd.ExecuteNonQuery();
-                                                    }
-
-                                                    con_sql.Close();
-                                                }
-
-                                                ret = " SQL Query error (" + ex.Number.ToString() + " - " + ex.Message + ") -  function - " + strSQL;
-                                            }
-                                            else
-                                            {
-                                                ret = "";
-                                            }
-                                            throw;
-                                        }
-
+                                        LogDatabaseError(nameof(Execute_Query), queryText, ex, ACTION_ID);
+                                        TryMarkActionAsError(ACTION_ID, FUNCTION_ID, ex);
+                                        return " Oracle Query error (" + ex.Number + " - " + ex.Message +
+                                               ") - function - " + strSQL;
                                     }
 
-                                    con.Close();
-                                }
+                                    if (connection.State == ConnectionState.Closed)
+                                    {
+                                        connection.OpenWithNewPassword(builder.Password);
+                                    }
 
-                                break;
+                                    Thread.Sleep(60000);
+                                }
+                            }
                         }
-
-                        ret = "";
                     }
-                    else
-                    {
-                        ret = "Unable to find (Check the Global Parameters Table) the connection String for " + list_args[1].ToString().Replace(Microsoft.VisualBasic.Strings.Chr(34), ' ').Trim();
-                    }
-
-                }
-                catch (OracleException ex)
-                {
-                    ret = " Unable to execute the query (error : " + ex.Message + ") - " + list_args[0].ToString().Trim('"').Trim();
-                }
-            }
-            else
-            {
-                ret = " Too few parameters for EvalOpenQuery function - " + strSQL;
-            }
-
-            return ret;
-
-        }
-
-
-        protected string Execute_Query_old(string strSQL, long ACTION_ID, long FUNCTION_ID)
-        {
-            string ret = "";
-
-            string pattern = @"([\w.$]+|""[^""]+""|'[^']+')";
-
-
-            while (strSQL.IndexOf(",,") != -1)
-            {
-                strSQL = strSQL.Replace(",,", ",\"\",");
-            }
-
-
-            string input = strSQL;
-            RegexOptions options = RegexOptions.Multiline;
-
-            List<string> list_args = new List<string>();
-
-            foreach (Match m in Regex.Matches(input, pattern, options))
-            {
-                if (m.Value != "\",\"")
-                {
-                    list_args.Add(m.Value);
                 }
                 else
                 {
-                    list_args.Add("");
-                }
-            }
-
-            if (list_args.Count >= 2)
-            {
-                try
-                {
-                    // 2nd Parameter of EvalOpenQuery contains the name of the connexion
-
-                    string connection_string = get_IMCA_paramters(sql_con, list_args[2].ToString().Replace(Microsoft.VisualBasic.Strings.Chr(34), ' ').Trim());
-
-                    if (connection_string != "")
+                    // SQL commands use the dynamically resolved connection string.
+                    using (SqlConnection connection = new SqlConnection(connectionString))
                     {
-                        switch (connection_string.ToUpper().Trim())
+                        connection.Open();
+
+                        for (int attempt = 1; attempt <= maxErrors; attempt++)
                         {
-                            case string x when Strings.Replace(x, " ", "").StartsWith("DATASOURCE=(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST"):
+                            using (SqlCommand command = new SqlCommand(queryText, connection))
+                            {
+                                command.CommandType = CommandType.Text;
+                                command.CommandTimeout = commandTimeout;
 
-                                // ORACLE QUERY
-
-                                OracleConnection conn_oracle = new OracleConnection(connection_string);
-                                OracleTransaction transaction;
-                                conn_oracle.Open();
-
-                                using (OracleCommand command = new OracleCommand())
+                                try
                                 {
-                                    command.Connection = conn_oracle;
-
-                                    if (list_args.Count >= 7)
-                                    {
-                                        command.CommandTimeout = Int32.Parse(list_args[7].ToString());
-                                    }
-                                    else
-                                    {
-                                        command.CommandTimeout = 120;
-                                    }
-
-
-                                    transaction = conn_oracle.BeginTransaction();
-                                    command.Transaction = transaction;
-                                    // First Parameter of EvalOpenQuery contains the query
-                                    command.CommandText = list_args[1].ToString().Trim('"');
-                                    command.CommandType = CommandType.Text;
-
-
-                                    try
-                                    {
-                                        command.ExecuteNonQuery();
-                                        transaction.Commit();
-
-                                    }
-                                    catch (OracleException ex)
-                                    {
-                                        //transaction.Rollback();
-                                        using (SqlConnection con = new SqlConnection(sql_con))
-                                        {
-                                            con.Open();
-
-                                            using (SqlCommand cmd = new SqlCommand())
-                                            {
-                                                cmd.Connection = con;
-                                                cmd.CommandTimeout = 0;
-                                                cmd.CommandText = "update [IMCA_BACKOFFICE].[dbo].PCM_TAB_IMCA_ACTION set TODO_BY=@TODO_BY,ERROR=@ERROR_NUMBER,ERROR_TEXT=@ERROR_MSG where ID=@ID";
-                                                cmd.Parameters.Clear();
-                                                cmd.Parameters.AddWithValue("@TODO_BY", "ERROR_" + session_name.ToUpper());
-                                                cmd.Parameters.AddWithValue("@ID", ACTION_ID);
-                                                cmd.Parameters.AddWithValue("@ERROR_NUMBER", Strings.Replace(ex.Number.ToString(), "ORA-", ""));
-                                                cmd.Parameters.AddWithValue("@ERROR_MSG", Microsoft.VisualBasic.Strings.Left("FUNCTION_ID=" + FUNCTION_ID + " - ORACLE ERROR MSG=" + ex.Message, 1024));
-                                                cmd.ExecuteNonQuery();
-                                            }
-
-                                            con.Close();
-                                        }
-
-                                        ret = " Oracle Query error (" + ex.Number.ToString() + " - " + ex.Message + ") -  function - " + strSQL;
-
-                                        throw;
-                                    }
-
+                                    command.ExecuteNonQuery();
+                                    return "";
                                 }
-
-                                conn_oracle.Close();
-
-                                break;
-
-                            default:
-
-                                // SQL QUERY
-
-                                using (SqlConnection con = new SqlConnection(sql_con))
+                                catch (SqlException ex)
                                 {
-                                    con.Open();
+                                    WriteToFile(
+                                        "                                   : SQL ERROR : " + ex.Number +
+                                        " - attempt " + attempt + " of " + maxErrors +
+                                        " - " + ex.Message);
 
-                                    using (SqlCommand command = new SqlCommand())
+                                    if (attempt >= maxErrors)
                                     {
-                                        command.Connection = con;
-                                        if (list_args.Count >= 7)
-                                        {
-                                            command.CommandTimeout = Int32.Parse(list_args[7].ToString());
-                                        }
-                                        else
-                                        {
-                                            command.CommandTimeout = 120;
-                                        }
-
-                                        command.CommandText = "";
-                                        command.CommandType = CommandType.Text;
-
-                                        try
-                                        {
-                                            command.ExecuteNonQuery();
-                                        }
-                                        catch (SqlException ex)
-                                        {
-                                            using (SqlConnection con_sql = new SqlConnection(sql_con))
-                                            {
-                                                con_sql.Open();
-
-                                                using (SqlCommand cmd = new SqlCommand())
-                                                {
-                                                    cmd.Connection = con_sql;
-                                                    cmd.CommandTimeout = 0;
-                                                    cmd.CommandText = "update [IMCA_BACKOFFICE].[dbo].PCM_TAB_IMCA_ACTION set TODO_BY=@TODO_BY,ERROR=@ERROR_NUMBER,ERROR_TEXT=@ERROR_MSG where ID=@ID";
-                                                    cmd.Parameters.Clear();
-                                                    cmd.Parameters.AddWithValue("@TODO_BY", "ERROR_" + session_name.ToUpper());
-                                                    cmd.Parameters.AddWithValue("@ID", ACTION_ID);
-                                                    cmd.Parameters.AddWithValue("@ERROR_NUMBER", ex.Number);
-                                                    cmd.Parameters.AddWithValue("@ERROR_MSG", Microsoft.VisualBasic.Strings.Left("FUNCTION_ID=" + FUNCTION_ID + " - SQL ERROR MSG=" + ex.Message, 1024));
-                                                    cmd.ExecuteNonQuery();
-                                                }
-
-                                                con_sql.Close();
-                                            }
-
-                                            ret = " SQL Query error (" + ex.Number.ToString() + " - " + ex.Message + ") -  function - " + strSQL;
-                                            throw;
-                                        }
-
+                                        LogDatabaseError(nameof(Execute_Query), queryText, ex, ACTION_ID);
+                                        TryMarkActionAsError(ACTION_ID, FUNCTION_ID, ex);
+                                        return " SQL Query error (" + ex.Number + " - " + ex.Message +
+                                               ") - function - " + strSQL;
                                     }
 
-                                    con.Close();
+                                    Thread.Sleep(60000);
                                 }
-
-                                break;
+                            }
                         }
-
-                        ret = "";
                     }
-                    else
-                    {
-                        ret = "Unable to find (Check the Global Parameters Table) the connection String for " + list_args[2].ToString().Replace(Microsoft.VisualBasic.Strings.Chr(34), ' ').Trim();
-                    }
+                }
 
-                }
-                catch (OracleException ex)
-                {
-                    ret = " Unable to execute the query (error : " + ex.Message + ") - " + list_args[1].ToString().Trim('"').Trim();
-                }
+                return "";
             }
-            else
+            catch (OracleException ex)
             {
-                ret = " Too few parameters for EvalOpenQuery function - " + strSQL;
+                LogDatabaseError(nameof(Execute_Query), queryText, ex, ACTION_ID);
+                TryMarkActionAsError(ACTION_ID, FUNCTION_ID, ex);
+                return " Unable to execute the Oracle query (error : " + ex.Message + ") - " + queryText;
             }
-
-            return ret;
-
+            catch (SqlException ex)
+            {
+                LogDatabaseError(nameof(Execute_Query), queryText, ex, ACTION_ID);
+                TryMarkActionAsError(ACTION_ID, FUNCTION_ID, ex);
+                return " Unable to execute the SQL query (error : " + ex.Message + ") - " + queryText;
+            }
+            catch (Exception ex)
+            {
+                LogDatabaseError(nameof(Execute_Query), queryText, ex, ACTION_ID);
+                TryMarkActionAsError(ACTION_ID, FUNCTION_ID, ex);
+                return " Unable to execute the query (error : " + ex.Message + ") - " + queryText;
+            }
         }
+
 
         protected string resolve_parameters(string func_name, long ACTION_ID, long FUNCTION_ID, DataRow dt)
         {
@@ -1295,584 +1031,749 @@ namespace IMCA_Services
 
         public void execute_IMCA_Action(DataRow dr, string logs, string temp_folder, Boolean using_thread)
         {
-            SqlDataReader dt2;
-
-            if (using_thread == true)
-                nb_created_thread += 1;
-
-            long id;
-            switch (using_thread)
+            long actionId = 0;
+            string actionName = "";
+            try
             {
-                case true:
-                    id = long.Parse(dr["ID"].ToString());
-                    break;
+                actionId = Convert.ToInt64(dr["ID"]);
+                actionName = Convert.ToString(dr["ACTION"]);
 
-                default:
-                    id = 0;
-                    break;
-            }
+                SqlDataReader dt2;
 
-            using (SqlConnection con = new SqlConnection(sql_con))
-            {
-                con.Open();
-                using (SqlCommand cmd2 = new SqlCommand())
+                long id;
+                switch (using_thread)
                 {
-                    cmd2.Connection = con;
-                    cmd2.CommandTimeout = 0;
+                    case true:
+                        id = long.Parse(dr["ID"].ToString());
+                        break;
 
-                    // Check the flags if all the "Other(s)" component(s) (ORACLE etc...) are available
+                    default:
+                        id = 0;
+                        break;
+                }
 
-                    cmd2.CommandText = "SELECT FLAG from [PCM_TAB_IMCA_ACTION_FLAG] " +
-                                       "INNER JOIN (SELECT * FROM [PCM_TAB_IMCA_PARAMETER_GLOBAL] where PARAMETER like 'AVAIL_%' AND [VALUE]='0' and (SK_VALID=0 or SK_VALID=" + dr["SK_VALID"].ToString() + ")) [parameters] " +
-                                       "on PCM_TAB_IMCA_ACTION_FLAG.FLAG=[parameters].PARAMETER" +
-                                       " WHERE [ACTION_ID]=" + dr["ADMIN_ID"].ToString();
-                    dt2 = cmd2.ExecuteReader();
-
-                    Boolean all_is_available = true;
-                    if (dt2.HasRows)
+                using (SqlConnection con = new SqlConnection(sql_con))
+                {
+                    con.Open();
+                    using (SqlCommand cmd2 = new SqlCommand())
                     {
-                        all_is_available = false;
-                    }
+                        cmd2.Connection = con;
+                        cmd2.CommandTimeout = 300;
 
-                    dt2.Close();
+                        // Check only availability flags. USE_THREAD is a control flag and must never block an action.
+                        cmd2.CommandText = "SELECT action_flag.FLAG FROM [PCM_TAB_IMCA_ACTION_FLAG] action_flag " +
+                                           "INNER JOIN (SELECT * FROM [PCM_TAB_IMCA_PARAMETER_GLOBAL] " +
+                                           "WHERE PARAMETER LIKE 'AVAIL_%' AND [VALUE]='0' " +
+                                           "AND (SK_VALID=0 OR SK_VALID=" + dr["SK_VALID"].ToString() + ")) [parameters] " +
+                                           "ON action_flag.FLAG=[parameters].PARAMETER " +
+                                           "WHERE action_flag.[ACTION_ID]=" + dr["ADMIN_ID"].ToString() + " " +
+                                           "AND UPPER(action_flag.FLAG)<>'USE_THREAD'";
+                        dt2 = cmd2.ExecuteReader();
 
-                    if (all_is_available == true)
-                    {
-                        if (using_thread == true)
+                        Boolean all_is_available = true;
+                        if (dt2.HasRows)
                         {
+                            all_is_available = false;
+                        }
 
-                            // We Change the TODO_BY column (adding a prefix THREAD_) to avoid the creation of a new TREAD with the same ACTION ID (if the previous tread is not completed before the next tick of the timer)
-                            cmd2.CommandText = "UPDATE [IMCA_BACKOFFICE].[dbo].PCM_TAB_IMCA_ACTION set TODO_BY='THREAD_'+TODO_BY WHERE ID=" + dr["ID"].ToString();
+                        dt2.Close();
+
+                        if (all_is_available == true)
+                        {
+                            if (using_thread == true)
+                            {
+
+                                // We Change the TODO_BY column (adding a prefix THREAD_) to avoid the creation of a new TREAD with the same ACTION ID (if the previous tread is not completed before the next tick of the timer)
+                                cmd2.CommandText = "UPDATE [IMCA_BACKOFFICE].[dbo].PCM_TAB_IMCA_ACTION set TODO_BY='THREAD_'+TODO_BY WHERE ID=" + dr["ID"].ToString();
+                                cmd2.ExecuteNonQuery();
+
+                                WriteToFile("       ACTION : " + dr["ACTION"].ToString() + " (ID : " + dr["ID"].ToString() + ") has been reserved. We can start it (using a THREAD) at " + DateTime.Now.ToString("dd/MM/yyyy HH:mm:ss") + " - Please check the associated log file of the task for details");
+                                WriteToFile("       ACTION : " + dr["ACTION"].ToString() + " (ID : " + dr["ID"].ToString() + ") has been reserved. We can start it at " + DateTime.Now.ToString("dd/MM/yyyy HH:mm:ss"), long.Parse(dr["ID"].ToString()), logs_folder, dr["ACTION"].ToString());
+                            }
+                            else
+                            {
+                                WriteToFile("       ACTION : " + dr["ACTION"].ToString() + " (ID : " + dr["ID"].ToString() + ") has been reserved. We can start it at " + DateTime.Now.ToString("dd/MM/yyyy HH:mm:ss"));
+                            }
+
+                            cmd2.CommandText = "UPDATE [IMCA_BACKOFFICE].[dbo].PCM_TAB_IMCA_ACTION set STARTED=getdate() WHERE ID=" + dr["ID"].ToString();
                             cmd2.ExecuteNonQuery();
 
-                            WriteToFile("       ACTION : " + dr["ACTION"].ToString() + " (ID : " + dr["ID"].ToString() + ") has been reserved. We can start it (using a THREAD) at " + DateTime.Now.ToString("dd/MM/yyyy HH:mm:ss") + " - Please check the associated log file of the task for details");
-                            WriteToFile("       ACTION : " + dr["ACTION"].ToString() + " (ID : " + dr["ID"].ToString() + ") has been reserved. We can start it at " + DateTime.Now.ToString("dd/MM/yyyy HH:mm:ss"), long.Parse(dr["ID"].ToString()));
+                            // Get all the functions (NameSpace / ClassName / Method) for this action
+                            cmd2.CommandText = "SELECT [ID], [FUNCTION] as [ClassName_Method],FUNCTION_ORDER,[SK_VALID] FROM [IMCA_BACKOFFICE].[dbo].PCM_TAB_IMCA_ACTION_FUNCTION where SK_VALID<>99 and ACTION='" + dr["ACTION"].ToString() + "' ORDER BY FUNCTION_ORDER";
+                            dt2 = cmd2.ExecuteReader();
+
+                            bool at_least_one_error = false;
+
+                            while (dt2.Read())
+                            {
+                                string ret = "";
+                                string func_to_execute = "";
+
+                                switch (dt2["ClassName_Method"].ToString().ToUpper().Trim())
+                                {
+                                    case string x when x.StartsWith("SENDMAIL"):
+
+                                        WriteToFile("               FUNCTION to execute : SENDMAIL", id, logs_folder, dr["ACTION"].ToString());
+
+                                        func_to_execute = dt2["ClassName_Method"].ToString().Trim();
+                                        func_to_execute = resolve_parameters(func_to_execute, long.Parse(dr["ID"].ToString()), long.Parse(dt2["ID"].ToString()), dr);
+
+                                        ret = Execute_SendMail(func_to_execute, long.Parse(dr["ID"].ToString()), long.Parse(dt2["ID"].ToString()), Int16.Parse(dt2["SK_VALID"].ToString()));
+
+                                        if (ret != "")
+                                        {
+                                            WriteToFile("       ACTION : " + dr["ACTION"].ToString() + " - Unable to execute the SendMail Function : " + func_to_execute.Trim(), id, logs_folder, dr["ACTION"].ToString());
+                                            at_least_one_error = true;
+                                        }
+
+                                        break;
+
+                                    case string x when x.StartsWith("EVALOPENQUERY"):
+
+                                        WriteToFile("               FUNCTION to execute : EVALOPENQUERY (ID : " + dt2["ID"].ToString() + ")", id, logs_folder, dr["ACTION"].ToString());
+
+                                        func_to_execute = dt2["ClassName_Method"].ToString().ToUpper().Trim();
+                                        func_to_execute = resolve_parameters(func_to_execute, long.Parse(dr["ID"].ToString()), long.Parse(dt2["ID"].ToString()), dr);
+
+                                        ret = Execute_Query(func_to_execute, long.Parse(dr["ID"].ToString()), long.Parse(dt2["ID"].ToString()));
+
+                                        if (ret != "")
+                                        {
+                                            WriteToFile("       ACTION : " + dr["ACTION"].ToString() + " - Unable to execute the query : " + func_to_execute.Trim(), id, logs_folder, dr["ACTION"].ToString());
+                                            at_least_one_error = true;
+                                        }
+
+                                        break;
+
+                                    default:
+
+                                        int count = dt2["ClassName_Method"].ToString().Split('.').Length - 1; // Count the number of point (.)
+
+                                        if (count == 2)
+                                        {
+                                            WriteToFile("               FUNCTION to execute : " + dt2["ClassName_Method"].ToString() + " (ID : " + dt2["ID"].ToString() + ")", id, logs_folder, dr["ACTION"].ToString());
+                                            WriteToFile("               NameSpace           : " + dt2["ClassName_Method"].ToString().Split('.')[0], id, logs_folder, dr["ACTION"].ToString());
+                                            WriteToFile("               ClassName           : " + dt2["ClassName_Method"].ToString().Split('.')[1], id, logs_folder, dr["ACTION"].ToString());
+                                            WriteToFile("               Method              : " + dt2["ClassName_Method"].ToString().Split('.')[2], id, logs_folder, dr["ACTION"].ToString());
+
+                                            try
+                                            {
+                                                caller(dt2["ClassName_Method"].ToString(), new object[] { sql_con, logs, temp_folder, session_name });
+
+                                            }
+                                            catch (Exception ex)
+                                            {
+                                                WriteToFile("Unable to execute the function " + dt2["ClassName_Method"].ToString() + " - ACTION :  " + dr["ACTION"].ToString() + " - " + ex.Message, id, logs_folder, dr["ACTION"].ToString());
+
+                                                at_least_one_error = true;
+
+                                                LogDatabaseError(nameof(execute_IMCA_Action), dt2["ClassName_Method"].ToString(), ex, actionId, actionName);
+
+
+                                                TryMarkActionAsError(actionId, Convert.ToInt64(dt2["ID"]), ex);
+                                            }
+                                        }
+                                        else
+                                        {
+                                            WriteToFile("   [FUNCTION] value (" + dt2["ClassName_Method"].ToString() + ") doesn't respect the following syntax : NameSpace.ClassName.MethodName", id, logs_folder, dr["ACTION"].ToString());
+
+                                            at_least_one_error = true;
+                                            Exception functionFormatException = new FormatException("[FUNCTION] field does not respect NameSpace.ClassName.MethodName syntax");
+
+                                            LogDatabaseError(nameof(execute_IMCA_Action), dt2["ClassName_Method"].ToString(), functionFormatException, actionId, actionName);
+
+                                            TryMarkActionAsError(actionId, Convert.ToInt64(dt2["ID"]), functionFormatException);
+                                        }
+
+                                        break;
+                                }
+
+                                if (at_least_one_error == true)
+                                {
+                                    break;
+                                }
+
+                            }
+                            dt2.Close();
+
+                            if (at_least_one_error == false)
+                            {
+                                cmd2.CommandText = "UPDATE [IMCA_BACKOFFICE].[dbo].PCM_TAB_IMCA_ACTION set TODO_BY=replace(TODO_BY,'THREAD_',''),FINISHED=getdate(),SK_FINISH_DATE=DATEDIFF(d,'19951229',getdate()) where ID=" + dr["ID"].ToString();
+                                cmd2.ExecuteNonQuery();
+
+                                WriteToFile("       ACTION : " + dr["ACTION"].ToString() + " (ID : " + dr["ID"].ToString() + ") finished at " + DateTime.Now.ToString("dd/MM/yyyy HH:mm:ss"), id, logs_folder, dr["ACTION"].ToString());
+
+                                // 
+                                /// We add a new record for the next RUN
+                                //
+
+                                cmd2.CommandText = "select getdate()";
+
+                                DateTime dteSysSQL = (DateTime)cmd2.ExecuteScalar();
+                                dteSysSQL = new DateTime(dteSysSQL.Year, dteSysSQL.Month, dteSysSQL.Day, dteSysSQL.Hour, dteSysSQL.Minute, dteSysSQL.Second, 0);
+                                DateTime dteNextToDodate = dteSysSQL;
+
+                                int DateInterval_value = 0;
+
+                                if (dr["NEXT_RUN_DELAY_TYPE"].ToString() != "-" && dr["CREATED_FROM_AUTO"].ToString() != "-1")
+                                {
+                                    switch (dr["NEXT_RUN_DELAY_TYPE"].ToString())
+                                    {
+                                        case "N":
+                                            {
+                                                dteNextToDodate = DateAndTime.DateAdd(DateInterval.Minute, Convert.ToInt32(dr["NEXT_RUN_DELAY"].ToString()), dteNextToDodate);
+                                                DateInterval_value = (int)DateInterval.Minute;
+                                                break;
+                                            }
+                                        case "S":
+                                            {
+                                                dteNextToDodate = DateAndTime.DateAdd(DateInterval.Second, Convert.ToInt32(dr["NEXT_RUN_DELAY"].ToString()), dteNextToDodate);
+                                                DateInterval_value = (int)DateInterval.Second;
+                                                break;
+                                            }
+
+                                        case "YYYY":
+                                        case "M":
+                                        case "D":
+                                        case "H":
+                                            {
+                                                switch (dr["NEXT_RUN_DELAY_TYPE"].ToString())
+                                                {
+                                                    case "YYYY":
+                                                        DateInterval_value = (int)DateInterval.Year;
+                                                        break;
+                                                    case "M":
+                                                        DateInterval_value = (int)DateInterval.Month;
+                                                        break;
+                                                    case "D":
+                                                        DateInterval_value = (int)DateInterval.Day;
+                                                        break;
+                                                    case "H":
+                                                        DateInterval_value = (int)DateInterval.Hour;
+                                                        break;
+                                                }
+
+                                                dteNextToDodate = DateAndTime.DateAdd((DateInterval)DateInterval_value, Convert.ToInt32(dr["NEXT_RUN_DELAY"].ToString()), (DateTime)(dr["TODO_DATE"]));
+
+                                                //while (DateAndTime.DateDiff((DateInterval)DateInterval_value, dteSysSQL, dteNextToDodate) < 1)
+                                                //{
+                                                //    dteNextToDodate = DateAndTime.DateAdd((DateInterval)DateInterval_value, Convert.ToInt32(dr["NEXT_RUN_DELAY"].ToString()), (DateTime)dteNextToDodate);
+                                                //}
+
+                                                // Check if the new date is in the future
+                                                while (DateTime.Compare(dteNextToDodate, dteSysSQL) <= 0)
+                                                {
+                                                    dteNextToDodate = DateAndTime.DateAdd((DateInterval)DateInterval_value, Convert.ToInt32(dr["NEXT_RUN_DELAY"].ToString()), (DateTime)dteNextToDodate);
+                                                }
+
+                                                break;
+                                            }
+
+                                        case "FM":
+                                            {
+                                                dteNextToDodate = (DateTime)(dr["TODO_DATE"]);
+                                                Int32 lngl;
+                                                int lngFMDays;
+
+                                                while (DateAndTime.DateDiff(DateInterval.Day, dteSysSQL, dteNextToDodate) < 1)
+                                                {
+                                                    lngl = 0;
+                                                    do
+                                                    {
+                                                        cmd2.CommandText = "SELECT COUNT(*) FROM [IMCA_BACKOFFICE].[dbo].DSSIMPRT_TAB_SK_TIME where TIMETYPE='CD' and SKT_FM=" + CurrentSKTime("FM", dteNextToDodate.ToString("yyyyMMdd"));
+                                                        lngFMDays = (int)cmd2.ExecuteScalar();
+
+                                                        dteNextToDodate = DateAndTime.DateAdd(DateInterval.Day, lngFMDays, dteNextToDodate);
+
+                                                        lngl = lngl + 1;
+
+                                                    } while (lngl < (int)dr["NEXT_RUN_DELAY"]);
+
+                                                }
+
+                                                break;
+                                            }
+
+                                    }
+
+                                    //if (dr["NEXT_RUN_DELAY_TYPE"].ToString() != "FM")
+                                    //{
+                                    //    while (TodoDateInWorkTime(dteNextToDodate, dteSysSQL, dr["START_TIME"].ToString(), dr["END_TIME"].ToString()) == false)
+                                    //    {
+                                    //        dteNextToDodate = DateAndTime.DateAdd((DateInterval)DateInterval_value, Convert.ToInt32(dr["NEXT_RUN_DELAY"].ToString()), (DateTime)dteNextToDodate);
+
+                                    //    }
+                                    //}
+
+                                    if (dr["CREATED_FROM"].ToString() == "SYSTEM")
+                                    {
+
+                                        // Get the details of the ACTION                                        
+
+                                        cmd2.CommandText = "SELECT * FROM [IMCA_BACKOFFICE].[dbo].PCM_TAB_IMCA_ACTION where ID=" + dr["ID"].ToString();
+                                        dt2 = cmd2.ExecuteReader();
+
+                                        using (SqlConnection con3 = new SqlConnection(sql_con))
+                                        {
+                                            con3.Open();
+
+                                            using (SqlCommand cmd3 = new SqlCommand())
+                                            {
+                                                cmd3.Connection = con3;
+                                                cmd3.CommandTimeout = 300;
+
+                                                while (dt2.Read())
+                                                {
+                                                    cmd3.CommandText = "SELECT COUNT(*) FROM [IMCA_BACKOFFICE].[dbo].PCM_TAB_IMCA_ACTION where CREATED_FROM_AUTO=" + dr["ID"].ToString() + " AND [ACTION]='" + dt2["ACTION"] + "'";
+                                                    do
+                                                    {
+                                                        // Add a new ACTION
+                                                        AddIMCAAction(dteSysSQL, long.Parse(dt2["SK_VALID"].ToString()), dt2["ACTION"].ToString(), -9999, dteNextToDodate, dt2["created_from"].ToString(), dr["NEXT_RUN_TODO_BY"].ToString(), dt2["SK_Type"].ToString(), dt2["param01"].ToString(), dt2["Param02"].ToString(), dt2["PARAM03"].ToString(), dt2["PARAM04"].ToString(), dt2["PARAM05"].ToString(), dt2["PARAM06"].ToString(), dt2["PARAM07"].ToString(), dt2["PARAM08"].ToString(), dt2["param09"].ToString(), (string)dt2["param10"], dt2["PARAM11"].ToString(), dt2["PARAM12"].ToString(), dt2["PARAM13"].ToString(), dt2["PARAM14"].ToString(), dt2["PARAM15"].ToString(), dt2["PARAM16"].ToString(), dt2["PARAM17"].ToString(), dt2["PARAM18"].ToString(), dt2["PARAM19"].ToString(), dt2["PARAM20"].ToString(), dt2["PARAM_MEMO"].ToString(), dt2["ID"].ToString(), long.Parse(dt2["sk_value"].ToString()));
+                                                    } while ((int)cmd3.ExecuteScalar() < 0);
+                                                }
+
+                                                cmd3.Dispose();
+                                            }
+
+                                        }
+                                        dt2.Close();
+                                    }
+                                }
+                            }
                         }
                         else
                         {
-                            WriteToFile("       ACTION : " + dr["ACTION"].ToString() + " (ID : " + dr["ID"].ToString() + ") has been reserved. We can start it at " + DateTime.Now.ToString("dd/MM/yyyy HH:mm:ss"));
-                        }
+                            WriteToFile("       ACTION : " + dr["ACTION"].ToString() + " (ID : " + dr["ID"].ToString() + ") has not been reserved (Other(s) Component(s) are not available)  at " + DateTime.Now.ToString("dd/MM/yyyy HH:mm:ss"));
 
-                        cmd2.CommandText = "UPDATE [IMCA_BACKOFFICE].[dbo].PCM_TAB_IMCA_ACTION set STARTED=getdate() WHERE ID=" + dr["ID"].ToString();
-                        cmd2.ExecuteNonQuery();
-
-                        // Get all the functions (NameSpace / ClassName / Method) for this action
-                        cmd2.CommandText = "SELECT [ID], [FUNCTION] as [ClassName_Method],FUNCTION_ORDER,[SK_VALID] FROM [IMCA_BACKOFFICE].[dbo].PCM_TAB_IMCA_ACTION_FUNCTION where SK_VALID<>99 and ACTION='" + dr["ACTION"].ToString() + "' ORDER BY FUNCTION_ORDER";
-                        dt2 = cmd2.ExecuteReader();
-
-                        bool at_least_one_error = false;
-
-                        while (dt2.Read())
-                        {
-                            string ret = "";
-                            string func_to_execute = "";
-
-                            switch (dt2["ClassName_Method"].ToString().ToUpper().Trim())
-                            {
-                                case string x when x.StartsWith("SENDMAIL"):
-
-                                    WriteToFile("               FUNCTION to execute : SENDMAIL", id);
-
-                                    func_to_execute = dt2["ClassName_Method"].ToString().Trim();
-                                    func_to_execute = resolve_parameters(func_to_execute, long.Parse(dr["ID"].ToString()), long.Parse(dt2["ID"].ToString()), dr);
-
-                                    ret = Execute_SendMail(func_to_execute, long.Parse(dr["ID"].ToString()), long.Parse(dt2["ID"].ToString()), Int16.Parse(dt2["SK_VALID"].ToString()));
-
-                                    if (ret != "")
-                                    {
-                                        WriteToFile("       ACTION : " + dr["ACTION"].ToString() + " - Unable to execute the SendMail Function : " + func_to_execute.Trim(), id);
-                                        at_least_one_error = true;
-                                    }
-
-                                    break;
-
-                                case string x when x.StartsWith("EVALOPENQUERY"):
-
-                                    WriteToFile("               FUNCTION to execute : EVALOPENQUERY (ID : " + dt2["ID"].ToString() + ")", id);
-
-                                    func_to_execute = dt2["ClassName_Method"].ToString().ToUpper().Trim();
-                                    func_to_execute = resolve_parameters(func_to_execute, long.Parse(dr["ID"].ToString()), long.Parse(dt2["ID"].ToString()), dr);
-
-                                    ret = Execute_Query(func_to_execute, long.Parse(dr["ID"].ToString()), long.Parse(dt2["ID"].ToString()));
-
-                                    if (ret != "")
-                                    {
-                                        WriteToFile("       ACTION : " + dr["ACTION"].ToString() + " - Unable to execute the query : " + func_to_execute.Trim(), id);
-                                        at_least_one_error = true;
-                                    }
-
-                                    break;
-
-                                default:
-
-                                    int count = dt2["ClassName_Method"].ToString().Split('.').Length - 1; // Count the number of point (.)
-
-                                    if (count == 2)
-                                    {
-                                        WriteToFile("               FUNCTION to execute : " + dt2["ClassName_Method"].ToString() + " (ID : " + dt2["ID"].ToString() + ")", id);
-                                        WriteToFile("               NameSpace           : " + dt2["ClassName_Method"].ToString().Split('.')[0], id);
-                                        WriteToFile("               ClassName           : " + dt2["ClassName_Method"].ToString().Split('.')[1], id);
-                                        WriteToFile("               Method              : " + dt2["ClassName_Method"].ToString().Split('.')[2], id);
-
-                                        try
-                                        {
-                                            caller(dt2["ClassName_Method"].ToString(), new object[] { sql_con, logs, temp_folder, session_name });
-
-                                        }
-                                        catch (Exception ex)
-                                        {
-                                            WriteToFile("Unable to execute the function " + dt2["ClassName_Method"].ToString() + " - ACTION :  " + dr["ACTION"].ToString() + " - " + ex.Message, id);
-
-                                            at_least_one_error = true;
-
-                                            using (SqlConnection con_sql = new SqlConnection(sql_con))
-                                            {
-                                                con_sql.Open();
-
-                                                using (SqlCommand cmd_error = new SqlCommand())
-                                                {
-                                                    cmd_error.Connection = con_sql;
-                                                    cmd_error.CommandTimeout = 0;
-                                                    cmd_error.CommandText = "update [IMCA_BACKOFFICE].[dbo].PCM_TAB_IMCA_ACTION set TODO_BY=@TODO_BY,ERROR=@ERROR_NUMBER,ERROR_TEXT=@ERROR_MSG where ID=@ID";
-                                                    cmd_error.Parameters.Clear();
-                                                    cmd_error.Parameters.AddWithValue("@TODO_BY", "ERROR_" + session_name.ToUpper());
-                                                    cmd_error.Parameters.AddWithValue("@ID", dr["ID"].ToString());
-                                                    cmd_error.Parameters.AddWithValue("@ERROR_NUMBER", 0);
-                                                    cmd_error.Parameters.AddWithValue("@ERROR_MSG", Microsoft.VisualBasic.Strings.Left("FUNCTION_ID=" + dt2["ID"].ToString() + " - ERROR MSG=" + ex.Message, 1024));
-                                                    cmd_error.ExecuteNonQuery();
-                                                }
-
-                                                con_sql.Close();
-                                            }
-                                        }
-                                    }
-                                    else
-                                    {
-                                        WriteToFile("   [FUNCTION] value (" + dt2["ClassName_Method"].ToString() + ") doesn't respect the following syntax : NameSpace.ClassName.MethodName", id);
-
-                                        at_least_one_error = true;
-                                        using (SqlConnection con_sql = new SqlConnection(sql_con))
-                                        {
-                                            con_sql.Open();
-
-                                            using (SqlCommand cmd_error = new SqlCommand())
-                                            {
-                                                cmd_error.Connection = con_sql;
-                                                cmd_error.CommandTimeout = 0;
-                                                cmd_error.CommandText = "update [IMCA_BACKOFFICE].[dbo].PCM_TAB_IMCA_ACTION set TODO_BY=@TODO_BY,ERROR=@ERROR_NUMBER,ERROR_TEXT=@ERROR_MSG where ID=@ID";
-                                                cmd_error.Parameters.Clear();
-                                                cmd_error.Parameters.AddWithValue("@TODO_BY", "ERROR_" + session_name.ToUpper());
-                                                cmd_error.Parameters.AddWithValue("@ID", dr["ID"].ToString());
-                                                cmd_error.Parameters.AddWithValue("@ERROR_NUMBER", 0);
-                                                cmd_error.Parameters.AddWithValue("@ERROR_MSG", Microsoft.VisualBasic.Strings.Left("FUNCTION_ID=" + dt2["ID"].ToString() + " - ERROR MSG=[FUNCTION] field doesn't respect the following syntax : NameSpace.ClassName.MethodName", 1024));
-                                                cmd_error.ExecuteNonQuery();
-                                            }
-
-                                            con_sql.Close();
-                                        }
-                                    }
-
-                                    break;
-                            }
-
-                            if (at_least_one_error == true)
-                            {
-                                break;
-                            }
-
-                        }
-                        dt2.Close();
-
-                        if (at_least_one_error == false)
-                        {
-                            cmd2.CommandText = "UPDATE [IMCA_BACKOFFICE].[dbo].PCM_TAB_IMCA_ACTION set TODO_BY=replace(TODO_BY,'THREAD_',''),FINISHED=getdate(),SK_FINISH_DATE=DATEDIFF(d,'19951229',getdate()) where ID=" + dr["ID"].ToString();
-                            cmd2.ExecuteNonQuery();
-
-                            WriteToFile("       ACTION : " + dr["ACTION"].ToString() + " (ID : " + dr["ID"].ToString() + ") finished at " + DateTime.Now.ToString("dd/MM/yyyy HH:mm:ss"), id);
-
-                            // 
-                            /// We add a new record for the next RUN
-                            //
-
-                            cmd2.CommandText = "select getdate()";
-
-                            DateTime dteSysSQL = (DateTime)cmd2.ExecuteScalar();
-                            dteSysSQL = new DateTime(dteSysSQL.Year, dteSysSQL.Month, dteSysSQL.Day, dteSysSQL.Hour, dteSysSQL.Minute, dteSysSQL.Second, 0);
-                            DateTime dteNextToDodate = dteSysSQL;
-
-                            int DateInterval_value = 0;
-
-                            if (dr["NEXT_RUN_DELAY_TYPE"].ToString() != "-" && dr["CREATED_FROM_AUTO"].ToString() != "-1")
-                            {
-                                switch (dr["NEXT_RUN_DELAY_TYPE"].ToString())
-                                {
-                                    case "N":
-                                        {
-                                            dteNextToDodate = DateAndTime.DateAdd(DateInterval.Minute, Convert.ToInt32(dr["NEXT_RUN_DELAY"].ToString()), dteNextToDodate);
-                                            DateInterval_value = (int)DateInterval.Minute;
-                                            break;
-                                        }
-                                    case "S":
-                                        {
-                                            dteNextToDodate = DateAndTime.DateAdd(DateInterval.Second, Convert.ToInt32(dr["NEXT_RUN_DELAY"].ToString()), dteNextToDodate);
-                                            DateInterval_value = (int)DateInterval.Second;
-                                            break;
-                                        }
-
-                                    case "YYYY":
-                                    case "M":
-                                    case "D":
-                                    case "H":
-                                        {
-                                            switch (dr["NEXT_RUN_DELAY_TYPE"].ToString())
-                                            {
-                                                case "YYYY":
-                                                    DateInterval_value = (int)DateInterval.Year;
-                                                    break;
-                                                case "M":
-                                                    DateInterval_value = (int)DateInterval.Month;
-                                                    break;
-                                                case "D":
-                                                    DateInterval_value = (int)DateInterval.Day;
-                                                    break;
-                                                case "H":
-                                                    DateInterval_value = (int)DateInterval.Hour;
-                                                    break;
-                                            }
-
-                                            dteNextToDodate = DateAndTime.DateAdd((DateInterval)DateInterval_value, Convert.ToInt32(dr["NEXT_RUN_DELAY"].ToString()), (DateTime)(dr["TODO_DATE"]));
-
-                                            //while (DateAndTime.DateDiff((DateInterval)DateInterval_value, dteSysSQL, dteNextToDodate) < 1)
-                                            //{
-                                            //    dteNextToDodate = DateAndTime.DateAdd((DateInterval)DateInterval_value, Convert.ToInt32(dr["NEXT_RUN_DELAY"].ToString()), (DateTime)dteNextToDodate);
-                                            //}
-
-                                            // Check if the new date is in the future
-                                            while (DateTime.Compare(dteNextToDodate, dteSysSQL) <= 0)
-                                            {
-                                                dteNextToDodate = DateAndTime.DateAdd((DateInterval)DateInterval_value, Convert.ToInt32(dr["NEXT_RUN_DELAY"].ToString()), (DateTime)dteNextToDodate);
-                                            }
-
-                                            break;
-                                        }
-
-                                    case "FM":
-                                        {
-                                            dteNextToDodate = (DateTime)(dr["TODO_DATE"]);
-                                            Int32 lngl;
-                                            int lngFMDays;
-
-                                            while (DateAndTime.DateDiff(DateInterval.Day, dteSysSQL, dteNextToDodate) < 1)
-                                            {
-                                                lngl = 0;
-                                                do
-                                                {
-                                                    cmd2.CommandText = "SELECT COUNT(*) FROM [IMCA_BACKOFFICE].[dbo].DSSIMPRT_TAB_SK_TIME where TIMETYPE='CD' and SKT_FM=" + CurrentSKTime("FM", dteNextToDodate.ToString("yyyyMMdd"));
-                                                    lngFMDays = (int)cmd2.ExecuteScalar();
-
-                                                    dteNextToDodate = DateAndTime.DateAdd(DateInterval.Day, lngFMDays, dteNextToDodate);
-
-                                                    lngl = lngl + 1;
-
-                                                } while (lngl < (int)dr["NEXT_RUN_DELAY"]);
-
-                                            }
-
-                                            break;
-                                        }
-
-                                }
-
-                                //if (dr["NEXT_RUN_DELAY_TYPE"].ToString() != "FM")
-                                //{
-                                //    while (TodoDateInWorkTime(dteNextToDodate, dteSysSQL, dr["START_TIME"].ToString(), dr["END_TIME"].ToString()) == false)
-                                //    {
-                                //        dteNextToDodate = DateAndTime.DateAdd((DateInterval)DateInterval_value, Convert.ToInt32(dr["NEXT_RUN_DELAY"].ToString()), (DateTime)dteNextToDodate);
-
-                                //    }
-                                //}
-
-                                if (dr["CREATED_FROM"].ToString() == "SYSTEM")
-                                {
-
-                                    // Get the details of the ACTION                                        
-
-                                    cmd2.CommandText = "SELECT * FROM [IMCA_BACKOFFICE].[dbo].PCM_TAB_IMCA_ACTION where ID=" + dr["ID"].ToString();
-                                    dt2 = cmd2.ExecuteReader();
-
-                                    using (SqlConnection con3 = new SqlConnection(sql_con))
-                                    {
-                                        con3.Open();
-
-                                        using (SqlCommand cmd3 = new SqlCommand())
-                                        {
-                                            cmd3.Connection = con3;
-                                            cmd3.CommandTimeout = 0;
-
-                                            while (dt2.Read())
-                                            {
-                                                cmd3.CommandText = "SELECT COUNT(*) FROM [IMCA_BACKOFFICE].[dbo].PCM_TAB_IMCA_ACTION where CREATED_FROM_AUTO=" + dr["ID"].ToString() + " AND [ACTION]='" + dt2["ACTION"] + "'";
-                                                do
-                                                {
-                                                    // Add a new ACTION
-                                                    AddIMCAAction(dteSysSQL, long.Parse(dt2["SK_VALID"].ToString()), dt2["ACTION"].ToString(), -9999, dteNextToDodate, dt2["created_from"].ToString(), dr["NEXT_RUN_TODO_BY"].ToString(), dt2["SK_Type"].ToString(), dt2["param01"].ToString(), dt2["Param02"].ToString(), dt2["PARAM03"].ToString(), dt2["PARAM04"].ToString(), dt2["PARAM05"].ToString(), dt2["PARAM06"].ToString(), dt2["PARAM07"].ToString(), dt2["PARAM08"].ToString(), dt2["param09"].ToString(), (string)dt2["param10"], dt2["PARAM11"].ToString(), dt2["PARAM12"].ToString(), dt2["PARAM13"].ToString(), dt2["PARAM14"].ToString(), dt2["PARAM15"].ToString(), dt2["PARAM16"].ToString(), dt2["PARAM17"].ToString(), dt2["PARAM18"].ToString(), dt2["PARAM19"].ToString(), dt2["PARAM20"].ToString(), dt2["PARAM_MEMO"].ToString(), dt2["ID"].ToString(), long.Parse(dt2["sk_value"].ToString()));
-                                                } while ((int)cmd3.ExecuteScalar() < 0);
-                                            }
-
-                                            cmd3.Dispose();
-                                        }
-
-                                    }
-                                    dt2.Close();
-                                }
-                            }
                         }
                     }
-                    else
-                    {
-                        WriteToFile("       ACTION : " + dr["ACTION"].ToString() + " (ID : " + dr["ID"].ToString() + ") has not been reserved (Other(s) Component(s) are not available)  at " + DateTime.Now.ToString("dd/MM/yyyy HH:mm:ss"));
 
-                    }
+                    con.Close();
                 }
 
-                con.Close();
+            }
+            catch (Exception ex)
+            {
+                LogDatabaseError(nameof(execute_IMCA_Action), "IMCA action execution", ex, actionId, actionName);
+                TryMarkActionAsError(actionId, 0, ex);
+                throw;
+            }
+        }
+
+        /// <summary>
+        /// Starts one IMCA action on a background STA thread when a thread slot is available.
+        /// The counter is always released in finally, including when the action throws an exception.
+        /// </summary>
+        private bool StartActionThread(DataRow sourceRow, string logs, string tempFolder)
+        {
+            int maxThreads;
+            if (!int.TryParse(NUMBER_OF_THREAD_MAX, out maxThreads) || maxThreads < 1)
+            {
+                maxThreads = 10;
             }
 
-            if (using_thread == true)
-                nb_created_thread -= 1;
+            if (!TryAcquireThreadSlot(maxThreads))
+            {
+                return false;
+            }
+
+            // Copy the row so the worker does not depend on the lifetime of the source DataTable.
+            DataTable actionTable = sourceRow.Table.Clone();
+            DataRow actionRow = actionTable.NewRow();
+            actionRow.ItemArray = (object[])sourceRow.ItemArray.Clone();
+            actionTable.Rows.Add(actionRow);
+
+            Thread actionThread = new Thread(() =>
+            {
+                try
+                {
+                    WriteToFile(
+                        "       ACTION : " + actionRow["ACTION"] +
+                        " (ID : " + actionRow["ID"] + ")" + " - Starting action thread. Active threads : " +
+                        Volatile.Read(ref nb_created_thread) + "/" + maxThreads);
+
+                    execute_IMCA_Action(actionRow, logs, tempFolder, true);
+                }
+                catch (Exception ex)
+                {
+                    WriteToFile(
+                      "       ACTION : " + actionRow["ACTION"] +
+                      " (ID : " + actionRow["ID"] + ")" + " - Unhandled action thread error. " + ex, Convert.ToInt64(actionRow["ID"]));
+
+                }
+                finally
+                {
+                    int remainingThreads = Interlocked.Decrement(ref nb_created_thread);
+
+                    WriteToFile(
+                         "       ACTION : " + actionRow["ACTION"] +
+                         " (ID : " + actionRow["ID"] + ")" + " - Action thread released. Active threads : " + remainingThreads);
+
+                    actionTable.Dispose();
+                }
+            });
+
+            actionThread.IsBackground = true;
+            actionThread.SetApartmentState(ApartmentState.STA);
+
+            try
+            {
+                actionThread.Start();
+                return true;
+            }
+            catch
+            {
+                // Release the slot if the CLR cannot start the thread.
+                Interlocked.Decrement(ref nb_created_thread);
+                actionTable.Dispose();
+                throw;
+            }
+        }
+
+        /// <summary>
+        /// Atomically reserves one thread slot without exceeding NUMBER_OF_THREAD_MAX.
+        /// </summary>
+        private bool TryAcquireThreadSlot(int maxThreads)
+        {
+            while (true)
+            {
+                int current = Volatile.Read(ref nb_created_thread);
+                if (current >= maxThreads)
+                {
+                    return false;
+                }
+
+                if (Interlocked.CompareExchange(ref nb_created_thread, current + 1, current) == current)
+                {
+                    return true;
+                }
+            }
+        }
+
+        /// <summary>
+        /// Checks whether this service still owns database actions marked as threaded.
+        /// </summary>
+        private bool HasDatabaseThreadedActions()
+        {
+            const string sql = @"SELECT COUNT(*)
+                FROM [IMCA_BACKOFFICE].[dbo].[PCM_TAB_IMCA_ACTION]
+                WHERE TODO_BY=@TODO_BY AND SK_FINISH_DATE=0";
+
+            try
+            {
+                using (SqlConnection connection = new SqlConnection(sql_con))
+                using (SqlCommand command = new SqlCommand(sql, connection))
+                {
+                    command.CommandTimeout = 300;
+                    command.Parameters.Add("@TODO_BY", SqlDbType.VarChar, 100).Value =
+                        "THREAD_" + session_name.ToUpper();
+                    connection.Open();
+                    return Convert.ToInt32(command.ExecuteScalar()) > 0;
+                }
+            }
+            catch (Exception ex)
+            {
+                // SQL may be unavailable during shutdown. Do not block Windows service termination.
+                WriteToFile("Unable to check threaded actions during shutdown : " + ex.Message);
+                return Volatile.Read(ref nb_created_thread) > 0;
+            }
         }
 
         protected void check_if_TODO(string logs, string temp_folder)
         {
-            timer_check_TODO_is_running = true;
+            // Publish the callback state before opening SQL connections.
+            Volatile.Write(ref timer_check_TODO_is_running, true);
 
-            using (SqlConnection con = new SqlConnection(sql_con))
+            try
             {
-                con.Open();
 
-                using (SqlCommand cmd = new SqlCommand())
+
+                using (SqlConnection con = new SqlConnection(sql_con))
                 {
-                    cmd.Connection = con;
-                    cmd.CommandTimeout = 0;
+                    con.Open();
 
-                    Boolean bol = true;
-                    do
+                    using (SqlCommand cmd = new SqlCommand())
                     {
-                        // Check if a action has been reserved (with the session name) and not started/finished
-                        cmd.CommandText = " SET LANGUAGE FRENCH;SELECT action.ID,admin.ACTION,admin.ID as [ADMIN_ID],admin.SK_VALID," +
-                                          " CASE WHEN isnull(admin.NEXT_RUN_DELAY_TYPE,'')='Y' THEN 'YYYY' ELSE isnull(admin.NEXT_RUN_DELAY_TYPE,'') END as NEXT_RUN_DELAY_TYPE,NEXT_RUN_DELAY, " +
-                                          " action.[CREATED_FROM_AUTO],action.[TODO_DATE], CASE WHEN isnull(admin.NEXT_RUN_TODO_BY,'')='' THEN 'TODO' ELSE isnull(admin.NEXT_RUN_TODO_BY,'') END as NEXT_RUN_TODO_BY, " +
-                                          " upper(action.CREATED_FROM) as CREATED_FROM, " +
-                                          " convert(varchar(5),START_TIME,108) as START_TIME,convert(varchar(5),END_TIME,108) as END_TIME, " +
-                                          " PARAM01,PARAM02,PARAM03,PARAM04,PARAM05,PARAM06,PARAM07,PARAM08,PARAM09,PARAM10,PARAM11,PARAM12,PARAM13,PARAM14,PARAM15,PARAM16,PARAM17,PARAM18,PARAM19,PARAM20 " +
-                                          " FROM [IMCA_BACKOFFICE].[dbo].[PCM_TAB_IMCA_ACTION_ADMIN] admin " +
-                                          " INNER JOIN [IMCA_BACKOFFICE].[dbo].[PCM_TAB_IMCA_ACTION] action on admin.ACTION=action.ACTION " +
-                                          " WHERE admin.ACTION in (SELECT ACTION FROM [IMCA_BACKOFFICE].[dbo].PCM_TAB_IMCA_ACTION_USERVALIDATION WHERE USERID LIKE 'SERVICE%' AND VALID = 1) AND TODO_BY='" + session_name.ToUpper() + "'" +
-                                          " AND action.SK_FINISH_DATE=0 AND TODO_DATE_INT<cast(replace(convert(varchar(10),GETDATE(),102),'.','')+replace(convert(varchar(10),GETDATE(),108),':','') as bigint) " +
-                                          " ORDER BY action.PRIORITY, action.ID ";
-                        SqlDataReader dt;
+                        cmd.Connection = con;
+                        cmd.CommandTimeout = 300;
 
-                        dt = cmd.ExecuteReader();
-                        DataTable row = new DataTable();
-                        row.Load(dt);
-                        dt.Close();
-
-                        foreach (DataRow dr in row.Rows)
+                        Boolean bol = true;
+                        do
                         {
-                            if (EXECUTE_IMCA_ACTION_USING_THREAD.Trim().ToUpper() == "TRUE")
+                            // Check if a action has been reserved (with the session name) and not started/finished
+                            cmd.CommandText = " SET LANGUAGE FRENCH;SELECT action.ID,admin.ACTION,admin.ID as [ADMIN_ID],admin.SK_VALID," +
+                                              " CASE WHEN EXISTS (SELECT 1 FROM [IMCA_BACKOFFICE].[dbo].[PCM_TAB_IMCA_ACTION_FLAG] thread_flag " +
+                                              " WHERE thread_flag.ACTION_ID=admin.ID AND UPPER(thread_flag.FLAG)='USE_THREAD') " +
+                                              " THEN 1 ELSE 0 END AS USE_THREAD, " +
+                                              " CASE WHEN isnull(admin.NEXT_RUN_DELAY_TYPE,'')='Y' THEN 'YYYY' ELSE isnull(admin.NEXT_RUN_DELAY_TYPE,'') END as NEXT_RUN_DELAY_TYPE,NEXT_RUN_DELAY, " +
+                                              " action.[CREATED_FROM_AUTO],action.[TODO_DATE], CASE WHEN isnull(admin.NEXT_RUN_TODO_BY,'')='' THEN 'TODO' ELSE isnull(admin.NEXT_RUN_TODO_BY,'') END as NEXT_RUN_TODO_BY, " +
+                                              " upper(action.CREATED_FROM) as CREATED_FROM, " +
+                                              " convert(varchar(5),START_TIME,108) as START_TIME,convert(varchar(5),END_TIME,108) as END_TIME, " +
+                                              " PARAM01,PARAM02,PARAM03,PARAM04,PARAM05,PARAM06,PARAM07,PARAM08,PARAM09,PARAM10,PARAM11,PARAM12,PARAM13,PARAM14,PARAM15,PARAM16,PARAM17,PARAM18,PARAM19,PARAM20 " +
+                                              " FROM [IMCA_BACKOFFICE].[dbo].[PCM_TAB_IMCA_ACTION_ADMIN] admin " +
+                                              " INNER JOIN [IMCA_BACKOFFICE].[dbo].[PCM_TAB_IMCA_ACTION] action on admin.ACTION=action.ACTION " +
+                                              " WHERE admin.ACTION in (SELECT ACTION FROM [IMCA_BACKOFFICE].[dbo].PCM_TAB_IMCA_ACTION_USERVALIDATION WHERE USERID LIKE 'SERVICE%' AND VALID = 1) AND TODO_BY='" + session_name.ToUpper() + "'" +
+                                              " AND action.SK_FINISH_DATE=0 AND TODO_DATE_INT<cast(replace(convert(varchar(10),GETDATE(),102),'.','')+replace(convert(varchar(10),GETDATE(),108),':','') as bigint) " +
+                                              " ORDER BY action.PRIORITY, action.ID ";
+                            SqlDataReader dt;
+
+                            dt = cmd.ExecuteReader();
+                            DataTable row = new DataTable();
+                            row.Load(dt);
+                            dt.Close();
+
+                            foreach (DataRow dr in row.Rows)
                             {
-                                if (nb_created_thread <= Int16.Parse(NUMBER_OF_THREAD_MAX))
+                                // USE_THREAD is configured per action in PCM_TAB_IMCA_ACTION_FLAG.
+                                // The legacy global switch remains a fallback for actions without the flag.
+                                bool actionRequestsThread =
+                                    dr.Table.Columns.Contains("USE_THREAD") &&
+                                    Convert.ToInt32(dr["USE_THREAD"]) == 1;
+
+                                bool useThread = actionRequestsThread ||
+                                    EXECUTE_IMCA_ACTION_USING_THREAD.Trim().Equals("TRUE", StringComparison.OrdinalIgnoreCase);
+
+                                if (useThread)
                                 {
-                                    Thread new_IMCA_action_Thread = new Thread(() => execute_IMCA_Action(dr, logs, temp_folder, true));
-                                    new_IMCA_action_Thread.IsBackground = true;
-                                    new_IMCA_action_Thread.SetApartmentState(ApartmentState.STA);
-                                    new_IMCA_action_Thread.Start();
-                                }
-                            }
-                            else
-                            {
-                                execute_IMCA_Action(dr, logs, temp_folder, false);
-                            }
-                            System.Threading.Thread.Sleep(500);
-                        }
-
-
-                        // Check if a TODO action must be reserved (SELECT TOP 1)
-                        cmd.CommandText = "SET LANGUAGE FRENCH;SELECT TOP 1 action.ID,admin.ACTION,admin.RUN_ON_1,admin.RUN_ON_2,admin.RUN_ON_3,admin.RUN_ON_4,admin.RUN_ON_5,admin.RUN_ON_6,admin.RUN_ON_7,isnull(list_valid_user,'') as  VALID_USERID " +
-                                          " FROM [IMCA_BACKOFFICE].[dbo].[PCM_TAB_IMCA_ACTION_ADMIN] admin " +
-                                          " INNER JOIN [IMCA_BACKOFFICE].[dbo].[PCM_TAB_IMCA_ACTION] action on admin.ACTION=action.ACTION " +
-                                          " LEFT JOIN(SELECT distinct ACTION, STUFF((SELECT  distinct tn2.[USERID] + '#' FROM   PCM_TAB_IMCA_ACTION_USERVALIDATION tn2 inner join  PCM_TAB_IMCA_ACTION_USERVALIDATION " +
-                                          " on tn2.ACTION = PCM_TAB_IMCA_ACTION_USERVALIDATION.ACTION  WHERE tn1.ACTION = tn2.ACTION  FOR XML PATH('')), 1, 0, '') as list_valid_user  from PCM_TAB_IMCA_ACTION_USERVALIDATION tn1 " +
-                                          " ) PCM_TAB_IMCA_ACTION_USERVALIDATION on PCM_TAB_IMCA_ACTION_USERVALIDATION.ACTION = action.ACTION " +
-                                          " WHERE admin.ACTION in (SELECT ACTION FROM [IMCA_BACKOFFICE].[dbo].PCM_TAB_IMCA_ACTION_USERVALIDATION WHERE USERID LIKE 'SERVICE%' AND VALID = 1) AND TODO_BY='TODO' and action.SK_FINISH_DATE=0 " +
-                                          " AND TODO_DATE_INT<cast(replace(convert(varchar(10),GETDATE(),102),'.','')+replace(convert(varchar(10),GETDATE(),108),':','') as bigint) " +
-                                          " AND cast(replace(convert(varchar(5), GETDATE(), 108), ':', '') as int) BETWEEN cast(replace(CONVERT(varchar(5), admin.START_TIME, 108),':','') as int)  and cast(replace(CONVERT(varchar(5), admin.END_TIME, 108),':','') as int) " +
-                                          " ORDER BY action.PRIORITY, action.ID ";
-
-                        dt = cmd.ExecuteReader();
-
-
-                        if (dt.HasRows)
-                        {
-                            while (dt.Read())
-                            {
-                                Boolean to_execute = false;
-                                Boolean valid_user = true;
-
-                                using (SqlCommand cmd2 = new SqlCommand())
-                                {
-
-                                    switch (DateAndTime.Now.DayOfWeek)
+                                    if (!StartActionThread(dr, logs, temp_folder))
                                     {
-                                        case DayOfWeek.Monday:
-                                            if (int.Parse(dt["RUN_ON_1"].ToString()) == 1)
-                                                to_execute = true;
-                                            break;
-
-                                        case DayOfWeek.Tuesday:
-                                            if (int.Parse(dt["RUN_ON_2"].ToString()) == 1)
-                                                to_execute = true;
-                                            break;
-
-                                        case DayOfWeek.Wednesday:
-                                            if (int.Parse(dt["RUN_ON_3"].ToString()) == 1)
-                                                to_execute = true;
-                                            break;
-
-                                        case DayOfWeek.Thursday:
-                                            if (int.Parse(dt["RUN_ON_4"].ToString()) == 1)
-                                                to_execute = true;
-                                            break;
-
-                                        case DayOfWeek.Friday:
-                                            if (int.Parse(dt["RUN_ON_5"].ToString()) == 1)
-                                                to_execute = true;
-                                            break;
-
-                                        case DayOfWeek.Saturday:
-                                            if (int.Parse(dt["RUN_ON_6"].ToString()) == 1)
-                                                to_execute = true;
-                                            break;
-
-                                        case DayOfWeek.Sunday:
-                                            if (int.Parse(dt["RUN_ON_7"].ToString()) == 1)
-                                                to_execute = true;
-                                            break;
-
+                                        WriteToFile(
+                                            "       Thread limit reached. Action remains reserved for the next timer cycle : " +
+                                            dr["ACTION"] + " (ID : " + dr["ID"] + ")");
                                     }
+                                }
+                                else
+                                {
+                                    execute_IMCA_Action(dr, logs, temp_folder, false);
+                                }
+
+                                System.Threading.Thread.Sleep(500);
+                            }
 
 
-                                    //
-                                    // Check the VALID User
-                                    // 
+                            // Check if a TODO action must be reserved (SELECT TOP 1)
+                            cmd.CommandText = "SET LANGUAGE FRENCH;SELECT TOP 1 action.ID,admin.ACTION,admin.RUN_ON_1,admin.RUN_ON_2,admin.RUN_ON_3,admin.RUN_ON_4,admin.RUN_ON_5,admin.RUN_ON_6,admin.RUN_ON_7,isnull(list_valid_user,'') as  VALID_USERID " +
+                                              " FROM [IMCA_BACKOFFICE].[dbo].[PCM_TAB_IMCA_ACTION_ADMIN] admin " +
+                                              " INNER JOIN [IMCA_BACKOFFICE].[dbo].[PCM_TAB_IMCA_ACTION] action on admin.ACTION=action.ACTION " +
+                                              " LEFT JOIN(SELECT distinct ACTION, STUFF((SELECT  distinct tn2.[USERID] + '#' FROM   PCM_TAB_IMCA_ACTION_USERVALIDATION tn2 inner join  PCM_TAB_IMCA_ACTION_USERVALIDATION " +
+                                              " on tn2.ACTION = PCM_TAB_IMCA_ACTION_USERVALIDATION.ACTION  WHERE tn1.ACTION = tn2.ACTION  FOR XML PATH('')), 1, 0, '') as list_valid_user  from PCM_TAB_IMCA_ACTION_USERVALIDATION tn1 " +
+                                              " ) PCM_TAB_IMCA_ACTION_USERVALIDATION on PCM_TAB_IMCA_ACTION_USERVALIDATION.ACTION = action.ACTION " +
+                                              " WHERE admin.ACTION in (SELECT ACTION FROM [IMCA_BACKOFFICE].[dbo].PCM_TAB_IMCA_ACTION_USERVALIDATION WHERE USERID LIKE 'SERVICE%' AND VALID = 1) AND TODO_BY='TODO' and action.SK_FINISH_DATE=0 " +
+                                              " AND TODO_DATE_INT<cast(replace(convert(varchar(10),GETDATE(),102),'.','')+replace(convert(varchar(10),GETDATE(),108),':','') as bigint) " +
+                                              " AND cast(replace(convert(varchar(5), GETDATE(), 108), ':', '') as int) BETWEEN cast(replace(CONVERT(varchar(5), admin.START_TIME, 108),':','') as int)  and cast(replace(CONVERT(varchar(5), admin.END_TIME, 108),':','') as int) " +
+                                              " ORDER BY action.PRIORITY, action.ID ";
 
-                                    if (dt["VALID_USERID"].ToString().Contains("#") == true)
+                            dt = cmd.ExecuteReader();
+
+
+                            if (dt.HasRows)
+                            {
+                                while (dt.Read())
+                                {
+                                    Boolean to_execute = false;
+                                    Boolean valid_user = true;
+
+                                    using (SqlCommand cmd2 = new SqlCommand())
                                     {
-                                        string[] list_valid_users = dt["VALID_USERID"].ToString().Split('#');
 
-                                        foreach (String str in list_valid_users)
+                                        switch (DateAndTime.Now.DayOfWeek)
                                         {
-                                            if (str.Trim() != "")
+                                            case DayOfWeek.Monday:
+                                                if (int.Parse(dt["RUN_ON_1"].ToString()) == 1)
+                                                    to_execute = true;
+                                                break;
+
+                                            case DayOfWeek.Tuesday:
+                                                if (int.Parse(dt["RUN_ON_2"].ToString()) == 1)
+                                                    to_execute = true;
+                                                break;
+
+                                            case DayOfWeek.Wednesday:
+                                                if (int.Parse(dt["RUN_ON_3"].ToString()) == 1)
+                                                    to_execute = true;
+                                                break;
+
+                                            case DayOfWeek.Thursday:
+                                                if (int.Parse(dt["RUN_ON_4"].ToString()) == 1)
+                                                    to_execute = true;
+                                                break;
+
+                                            case DayOfWeek.Friday:
+                                                if (int.Parse(dt["RUN_ON_5"].ToString()) == 1)
+                                                    to_execute = true;
+                                                break;
+
+                                            case DayOfWeek.Saturday:
+                                                if (int.Parse(dt["RUN_ON_6"].ToString()) == 1)
+                                                    to_execute = true;
+                                                break;
+
+                                            case DayOfWeek.Sunday:
+                                                if (int.Parse(dt["RUN_ON_7"].ToString()) == 1)
+                                                    to_execute = true;
+                                                break;
+
+                                        }
+
+
+                                        //
+                                        // Check the VALID User
+                                        // 
+
+                                        if (dt["VALID_USERID"].ToString().Contains("#") == true)
+                                        {
+                                            string[] list_valid_users = dt["VALID_USERID"].ToString().Split('#');
+
+                                            foreach (String str in list_valid_users)
                                             {
-                                                if (str.Contains("%") == false)
+                                                if (str.Trim() != "")
                                                 {
-                                                    if (str.ToUpper().Trim() != session_name.ToUpper().Trim())
+                                                    if (str.Contains("%") == false)
                                                     {
-                                                        to_execute = false;
-                                                        valid_user = false;
-                                                        break;
+                                                        if (str.ToUpper().Trim() != session_name.ToUpper().Trim())
+                                                        {
+                                                            to_execute = false;
+                                                            valid_user = false;
+                                                            break;
+                                                        }
                                                     }
                                                 }
                                             }
                                         }
-                                    }
 
 
-                                    if (to_execute == true)
-                                    {
-                                        cmd2.Connection = con;
-                                        cmd2.CommandTimeout = 0;
-                                        cmd2.CommandText = "UPDATE [IMCA_BACKOFFICE].[dbo].[PCM_TAB_IMCA_ACTION] set TODO_BY='" + session_name.ToUpper() + "' where ID=" + dt["ID"].ToString() + " AND TODO_BY='TODO'";
-                                        cmd2.ExecuteNonQuery();
-
-                                        WriteToFile("       " + session_name.ToUpper() + " reserved ACTION  " + dt["ACTION"].ToString() + " (ID : " + dt["ID"].ToString() + ") at " + DateTime.Now.ToString("dd/MM/yyyy HH:mm:ss"));
-                                    }
-                                    else
-                                    {
-                                        bol = false;
-
-                                        if (valid_user == true)
+                                        if (to_execute == true)
                                         {
-                                            WriteToFile("       ACTION  " + dt["ACTION"].ToString() + " (ID : " + dt["ID"].ToString() + ") not allowed to start on " + DateAndTime.Now.DayOfWeek.ToString() + " at " + DateTime.Now.ToString("dd/MM/yyyy HH:mm:ss"));
+                                            cmd2.Connection = con;
+                                            cmd2.CommandTimeout = 300;
+                                            cmd2.CommandText = "UPDATE [IMCA_BACKOFFICE].[dbo].[PCM_TAB_IMCA_ACTION] set TODO_BY='" + session_name.ToUpper() + "' where ID=" + dt["ID"].ToString() + " AND TODO_BY='TODO'";
+                                            cmd2.ExecuteNonQuery();
+
+                                            WriteToFile("       " + session_name.ToUpper() + " reserved ACTION  " + dt["ACTION"].ToString() + " (ID : " + dt["ID"].ToString() + ") at " + DateTime.Now.ToString("dd/MM/yyyy HH:mm:ss"));
+                                        }
+                                        else
+                                        {
+                                            bol = false;
+
+                                            if (valid_user == true)
+                                            {
+                                                WriteToFile("       ACTION  " + dt["ACTION"].ToString() + " (ID : " + dt["ID"].ToString() + ") not allowed to start on " + DateAndTime.Now.DayOfWeek.ToString() + " at " + DateTime.Now.ToString("dd/MM/yyyy HH:mm:ss"));
+                                            }
+
                                         }
 
                                     }
-
                                 }
+                                dt.Close();
                             }
-                            dt.Close();
-                        }
-                        else
-                        {
-                            dt.Close();
-                            bol = false; // We exit the loop and 
-                        }
+                            else
+                            {
+                                dt.Close();
+                                bol = false; // We exit the loop and 
+                            }
 
-                    } while (bol);
+                        } while (bol);
 
-                    // Update SURVEYER status. Call the Stored Procedure
+                        // Update SURVEYER status. Call the Stored Procedure
 
-                    cmd.CommandText = "SURVEYER.dbo.USP_IMCA_SURVEYER_UPDATE";
-                    cmd.CommandType = CommandType.StoredProcedure;
-                    cmd.Parameters.AddWithValue("@CompanyCd", "EMEA");
-                    cmd.Parameters.AddWithValue("@Alias", session_name.ToUpper());
-                    cmd.Parameters.AddWithValue("@Description", "");
-                    int rowAffected = cmd.ExecuteNonQuery();
+                        cmd.CommandText = "SURVEYER.dbo.USP_IMCA_SURVEYER_UPDATE";
+                        cmd.CommandType = CommandType.StoredProcedure;
+                        cmd.Parameters.AddWithValue("@CompanyCd", "EMEA");
+                        cmd.Parameters.AddWithValue("@Alias", session_name.ToUpper());
+                        cmd.Parameters.AddWithValue("@Description", "");
+                        int rowAffected = cmd.ExecuteNonQuery();
 
 
+                    }
+                    con.Close();
                 }
-                con.Close();
-            }
 
-            timer_check_TODO_is_running = false;
+
+            }
+            catch (Exception ex)
+            {
+                LogDatabaseError(nameof(check_if_TODO), "IMCA action polling cycle", ex);
+                throw;
+            }
+            finally
+            {
+                // Never leave the service stuck in a running state after a SQL/network error.
+                Volatile.Write(ref timer_check_TODO_is_running, false);
+            }
         }
-        public void WriteToFile(string message, long id = 0, string logs_folder = "logs")
+        // Writes database failures to a local file and never depends on SQL Server.
+        private void LogDatabaseError(string methodName, string commandText, Exception exception, long actionId = 0, string actionName = "")
         {
-            logs_folder = service_path + "\\" + logs_folder;
-
-            if (!Directory.Exists(logs_folder))
+            try
             {
-                Directory.CreateDirectory(logs_folder);
+                const string indent = "       ";
+                WriteToFile(
+                    indent + "DATABASE ERROR" + Environment.NewLine +
+                    indent + "   Method  : " + methodName + Environment.NewLine +
+                    indent + "   Type    : " + exception.GetType().FullName + Environment.NewLine +
+                    indent + "   Message : " + exception.Message + Environment.NewLine +
+                    indent + "   Command : " + (string.IsNullOrWhiteSpace(commandText) ? "<not available>" : commandText) + Environment.NewLine +
+                    indent + "   Details : " + exception,
+                    actionId, logs_folder, actionName);
             }
-
-            string filepath;
-
-            switch (id)
+            catch
             {
-                case 0:
-                    filepath = logs_folder + "\\IMCA_" + session_name.ToUpper() + "_" + DateTime.Now.Date.ToString("dd_MM_yyyy") + ".txt";
-                    break;
-
-                default:
-                    filepath = logs_folder + "\\IMCA_" + session_name.ToUpper() + "_" + DateTime.Now.Date.ToString("dd_MM_yyyy") + "_ACTION_ID_" + id.ToString() + ".txt";
-                    break;
+                // A logging failure must never hide the original database exception.
             }
+        }
 
-
-
-            if (!File.Exists(filepath))
+        // Best-effort database update. SQL outages are logged locally and never mask the original error.
+        private void TryMarkActionAsError(long actionId, long functionId, Exception exception)
+        {
+            const string sql = @"UPDATE [IMCA_BACKOFFICE].[dbo].[PCM_TAB_IMCA_ACTION]
+SET TODO_BY=@TODO_BY, ERROR=@ERROR_NUMBER, ERROR_TEXT=@ERROR_MSG WHERE ID=@ID";
+            if (actionId <= 0) return;
+            try
             {
-                using (StreamWriter fic = File.CreateText(filepath))
+                using (SqlConnection connection = new SqlConnection(sql_con))
+                using (SqlCommand command = new SqlCommand(sql, connection))
                 {
-                    fic.WriteLine(message);
+                    command.CommandTimeout = 300;
+                    command.Parameters.Add("@TODO_BY", SqlDbType.VarChar, 100).Value = "ERROR_" + session_name.ToUpperInvariant();
+                    command.Parameters.Add("@ID", SqlDbType.BigInt).Value = actionId;
+                    command.Parameters.Add("@ERROR_NUMBER", SqlDbType.Int).Value = exception is SqlException sqlException ? sqlException.Number : 0;
+                    command.Parameters.Add("@ERROR_MSG", SqlDbType.NVarChar, 1024).Value = Strings.Left("FUNCTION_ID=" + functionId + " - ERROR MSG=" + exception.Message, 1024);
+                    connection.Open();
+                    command.ExecuteNonQuery();
                 }
             }
-            else
+            catch (Exception logException)
             {
-                using (StreamWriter fic = File.AppendText(filepath))
+                LogDatabaseError(nameof(TryMarkActionAsError), sql, logException, actionId);
+            }
+        }
+
+        public void WriteToFile(string message, long id = 0, string logs_folder = "logs", string action_name = "")
+        {
+            string targetFolder = service_path + "\\" + logs_folder;
+
+            lock (logLock)
+            {
+                if (!Directory.Exists(targetFolder))
                 {
-                    fic.WriteLine(message);
+                    Directory.CreateDirectory(targetFolder);
                 }
+
+                string filePath;
+                if (id == 0)
+                {
+                    filePath = targetFolder + "\\IMCA_" + session_name.ToUpper() + "_" +
+                               DateTime.Now.Date.ToString("dd_MM_yyyy") + ".txt";
+                }
+                else
+                {
+                    filePath = targetFolder + "\\IMCA_" + session_name.ToUpper() + "_" +
+                               DateTime.Now.Date.ToString("dd_MM_yyyy") + "_XX_" +
+                               action_name.ToUpper() + "_ACTION_ID_" + id + ".txt";
+                }
+
+                // AppendAllText creates the file when it does not already exist.
+                File.AppendAllText(filePath, message + Environment.NewLine);
             }
         }
     }
