@@ -310,6 +310,7 @@
     <Compile Include="Gestion_Requete_FR\Gestion_Requete_FR.cs" />
     <Compile Include="Idep_FR\Idep_FR.cs" />
     <Compile Include="Imei_Management_FR\Imei_Management_FR.cs" />
+    <Compile Include="Modèle\modele_multi_sharemailboxes.cs" />
     <Compile Include="ProjectInstaller.cs">
       <SubType>Component</SubType>
     </Compile>
