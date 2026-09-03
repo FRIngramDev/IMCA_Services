@@ -1343,7 +1343,7 @@ WHERE SK_VALID=0 AND PARAMETER=@PARAMETER";
                         }
                         else
                         {
-                            WriteToFile("       ACTION : " + dr["ACTION"].ToString() + " (ID : " + dr["ID"].ToString() + ") has not been reserved (Other(s) Component(s) are not available)  at " + DateTime.Now.ToString("dd/MM/yyyy HH:mm:ss"));
+                            WriteToFile("       ACTION : " + dr["ACTION"].ToString() + " (ID : " + dr["ID"].ToString() + ") has not been executed (Other(s) Component(s) are not available)  at " + DateTime.Now.ToString("dd/MM/yyyy HH:mm:ss"));
 
                         }
                     }
@@ -1483,6 +1483,8 @@ WHERE SK_VALID=0 AND PARAMETER=@PARAMETER";
         {
             // Publish the callback state before opening SQL connections.
             Volatile.Write(ref timer_check_TODO_is_running, true);
+            // Use a HashSet to track action IDs that have already been checked in this timer cycle.
+            HashSet<long> checkedActionIds = new HashSet<long>();
 
             try
             {
@@ -1524,6 +1526,16 @@ WHERE SK_VALID=0 AND PARAMETER=@PARAMETER";
 
                             foreach (DataRow dr in row.Rows)
                             {
+                                long currentActionId = Convert.ToInt64(dr["ID"]);
+                                
+                                // Prevent the same unavailable action from being checked
+                                // multiple times during the current timer cycle.
+
+                                if (!checkedActionIds.Add(currentActionId))
+                                { 
+                                continue;
+                                }
+
                                 // USE_THREAD is configured per action in PCM_TAB_IMCA_ACTION_FLAG.
                                 // The legacy global switch remains a fallback for actions without the flag.
                                 bool actionRequestsThread =
