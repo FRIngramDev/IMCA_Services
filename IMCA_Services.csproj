@@ -221,6 +221,7 @@
       <HintPath>packages\System.IdentityModel.Tokens.Jwt.8.22.0\lib\net472\System.IdentityModel.Tokens.Jwt.dll</HintPath>
     </Reference>
     <Reference Include="System.IO.Compression" />
+    <Reference Include="System.IO.Compression.FileSystem" />
     <Reference Include="System.IO.FileSystem.AccessControl, Version=5.0.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a, processorArchitecture=MSIL">
       <HintPath>packages\System.IO.FileSystem.AccessControl.5.0.0\lib\net461\System.IO.FileSystem.AccessControl.dll</HintPath>
     </Reference>
@@ -329,6 +330,7 @@
     <Compile Include="SelfInstaller.cs" />
     <Compile Include="SoCOP_FR\SoCOP_FR.cs" />
     <Compile Include="Tract_Syndical_FR\Tract_Syndical_FR.cs" />
+    <Compile Include="Trend_Emails_Management_FR\Trend_Emails_Management_FR.cs" />
   </ItemGroup>
   <ItemGroup>
     <None Include="App.config" />
