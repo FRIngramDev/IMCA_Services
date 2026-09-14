@@ -30,6 +30,7 @@ namespace IMEI_MANAGEMENT_FR
 
         // ----- Current shared mailbox parameters -----
         private string sharedmailbox_name = "";            // Current shared mailbox address
+        private string sharedmailbox_active = "";          // Indicates whether current mailbox is active
         private string sharedmailbox_folder_in = "";       // Source folder
         private string sharedmailbox_folder_out = "";      // Archive folder
         private string table_name = "";                    // Business destination table
@@ -95,6 +96,20 @@ namespace IMEI_MANAGEMENT_FR
             public List<string> column_mapping { get; set; } = new List<string>();
             public List<string> mandatory_columns { get; set; } = new List<string>();
             public string active { get; set; } = "TRUE";
+        }
+
+        /// <summary>
+        /// Indicates that a technical alert has already been attempted for the
+        /// associated exception, preventing duplicate alert emails.
+        /// </summary>
+        private sealed class TechnicalAlertAlreadySentException : Exception
+        {
+            public TechnicalAlertAlreadySentException(
+                string message,
+                Exception innerException)
+                : base(message, innerException)
+            {
+            }
         }
 
         /// <summary>
@@ -209,6 +224,8 @@ namespace IMEI_MANAGEMENT_FR
 
                         // Process each mailbox independently so one mailbox failure
                         // does not prevent the other mailboxes from being scanned.
+                        List<Exception> mailboxErrors = new List<Exception>();
+
                         foreach (SharedMailbox mailbox in p.sharedmailboxes)
                         {
                             setSharedMailboxName(mailbox.sharedmailbox_name);
@@ -219,7 +236,7 @@ namespace IMEI_MANAGEMENT_FR
                             setMandatoryColumns(mailbox.mandatory_columns);
                             setSharemailboxActive(mailbox.active);
 
-                            if (mailbox.active.ToUpper().Trim() != "TRUE")
+                            if (sharedmailbox_active.ToUpper().Trim() != "TRUE")
                             {
                                 continue;
                             }
@@ -234,12 +251,38 @@ namespace IMEI_MANAGEMENT_FR
                                     "   Error reading mailbox " +
                                     sharedmailbox_name + " : " +
                                     mailboxException.Message);
+
+                                mailboxErrors.Add(
+                                    new Exception(
+                                        "Mailbox " + sharedmailbox_name +
+                                        " : " + mailboxException.Message,
+                                        mailboxException));
+
+                                if (!(mailboxException is
+                                    TechnicalAlertAlreadySentException))
+                                {
+                                    SendTechnicalIssueMail(
+                                        nameof(Read_Email_with_Graph),
+                                        "",
+                                        sharedmailbox_name + " - " +
+                                        mailboxException.Message,
+                                        "MAILBOX PROCESSING");
+                                }
                             }
+                        }
+
+                        if (mailboxErrors.Count > 0)
+                        {
+                            throw new AggregateException(
+                                mailboxErrors.Count +
+                                " shared mailbox(es) could not be processed.",
+                                mailboxErrors);
                         }
                     }
                     catch (Exception e)
                     {
                         WriteToFile("   Error get emails : " + e.Message);
+                        throw;
                     }
                 }
             }
@@ -247,6 +290,7 @@ namespace IMEI_MANAGEMENT_FR
             {
                 WriteToFile(
                     "Global error Read_Email_with_Graph : " + ex.Message);
+                throw;
             }
             finally
             {
@@ -396,7 +440,7 @@ namespace IMEI_MANAGEMENT_FR
                         catch (Exception ex)
                         {
                             WriteToFile(
-                                "   Error processing email : " + ex.Message +
+                                "       Error processing email : " + ex.Message +
                                 " at " + DateTime.Now.ToString("dd/MM/yyyy HH:mm:ss"));
 
                             try
@@ -415,7 +459,7 @@ namespace IMEI_MANAGEMENT_FR
                             catch (Exception moveException)
                             {
                                 WriteToFile(
-                                    "   Error moving email to Erreur folder : " +
+                                    "       Error moving email to Erreur folder : " +
                                     moveException.Message);
                             }
                         }
@@ -438,6 +482,7 @@ namespace IMEI_MANAGEMENT_FR
             catch (Exception ex)
             {
                 WriteToFile("Global error ReadCurrentSharedMailbox : " + ex.Message);
+                throw;
             }
             finally
             {
@@ -1513,7 +1558,7 @@ namespace IMEI_MANAGEMENT_FR
         {
             mandatory_columns = value ?? new List<string>();
         }
-        public void setSharemailboxActive(string value) { active = value ?? ""; }
+        public void setSharemailboxActive(string value) { sharedmailbox_active = value ?? ""; }
 
         public void setEmailDestinataire(string value) { email_destinataire = value ?? ""; }
         public void setlogs_folder(string value) { logs_folder = value ?? ""; }
