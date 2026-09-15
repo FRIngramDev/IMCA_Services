@@ -57,6 +57,9 @@
     <Reference Include="Azure.Core, Version=1.61.0.0, Culture=neutral, PublicKeyToken=92742159e12e44c8, processorArchitecture=MSIL">
       <HintPath>packages\Azure.Core.1.61.0\lib\net472\Azure.Core.dll</HintPath>
     </Reference>
+    <Reference Include="BouncyCastle.Cryptography, Version=2.0.0.0, Culture=neutral, PublicKeyToken=072edcf4a5328938, processorArchitecture=MSIL">
+      <HintPath>packages\BouncyCastle.Cryptography.2.7.0\lib\net461\BouncyCastle.Cryptography.dll</HintPath>
+    </Reference>
     <Reference Include="Class_dev_tools, Version=1.0.0.3, Culture=neutral, processorArchitecture=MSIL">
       <SpecificVersion>False</SpecificVersion>
       <HintPath>..\..\..\DLL\vs2010\Class_dev_tools\Class_dev_tools_Constellation\bin\Release\Class_dev_tools.dll</HintPath>
@@ -170,6 +173,9 @@
     <Reference Include="Microsoft.VisualBasic">
       <Private>True</Private>
       <EmbedInteropTypes>False</EmbedInteropTypes>
+    </Reference>
+    <Reference Include="MimeKit, Version=4.18.0.0, Culture=neutral, PublicKeyToken=bede1c8a46c66814, processorArchitecture=MSIL">
+      <HintPath>packages\MimeKit.4.18.0\lib\net47\MimeKit.dll</HintPath>
     </Reference>
     <Reference Include="Newtonsoft.Json, Version=13.0.0.0, Culture=neutral, PublicKeyToken=30ad4fe6b2a6aeed, processorArchitecture=MSIL">
       <HintPath>packages\Newtonsoft.Json.13.0.4\lib\net45\Newtonsoft.Json.dll</HintPath>
@@ -313,6 +319,7 @@
     <Compile Include="Idep_FR\Idep_FR.cs" />
     <Compile Include="Imei_Management_FR\Imei_Management_FR.cs" />
     <Compile Include="Modèle\modele_multi_sharemailboxes.cs" />
+    <Compile Include="Apple_Emails_Management_FR\Apple_Emails_Management_FR.cs" />
     <Compile Include="ProjectInstaller.cs">
       <SubType>Component</SubType>
     </Compile>
