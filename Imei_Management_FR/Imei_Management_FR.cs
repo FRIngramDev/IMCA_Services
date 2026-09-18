@@ -355,6 +355,29 @@ namespace IMEI_MANAGEMENT_FR
                                     " at " + DateTime.Now.ToString("dd/MM/yyyy HH:mm:ss"));
                             }
 
+                            // Ignore automatic absence replies before checking attachments.
+                            // This prevents out-of-office messages from generating false alerts.
+                            if (IsAutomaticReply(email))
+                            {
+                                WriteToFile(
+                                    "       Automatic reply ignored : " +
+                                    (email.Subject ?? "<no subject>") +
+                                    " - Sender : " + GetSenderAddress(email));
+
+                                MarkEmailAsRead(
+                                    graphService,
+                                    sharedmailbox_name,
+                                    email.Id);
+
+                                MoveEmail(
+                                    graphService,
+                                    sharedmailbox_name,
+                                    email.Id,
+                                    archiveFolder.Id);
+
+                                continue;
+                            }
+
                             if (email.HasAttachments == true)
                             {
                                 List<string> attachments = DownloadCSVAttachmentsWithGraph(
@@ -1170,6 +1193,81 @@ namespace IMEI_MANAGEMENT_FR
             return recipients;
         }
 
+        /// <summary>
+        /// Detects automatic replies, including out-of-office messages.
+        /// Header detection is preferred; subject matching is only a fallback.
+        /// </summary>
+        private bool IsAutomaticReply(Message email)
+        {
+            if (email == null)
+            {
+                return false;
+            }
+
+            if (email.InternetMessageHeaders != null)
+            {
+                foreach (InternetMessageHeader header in email.InternetMessageHeaders)
+                {
+                    string headerName = (header.Name ?? "").Trim();
+                    string headerValue = (header.Value ?? "").Trim();
+
+                    if (headerName.Equals(
+                            "Auto-Submitted",
+                            StringComparison.OrdinalIgnoreCase) &&
+                        !headerValue.Equals(
+                            "no",
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        return true;
+                    }
+
+                    if (headerName.Equals("X-Autoreply", StringComparison.OrdinalIgnoreCase) ||
+                        headerName.Equals("X-Auto-Response-Suppress", StringComparison.OrdinalIgnoreCase) ||
+                        headerName.Equals("X-Autorespond", StringComparison.OrdinalIgnoreCase) ||
+                        headerName.Equals("X-Autoresponder", StringComparison.OrdinalIgnoreCase))
+                    {
+                        return true;
+                    }
+
+                    if (headerName.Equals("Precedence", StringComparison.OrdinalIgnoreCase) &&
+                        (headerValue.Equals("auto_reply", StringComparison.OrdinalIgnoreCase) ||
+                         headerValue.Equals("auto-reply", StringComparison.OrdinalIgnoreCase)))
+                    {
+                        return true;
+                    }
+                }
+            }
+
+            string subject = (email.Subject ?? "").Trim();
+            string[] automaticReplySubjects =
+            {
+                "réponse automatique",
+                "reponse automatique",
+                "automatic reply",
+                "auto reply",
+                "out of office",
+                "hors du bureau",
+                "absence du bureau",
+                "abwesenheitsnotiz",
+                "risposta automatica",
+                "respuesta automática",
+                "respuesta automatica"
+            };
+
+            return automaticReplySubjects.Any(value =>
+                subject.IndexOf(value, StringComparison.OrdinalIgnoreCase) >= 0);
+        }
+
+        private static string GetSenderAddress(Message email)
+        {
+            if (email?.From?.EmailAddress == null)
+            {
+                return "<unknown sender>";
+            }
+
+            return email.From.EmailAddress.Address ?? "<unknown sender>";
+        }
+
         private List<string> DownloadCSVAttachmentsWithGraph(GraphServiceClient graphService, string mailbox, string messageId)
         {
             List<string> downloadedFiles = new List<string>();
@@ -1271,7 +1369,8 @@ namespace IMEI_MANAGEMENT_FR
                         "from",
                         "hasAttachments",
                         "receivedDateTime",
-                        "isRead"
+                        "isRead",
+                        "internetMessageHeaders"
                     };
 
                     string filter = BuildMessageFilter();
