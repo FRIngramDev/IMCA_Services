@@ -21,7 +21,7 @@ namespace APPLE_EMAILS_MANAGEMENT_FR
         private string active = "";
         private string debug = "";
         private string start_date_scan = "";
-        private string number_of_mails = "100";
+        private string number_of_mails = "10";
         private string Rep_Easystock = "";
 
         private int id_mailboxe;
@@ -35,7 +35,8 @@ namespace APPLE_EMAILS_MANAGEMENT_FR
         private string sharedmailbox_folder_in = "";
         private string sharedmailbox_folder_out = "";
         private const string sharedmailbox_folder_error = "Erreur";
-
+        private string fr_graph_send_as_parameter_global = "";
+        private string fr_graph_send_as = "";
         private string email_in_case_of_technical_issue_parameter_global = "";
         private string email_in_case_of_technical_issue = "";
         private string sql_connexion_parameter_global = "";
@@ -43,6 +44,10 @@ namespace APPLE_EMAILS_MANAGEMENT_FR
         private string logs_folder = "";
         private string temp_folder = "";
         private string global_session_name = "";
+        private string adresse_email_from_communication_apple = "";
+        private string adresse_from_communication_apple = "";
+
+
         private const string global_application_name = "APPLE_EMAILS_MANAGEMENT_FR";
         private GraphServiceClient graphService;
 
@@ -65,6 +70,9 @@ namespace APPLE_EMAILS_MANAGEMENT_FR
             public string email_in_case_of_technical_issue_parameter_global { get; set; } = "";
             public string sql_connexion_parameter_global { get; set; } = "";
             public string Rep_Easystock { get; set; } = "";
+            public string adresse_email_from_communication_apple { get; set; } = "";
+            public string adresse_from_communication_apple { get; set; } = "";
+            public string fr_graph_send_as_parameter_global { get; set; } = "";
         }
 
         private sealed class SharedMailboxConfiguration
@@ -162,6 +170,12 @@ namespace APPLE_EMAILS_MANAGEMENT_FR
                         get_IMCA_paramters(
                             sql_con,
                             email_in_case_of_technical_issue_parameter_global));
+                    setAdresse_email_from_communication_apple(p.adresse_email_from_communication_apple);
+                    setAdresse_from_communication_apple(p.adresse_from_communication_apple);
+                    setfr_graph_send_as_parameter_global(p.fr_graph_send_as_parameter_global);
+
+                    setfr_graph_send_as(get_IMCA_paramters(sql_con, fr_graph_send_as_parameter_global));
+
 
                     if (!IsTrue(active))
                     {
@@ -439,7 +453,7 @@ namespace APPLE_EMAILS_MANAGEMENT_FR
                     "       Inserted : " + nbMailInserted +
                     " - Already present : " +
                     nbMailAlreadyPresent +
-                    " - Archived Compubase : " +
+                    " - Archived : " +
                     nbMailArchived);
             }
         }
@@ -455,7 +469,7 @@ namespace APPLE_EMAILS_MANAGEMENT_FR
             string subject = email.Subject ?? "";
             if (subject.IndexOf("compubase ingram stock report", StringComparison.OrdinalIgnoreCase) < 0)
             {
-                WriteToFile("No Compubase processing matched. Message will be archived.");
+                WriteToFile("       No Compubase processing matched. Message will be archived.");
                 return;
             }
 
@@ -464,7 +478,7 @@ namespace APPLE_EMAILS_MANAGEMENT_FR
 
             Directory.CreateDirectory(Rep_Easystock);
             string destination = DownloadMatchingAttachment(email.Id, "stockreport_ingram", Rep_Easystock);
-            WriteToFile("Compubase attachment copied to " + destination);
+            WriteToFile("       Compubase attachment copied to " + destination);
         }
 
         private string DownloadMatchingAttachment(string messageId, string prefix, string destinationFolder)
@@ -494,53 +508,187 @@ namespace APPLE_EMAILS_MANAGEMENT_FR
             throw new InvalidOperationException("No attachment starting with '" + prefix + "' was found");
         }
 
+        private static string TruncateValue(string value, int maximumLength)
+        {
+            string result = value ?? "";
+
+            if (result.Length <= maximumLength)
+            {
+                return result;
+            }
+
+            return result.Substring(
+                0,
+                maximumLength);
+        }
         private int InsertEmailIfNew(Message email, byte[] mime)
         {
-            if (EmailAlreadyExists(email.Id, id_mailboxe)) return 0;
-
-            using (SqlConnection con = new SqlConnection(sql_connexion))
-            using (SqlCommand cmd = new SqlCommand("dbo.USP_ADD_EMAIL_IN_DB", con))
+            if (EmailAlreadyExists(email.Id,id_mailboxe))
             {
-                cmd.CommandType = CommandType.StoredProcedure;
-                cmd.CommandTimeout = 300;
-                cmd.Parameters.Add("@id_equipe", SqlDbType.Int).Value = 0;
-                cmd.Parameters.Add("@EwsID", SqlDbType.NVarChar, -1).Value = email.Id ?? "";
-                cmd.Parameters.Add("@id_boite_mail", SqlDbType.Int).Value = id_mailboxe;
-                cmd.Parameters.Add("@body", SqlDbType.NVarChar, -1).Value = GetTextBody(email);
-                cmd.Parameters.Add("@from", SqlDbType.NVarChar, -1).Value = email.From?.EmailAddress?.Address ?? email.From?.EmailAddress?.Name ?? "";
-                cmd.Parameters.Add("@sujet", SqlDbType.NVarChar, -1).Value = email.Subject ?? "";
-                cmd.Parameters.Add("@to", SqlDbType.NVarChar, -1).Value = GetRecipients(email.ToRecipients);
-                cmd.Parameters.Add("@cc", SqlDbType.NVarChar, -1).Value = GetRecipients(email.CcRecipients);
-                cmd.Parameters.Add("@new_to", SqlDbType.NVarChar, -1).Value = "";
-                cmd.Parameters.Add("@new_cc", SqlDbType.NVarChar, -1).Value = "";
-                cmd.Parameters.Add("@new_from", SqlDbType.NVarChar, -1).Value = "";
-                cmd.Parameters.Add("@new_from_nom", SqlDbType.NVarChar, -1).Value = "";
-                cmd.Parameters.Add("@new_extra_body", SqlDbType.NVarChar, -1).Value = "";
-                cmd.Parameters.Add("@top_a_envoyer", SqlDbType.NVarChar, 10).Value = "";
-                cmd.Parameters.Add("@sent_element", SqlDbType.Bit).Value = false;
+                return 0;
+            }
 
-                string nomFichier = CleanFileName(
-                    string.IsNullOrWhiteSpace(email.Subject)
-                        ? "email"
-                        : email.Subject);
+            string nomFichier = CleanFileName(string.IsNullOrWhiteSpace(email.Subject)
+                    ? "email"
+                    : email.Subject);
 
-                if (nomFichier.Length > 255)
-                {
-                    nomFichier = nomFichier.Substring(0, 255);
-                }
+            if (nomFichier.Length > 500)
+            {
+                nomFichier =nomFichier.Substring(0, 500);
+            }
 
-                cmd.Parameters.Add("@nom_fic", SqlDbType.NVarChar, 255).Value = nomFichier;
-                cmd.Parameters.Add("@extension", SqlDbType.NVarChar, 10).Value = "eml";
-                cmd.Parameters.Add("@document", SqlDbType.Image).Value = mime ?? new byte[0];
-                cmd.Parameters.Add("@affecte_a", SqlDbType.NVarChar, -1).Value = "";
-                cmd.Parameters.Add("@dt_time_received", SqlDbType.DateTime).Value = email.ReceivedDateTime?.LocalDateTime ?? email.CreatedDateTime?.LocalDateTime ?? DateTime.Now;
-                cmd.Parameters.Add("@hasAttachement", SqlDbType.Bit).Value = email.HasAttachments == true;
-                cmd.Parameters.Add("@conversationId", SqlDbType.NVarChar, -1).Value = email.ConversationId ?? "";
-                SqlParameter output = cmd.Parameters.Add("@@id", SqlDbType.Int);
-                output.Direction = ParameterDirection.Output;
-                con.Open();
-                cmd.ExecuteNonQuery();
-                return output.Value == DBNull.Value ? 0 : Convert.ToInt32(output.Value);
+            string fromAddress =
+                email.From?.EmailAddress?.Address ??
+                email.From?.EmailAddress?.Name ??
+                "";
+
+            string subject = email.Subject ?? "";
+
+            string toRecipients = GetRecipients(email.ToRecipients);
+
+            string ccRecipients = GetRecipients(email.CcRecipients);
+
+            DateTime receivedDate =
+                email.ReceivedDateTime?.LocalDateTime ??
+                email.CreatedDateTime?.LocalDateTime ??
+                DateTime.Now;
+
+            using (SqlConnection connection = new SqlConnection(sql_connexion))
+            using (SqlCommand command =new SqlCommand("dbo.USP_ADD_EMAIL_IN_DB",connection))
+            {
+                command.CommandType =CommandType.StoredProcedure;
+
+
+                command.CommandTimeout = 300;
+
+                command.Parameters.Add(
+                    "@id_comment",
+                    SqlDbType.Int).Value = 0;
+
+                command.Parameters.Add(
+                    "@EwsID",
+                    SqlDbType.NVarChar,
+                    500).Value =
+                        TruncateValue(
+                            email.Id,
+                            500);
+
+                command.Parameters.Add(
+                    "@id_boite_mail",
+                    SqlDbType.Int).Value =
+                        id_mailboxe;
+
+                command.Parameters.Add(
+                    "@body",
+                    SqlDbType.NVarChar,
+                    -1).Value =
+                        GetTextBody(email);
+
+                command.Parameters.Add(
+                    "@from",
+                    SqlDbType.NVarChar,
+                    500).Value =
+                        TruncateValue(
+                            fromAddress,
+                            500);
+
+                command.Parameters.Add(
+                    "@sujet",
+                    SqlDbType.NVarChar,
+                    500).Value =
+                        TruncateValue(
+                            subject,
+                            500);
+
+                command.Parameters.Add(
+                    "@to",
+                    SqlDbType.NVarChar,
+                    2000).Value =
+                        TruncateValue(
+                            toRecipients,
+                            2000);
+
+                command.Parameters.Add(
+                    "@cc",
+                    SqlDbType.NVarChar,
+                    2000).Value =
+                        TruncateValue(
+                            ccRecipients,
+                            2000);
+
+                command.Parameters.Add(
+                    "@new_to",
+                    SqlDbType.NVarChar,
+                    2000).Value = "";
+
+                command.Parameters.Add(
+                    "@new_cc",
+                    SqlDbType.NVarChar,
+                    2000).Value = "";
+
+                command.Parameters.Add(
+                    "@new_from",
+                    SqlDbType.NVarChar,
+                    500).Value = "";
+
+                command.Parameters.Add(
+                    "@new_from_nom",
+                    SqlDbType.NVarChar,
+                    500).Value = "";
+
+                command.Parameters.Add(
+                    "@new_extra_body",
+                    SqlDbType.NVarChar,
+                    -1).Value = "";
+
+                command.Parameters.Add(
+                    "@top_a_envoyer",
+                    SqlDbType.NVarChar,
+                    1).Value = "N";
+
+                command.Parameters.Add(
+                    "@nom_fic",
+                    SqlDbType.NVarChar,
+                    500).Value = nomFichier;
+
+                command.Parameters.Add(
+                    "@document",
+                    SqlDbType.Image).Value =
+                        mime ?? new byte[0];
+
+                command.Parameters.Add(
+                    "@extension",
+                    SqlDbType.NVarChar,
+                    5).Value = "eml";
+
+                command.Parameters.Add(
+                    "@affecte_a",
+                    SqlDbType.NVarChar,
+                    30).Value = DBNull.Value;
+
+                command.Parameters.Add(
+                    "@dt_time_received",
+                    SqlDbType.DateTime).Value =
+                        receivedDate;
+
+                command.Parameters.Add(
+                    "@sent_element",
+                    SqlDbType.Bit).Value = false;
+
+                SqlParameter output =
+                    command.Parameters.Add(
+                        "@@id",
+                        SqlDbType.Int);
+
+                output.Direction =ParameterDirection.Output;
+
+                connection.Open();
+                command.ExecuteNonQuery();
+
+                return output.Value == null ||
+                       output.Value == DBNull.Value
+                    ? 0
+                    : Convert.ToInt32(output.Value);
             }
         }
 
@@ -624,10 +772,24 @@ WHERE EwsID COLLATE Latin1_General_CS_AS = @EWSID AND id_mailboxe = @ID;";
                             !string.IsNullOrWhiteSpace(source.Subject)
                                 ? source.Subject
                                 : mail.Sujet,
-                        Body = BuildAppleBody(source, mail),
-                        ToRecipients = BuildRecipients(contact),
-                        ReplyTo = BuildRecipients(sharedmailbox_name),
-                        Attachments = CloneAttachments(attachments)
+
+                        Body =
+                            BuildAppleBody(source, mail),
+
+                        From =
+                            BuildAppleSenderRecipient(),
+
+                        ToRecipients =
+                            BuildRecipients(contact),
+
+                        ReplyTo =
+                            new List<Recipient>
+                            {
+                BuildAppleSenderRecipient()
+                            },
+
+                        Attachments =
+                            CloneAttachments(attachments)
                     };
 
                     var request =
@@ -638,15 +800,19 @@ WHERE EwsID COLLATE Latin1_General_CS_AS = @EWSID AND id_mailboxe = @ID;";
                             SaveToSentItems = true
                         };
 
-                    graphService.Users[sharedmailbox_name]
+                    graphService
+                        .Users[
+                            fr_graph_send_as
+                        ]
                         .SendMail
                         .PostAsync(request)
                         .GetAwaiter()
                         .GetResult();
 
-                    sentTo = string.IsNullOrWhiteSpace(sentTo)
-                        ? contact
-                        : sentTo + ";" + contact;
+                    sentTo =
+                        string.IsNullOrWhiteSpace(sentTo)
+                            ? contact
+                            : sentTo + ";" + contact;
 
                     UpdateAppleValue(
                         mail.Id,
@@ -693,35 +859,48 @@ WHERE EwsID COLLATE Latin1_General_CS_AS = @EWSID AND id_mailboxe = @ID;";
             }
         }
 
+        private Recipient BuildAppleSenderRecipient()
+        {
+            return new Recipient
+            {
+                EmailAddress = new EmailAddress
+                {
+                    Address = adresse_email_from_communication_apple,
+
+                    Name = adresse_from_communication_apple
+                }
+            };
+        }
+
         private SharedMailboxConfiguration GetAppleMailbox()
         {
             const string sql = @"SELECT TOP (1) id_mailboxe, nom_mailboxe, mailboxe, ordre,
-ISNULL(dt_heure_filtre,'19000101') dt_heure_filtre,
-ISNULL(raffraichissement_min,0) raffraichissement_min,
-ISNULL(date_dernier_raf,'19000101') date_dernier_raf,
-ISNULL(is_integration_auto,0) is_integration_auto,
-ISNULL(typologie,'') typologie
-FROM dbo.T_SharedMailboxes
-WHERE actif=1 AND UPPER(LTRIM(RTRIM(ISNULL(typologie,''))))='APPLE'
-ORDER BY ordre;";
+                                ISNULL(dt_heure_filtre,'19000101') dt_heure_filtre,
+                                ISNULL(raffraichissement_min,0) raffraichissement_min,
+                                ISNULL(date_dernier_raf,'19000101') date_dernier_raf,
+                                ISNULL(is_integration_auto,0) is_integration_auto,
+                                ISNULL(typologie,'') typologie
+                                FROM dbo.T_SharedMailboxes
+                                WHERE actif=1 AND UPPER(LTRIM(RTRIM(ISNULL(typologie,''))))='APPLE'
+                                ORDER BY ordre;";
             return ExecuteMailboxQuery(sql).FirstOrDefault();
         }
 
         private AppleMailToSend GetNextAppleMailToSend()
         {
             const string sql = @"
-SELECT TOP (1)
-    c.id,
-    ISNULL(c.sujet, '') AS sujet,
-    ISNULL(c.body, '') AS body,
-    ISNULL(c.affecte_a, '') AS affecte_a,
-    c.fichier
-FROM dbo.T_contenu_email AS c WITH (NOLOCK)
-WHERE c.id_mailboxe = @ID_MAILBOXE
-  AND c.top_a_envoyer = 'O'
-  AND c.affecte_a IS NOT NULL
-  AND LTRIM(RTRIM(c.affecte_a)) <> ''
-ORDER BY c.id;";
+                                SELECT TOP (1)
+                                    c.id,
+                                    ISNULL(c.sujet, '') AS sujet,
+                                    ISNULL(c.body, '') AS body,
+                                    ISNULL(c.affecte_a, '') AS affecte_a,
+                                    c.fichier
+                                FROM dbo.T_contenu_email AS c WITH (NOLOCK)
+                                WHERE c.id_mailboxe = @ID_MAILBOXE
+                                  AND c.top_a_envoyer = 'O'
+                                  AND c.affecte_a IS NOT NULL
+                                  AND LTRIM(RTRIM(c.affecte_a)) <> ''
+                                ORDER BY c.id;";
 
             using (SqlConnection con =
                 new SqlConnection(sql_connexion))
@@ -946,7 +1125,7 @@ WHERE id_mailboxe=@ID;";
             {
                 c.QueryParameters.Top = top;
                 c.QueryParameters.Orderby = new[] { "receivedDateTime asc" };
-                c.QueryParameters.Filter = "receivedDateTime ge " + filter.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture);
+                c.QueryParameters.Filter = "receivedDateTime gt " + filter.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture);
                 c.QueryParameters.Select = new[] { "id", "subject", "receivedDateTime", "createdDateTime", "hasAttachments" };
             }).GetAwaiter().GetResult();
         }
@@ -1106,10 +1285,17 @@ WHERE id_mailboxe=@ID;";
         public void setsharedmailbox_folder_out(string value) { sharedmailbox_folder_out = string.IsNullOrWhiteSpace(value) ? "Archives" : value; }
         public void setEmailInCaseOfTechnicalIssueParam(string value) { email_in_case_of_technical_issue_parameter_global = value ?? ""; }
         public void setEmailInCaseOfTechnicalIssue(string value) { email_in_case_of_technical_issue = value ?? ""; }
+        public void setfr_graph_send_as_parameter_global(string value) { fr_graph_send_as_parameter_global = value ?? ""; }
+        public void setfr_graph_send_as(string value) { fr_graph_send_as = value ?? ""; }
         public void setSqlConnexionParam(string value) { sql_connexion_parameter_global = value ?? ""; }
         public void setSqlConnexion(string value) { sql_connexion = value ?? ""; }
         public void setlogs_folder(string value) { logs_folder = value ?? ""; }
         public void settemp_folder(string value) { temp_folder = value ?? ""; }
         public void setGlobalSessionName(string value) { global_session_name = value ?? ""; }
+
+        public void setAdresse_email_from_communication_apple(string value) { adresse_email_from_communication_apple = value ?? ""; }
+        public void setAdresse_from_communication_apple(string value) { adresse_from_communication_apple = value ?? ""; }
+
+
     }
 }
