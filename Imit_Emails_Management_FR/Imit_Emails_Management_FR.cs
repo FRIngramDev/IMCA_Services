@@ -35,6 +35,7 @@ namespace IMIT_EMAILS_MANAGEMENT_FR
         private string sharedmailbox_folder_in = "Inbox";
         private string sharedmailbox_folder_out = "Archives";
         private string sharedmailbox_folder_error = "Erreur";
+
         private string sql_connexion_parameter_global = "";
         private string sql_connexion = "";
         private string sql_con_transporteur_parameter_global = "";
@@ -58,8 +59,6 @@ namespace IMIT_EMAILS_MANAGEMENT_FR
         private bool automaticIntegration;
         private bool currentMailboxIsImit;
         private List<MailboxDomainRule> currentDomainRules = new List<MailboxDomainRule>();
-        private string fr_graph_send_as_parameter_global = "";
-        private string fr_graph_send_as = "";
         private GraphServiceClient graphService;
 
         static IMIT_EMAILS_MANAGEMENT_FR()
@@ -89,8 +88,6 @@ namespace IMIT_EMAILS_MANAGEMENT_FR
             public string mail_fedex_service_client { get; set; } = "";
             public string path_macro_computacenter { get; set; } = "";
             public string path_fichier { get; set; } = "";
-            public string fr_graph_send_as_parameter_global { get; set; } = "";
-            public string fr_graph_send_as { get; set; } = "";
         }
 
         private sealed class MailboxConfiguration
@@ -282,29 +279,26 @@ namespace IMIT_EMAILS_MANAGEMENT_FR
             sql_con_transporteur = string.IsNullOrWhiteSpace(sql_con_transporteur_parameter_global)
                 ? ""
                 : GetImcaParameter(imcaConnection, sql_con_transporteur_parameter_global);
-            fr_graph_send_as_parameter_global = item.fr_graph_send_as_parameter_global ?? "";
-            fr_graph_send_as = GetImcaParameter(imcaConnection, fr_graph_send_as_parameter_global);
         }
 
         private List<MailboxConfiguration> GetActiveMailboxes()
         {
             const string sql = @"
-                SELECT  m.id_mailboxe,
-                        m.nom_mailboxe,
-                        m.mailboxe,
-                        m.ordre,
-                        ISNULL(m.dt_heure_filtre,'19000101') AS dt_heure_filtre,
-                        ISNULL(m.raffraichissement_min,0) AS raffraichissement_min,
-                        ISNULL(m.date_dernier_raf,'19000101') AS date_dernier_raf,
-                        ISNULL(m.is_integration_auto,0) AS is_integration_auto,
-                        ISNULL(d.id_mailboxe_source,0) AS id_mailboxe_source,
-                        ISNULL(d.id_mailboxe_dest,0) AS id_mailboxe_dest,
-                        ISNULL(d.nom_domaine,'') AS nom_domaine
-                FROM dbo.T_SharedMailboxes AS m
-                LEFT JOIN dbo.T_SharedMailboxes_Domain AS d
-                    ON d.id_mailboxe_source=m.id_mailboxe
-                WHERE m.actif=1
-                ORDER BY m.ordre";
+SELECT  m.id_mailboxe,
+        m.nom_mailboxe,
+        m.mailboxe,
+        ISNULL(m.dt_heure_filtre,'19000101') AS dt_heure_filtre,
+        ISNULL(m.raffraichissement_min,0) AS raffraichissement_min,
+        ISNULL(m.date_dernier_raf,'19000101') AS date_dernier_raf,
+        ISNULL(m.is_integration_auto,0) AS is_integration_auto,
+        ISNULL(d.id_mailboxe_source,0) AS id_mailboxe_source,
+        ISNULL(d.id_mailboxe_dest,0) AS id_mailboxe_dest,
+        ISNULL(d.nom_domaine,'') AS nom_domaine
+FROM dbo.T_SharedMailboxes AS m
+LEFT JOIN dbo.T_SharedMailboxes_Domain AS d
+    ON d.id_mailboxe_source=m.id_mailboxe
+WHERE m.actif=1
+ORDER BY m.raffraichissement_min, m.id_mailboxe;";
 
             var byId = new Dictionary<int, MailboxConfiguration>();
             using (var connection = new SqlConnection(sql_connexion))
@@ -682,8 +676,7 @@ WHERE EwsID COLLATE Latin1_General_CS_AS=@EWSID AND id_mailboxe=@MAILBOX;";
                 string.IsNullOrWhiteSpace(email?.Subject) ? "Echange de mail" : email.Subject,
                 "robot_mail",
                 emailDatabaseId,
-                email?.WebLink,
-                false);
+                email?.WebLink);
 
             WriteLog("       Email linked to IMIT issue " + issueId + " with comment ID " + commentId);
             return true;
@@ -718,12 +711,10 @@ WHERE EwsID COLLATE Latin1_General_CS_AS=@EWSID AND id_mailboxe=@MAILBOX;";
 
         private bool EmailCommentLinkExists(int emailDatabaseId, int issueId)
         {
-            const string sql = @"SELECT TOP (1) c.id_comment
-FROM dbo.T_comment AS c
-INNER JOIN dbo.T_contenu_email AS e
-    ON e.id_comment=c.id_comment
-WHERE c.id_issue=@ISSUE_ID
-  AND e.id=@EMAIL_ID;";
+            const string sql = @"SELECT TOP (1) id_comment
+FROM dbo.T_comment
+WHERE id_issue=@ISSUE_ID
+  AND id_contenu_email=@EMAIL_ID;";
             using (var connection = new SqlConnection(sql_connexion))
             using (var command = new SqlCommand(sql, connection))
             {
@@ -1592,12 +1583,12 @@ WHERE CountryCode=@COUNTRY AND ReportMonth=@MONTH;";
 
         private void ForwardWithGraph(ForwardRequest request)
         {
-
+            const string sendingMailbox = imit_mailbox_fr;
             List<Recipient> recipients = BuildRecipients(request.To);
             if (recipients.Count == 0)
                 throw new InvalidOperationException("No valid recipient for T_contenu_email ID " + request.Id);
 
-            string requestedSender = string.IsNullOrWhiteSpace(request.From) ? fr_graph_send_as : request.From;
+            string requestedSender = string.IsNullOrWhiteSpace(request.From) ? sendingMailbox : request.From;
             Recipient senderRecipient = new Recipient
             {
                 EmailAddress = new EmailAddress
@@ -1632,7 +1623,7 @@ WHERE CountryCode=@COUNTRY AND ReportMonth=@MONTH;";
                 !subject.StartsWith("FW:", StringComparison.OrdinalIgnoreCase))
                 subject = "TR: " + subject;
 
-            WriteLog("       Forward ID " + request.Id + " - sending mailbox: " + fr_graph_send_as +
+            WriteLog("       Forward ID " + request.Id + " - sending mailbox: " + sendingMailbox +
                 " - original mailbox: " + request.SourceMailbox + " - requested sender: " + requestedSender);
 
             var message = new Message
@@ -1659,7 +1650,7 @@ WHERE CountryCode=@COUNTRY AND ReportMonth=@MONTH;";
                 Message = message,
                 SaveToSentItems = true
             };
-            graphService.Users[fr_graph_send_as].SendMail.PostAsync(sendRequest).GetAwaiter().GetResult();
+            graphService.Users[sendingMailbox].SendMail.PostAsync(sendRequest).GetAwaiter().GetResult();
         }
 
         private static MimeMessage LoadMimeMessage(byte[] mimeContent)
@@ -1961,7 +1952,7 @@ WHERE CountryCode=@COUNTRY AND ReportMonth=@MONTH;";
             graphService.Users[mailboxAddress].Messages[messageId].Move.PostAsync(body).GetAwaiter().GetResult();
         }
 
-        private int InsertComment(int issueId, string comment, string commentName, int emailDatabaseId, string messageWebLink = "", bool linkCommentToEmail = true)
+        private int InsertComment(int issueId, string comment, string commentName, int emailDatabaseId, string messageWebLink = "")
         {
             int commentId;
             using (var connection = new SqlConnection(sql_connexion))
@@ -1973,7 +1964,7 @@ WHERE CountryCode=@COUNTRY AND ReportMonth=@MONTH;";
                 Add(command, "@comment", SqlDbType.VarChar, Truncate(comment, 2000), 2000);
                 Add(command, "@date_comment", SqlDbType.SmallDateTime, DateTime.Now);
                 Add(command, "@comment_name", SqlDbType.VarChar, Truncate(commentName, 50), 50);
-                Add(command, "@id_fichier", SqlDbType.Int, linkCommentToEmail ? (object)emailDatabaseId : DBNull.Value);
+                Add(command, "@id_fichier", SqlDbType.Int, emailDatabaseId);
                 SqlParameter output = command.Parameters.Add("@@num", SqlDbType.Int);
                 output.Direction = ParameterDirection.Output;
                 connection.Open();
