@@ -318,6 +318,7 @@
     <Compile Include="Gestion_Requete_FR\Gestion_Requete_FR.cs" />
     <Compile Include="Idep_FR\Idep_FR.cs" />
     <Compile Include="Imei_Management_FR\Imei_Management_FR.cs" />
+    <Compile Include="Imit_Emails_Management_FR\Imit_Emails_Management_FR.cs" />
     <Compile Include="Modèle\modele_multi_sharemailboxes.cs" />
     <Compile Include="Apple_Emails_Management_FR\Apple_Emails_Management_FR.cs" />
     <Compile Include="ProjectInstaller.cs">
