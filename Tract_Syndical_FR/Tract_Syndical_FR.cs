@@ -44,6 +44,8 @@ namespace TRACT_SYNDICAL_FR
         private string email_in_case_of_technical_issue_parameter_global = "";
         private string email_in_case_of_technical_issue = "";
         private string email_destinataire = "";
+        private string fr_graph_send_as_parameter_global = "";
+        private string fr_graph_send_as = "";
 
         // ----- Files / logs / session -----
         private string logs_folder = "";
@@ -88,6 +90,7 @@ namespace TRACT_SYNDICAL_FR
             public string email_in_case_of_technical_issue_parameter_global { get; set; } = "";
             public string email_destinataire { get; set; } = "";
             public string sql_connexion_parameter_global { get; set; } = "";
+            public string fr_graph_send_as_parameter_global { get; set; } = "";
         }
 
         private class TractAttachment
@@ -196,6 +199,8 @@ namespace TRACT_SYNDICAL_FR
                     setsharedmailbox_folder_in(p.sharedmailbox_folder_in);
                     setsharedmailbox_folder_out(p.sharedmailbox_folder_out);
                     setEmailDestinataire(p.email_destinataire);
+                    setFrGraphSendAsParameterGlobal(
+                        p.fr_graph_send_as_parameter_global);
                     setSqlConnexionParam(p.sql_connexion_parameter_global);
                     setEmailInCaseOfTechnicalIssueParam(
                         p.email_in_case_of_technical_issue_parameter_global);
@@ -207,6 +212,10 @@ namespace TRACT_SYNDICAL_FR
                     sql_connexion = get_IMCA_paramters(
                         sql_con,
                         sql_connexion_parameter_global);
+
+                    fr_graph_send_as = get_IMCA_paramters(
+                        sql_con,
+                        fr_graph_send_as_parameter_global).Trim();
 
                     if (active.ToUpper().Trim() != "TRUE")
                     {
@@ -330,31 +339,43 @@ namespace TRACT_SYNDICAL_FR
         /// aux tracts syndicaux. Cette methode est independante et n'est jamais appelee
         /// par Read_Email_with_Graph. Elle est destinee a etre appelee directement par IMCA.
         /// </summary>
-        public void Recherche_AD_FR_Pour_Tracts_Syndicaux(string sql_con,string logs,string tmp_folder,string session_name)
+        public void Recherche_AD_FR_Pour_Tracts_Syndicaux(
+            string sql_con,
+            string logs,
+            string tmp_folder,
+            string session_name)
         {
-            const string domainController = "DEFRIZWADC1001";
+            string[] domainControllers =
+            {
+                "DEFRIZWADC1001.corporate.ingrammicro.com",
+                "DEFRIZWADC1002.corporate.ingrammicro.com"
+            };
+
+            const int maximumAttemptsPerDomainController = 3;
+            const int delayBetweenAttemptsMilliseconds = 5000;
+
             const string organizationalUnit =
                 "OU=FR,OU=EMEA,OU=associates,OU=usersAndGroups," +
                 "DC=corporate,DC=ingrammicro,DC=com";
 
             const string insertSql = @"
-                                    INSERT INTO T_TRACT_SYNDICAL_Abonnes
-                                        (id_mailboxe, id_user, date_abonnement, actif)
-                                    SELECT
-                                        m.id_mailboxe,
-                                        u.id_user,
-                                        GETDATE(),
-                                        'O'
-                                    FROM T_TRACT_SYNDICAL_Mailboxes m
-                                    INNER JOIN annuaire.dbo.tbl_users u ON 1 = 1
-                                    LEFT JOIN T_TRACT_SYNDICAL_Abonnes a
-                                        ON a.id_user = u.id_user
-                                       AND a.id_mailboxe = m.id_mailboxe
-                                    WHERE m.actif = 1
-                                      AND u.matPeopleSoft = @EMPLOYEE_ID
-                                      AND u.user_email IS NOT NULL
-                                      AND LTRIM(RTRIM(u.user_email)) <> ''
-                                      AND a.id_user IS NULL;";
+                INSERT INTO T_TRACT_SYNDICAL_Abonnes
+                    (id_mailboxe, id_user, date_abonnement, actif)
+                SELECT
+                    m.id_mailboxe,
+                    u.id_user,
+                    GETDATE(),
+                    'O'
+                FROM T_TRACT_SYNDICAL_Mailboxes m
+                INNER JOIN annuaire.dbo.tbl_users u ON 1 = 1
+                LEFT JOIN T_TRACT_SYNDICAL_Abonnes a
+                    ON a.id_user = u.id_user
+                   AND a.id_mailboxe = m.id_mailboxe
+                WHERE m.actif = 1
+                  AND u.matPeopleSoft = @EMPLOYEE_ID
+                  AND u.user_email IS NOT NULL
+                  AND LTRIM(RTRIM(u.user_email)) <> ''
+                  AND a.id_user IS NULL;";
 
             string service_path = Path.GetDirectoryName(
                 System.Reflection.Assembly.GetEntryAssembly().Location);
@@ -382,7 +403,7 @@ namespace TRACT_SYNDICAL_FR
                 JSON_file param = JsonConvert.DeserializeObject<JSON_file>(
                     global_parameters);
 
-                Country france = param?.countries?
+                Country countryConfiguration = param?.countries?
                     .FirstOrDefault(item =>
                         string.Equals(
                             item.country?.Trim(),
@@ -393,22 +414,24 @@ namespace TRACT_SYNDICAL_FR
                             "TRUE",
                             StringComparison.OrdinalIgnoreCase));
 
-                if (france == null)
+                if (countryConfiguration == null)
                 {
                     throw new InvalidOperationException(
                         "No active FR configuration found for " +
                         global_application_name);
                 }
 
-                setParamCountry(france.country);
-                setParamSK_Valid(france.sk_valid);
-                setParamName(france.name);
-                setParamActive(france.active);
-                setParamDebug(france.debug);
-                setSqlConnexionParam(france.sql_connexion_parameter_global);
+                setParamCountry(countryConfiguration.country);
+                setParamSK_Valid(countryConfiguration.sk_valid);
+                setParamName(countryConfiguration.name);
+                setParamActive(countryConfiguration.active);
+                setParamDebug(countryConfiguration.debug);
+                setSqlConnexionParam(countryConfiguration.sql_connexion_parameter_global);
                 setEmailInCaseOfTechnicalIssueParam(
-                    france.email_in_case_of_technical_issue_parameter_global);
-                setEmailDestinataire(france.email_destinataire);
+                    countryConfiguration.email_in_case_of_technical_issue_parameter_global);
+                setEmailDestinataire(countryConfiguration.email_destinataire);
+                setFrGraphSendAsParameterGlobal(
+                    countryConfiguration.fr_graph_send_as_parameter_global);
 
                 sql_connexion = get_IMCA_paramters(
                     sql_con,
@@ -418,6 +441,10 @@ namespace TRACT_SYNDICAL_FR
                     sql_con,
                     email_in_case_of_technical_issue_parameter_global);
 
+                fr_graph_send_as = get_IMCA_paramters(
+                    sql_con,
+                    fr_graph_send_as_parameter_global).Trim();
+
                 if (string.IsNullOrWhiteSpace(sql_connexion))
                 {
                     throw new InvalidOperationException(
@@ -425,65 +452,188 @@ namespace TRACT_SYNDICAL_FR
                         sql_connexion_parameter_global);
                 }
 
+                if (!IsEmailAddress(fr_graph_send_as))
+                {
+                    throw new InvalidOperationException(
+                        "fr_graph_send_as is empty or invalid. " +
+                        "Parameter used : " +
+                        fr_graph_send_as_parameter_global);
+                }
+
+                WriteToFile(
+                    "Graph technical sender mailbox : " +
+                    fr_graph_send_as);
+
                 // Initialise Graph uniquement pour pouvoir envoyer une alerte technique.
                 graphService = Connexion_Microsoft_Graph();
 
                 WriteToFile(
                     "Starting French AD tract subscription synchronization");
 
-                using (PrincipalContext context = new PrincipalContext(
-                    ContextType.Domain,
-                    domainController,
-                    organizationalUnit))
-                using (UserPrincipal searchTemplate = new UserPrincipal(context))
-                using (PrincipalSearcher searcher = new PrincipalSearcher(
-                    searchTemplate))
-                using (PrincipalSearchResult<Principal> results = searcher.FindAll())
-                using (SqlConnection connection = new SqlConnection(sql_connexion))
-                using (SqlCommand command = new SqlCommand(insertSql, connection))
+                bool synchronizationCompleted = false;
+                PrincipalServerDownException lastServerException = null;
+
+                foreach (string domainController in domainControllers)
                 {
-                    command.CommandTimeout = 300;
-
-                    SqlParameter employeeIdParameter = command.Parameters.Add(
-                        "@EMPLOYEE_ID",
-                        SqlDbType.NVarChar,
-                        6);
-
-                    connection.Open();
-
-                    foreach (Principal principal in results)
+                    for (int attempt = 1;
+                         attempt <= maximumAttemptsPerDomainController;
+                         attempt++)
                     {
-                        usersRead++;
+                        int currentUsersRead = 0;
+                        int currentValidUsers = 0;
+                        int currentSubscriptionsInserted = 0;
 
-                        UserPrincipal user = principal as UserPrincipal;
-                        if (user == null)
+                        try
                         {
-                            continue;
+                            WriteToFile(
+                                "Trying Active Directory server " +
+                                domainController +
+                                " - Attempt " + attempt + "/" +
+                                maximumAttemptsPerDomainController);
+
+                            using (PrincipalContext context =
+                                new PrincipalContext(
+                                    ContextType.Domain,
+                                    domainController,
+                                    organizationalUnit,
+                                    ContextOptions.Negotiate |
+                                    ContextOptions.Signing |
+                                    ContextOptions.Sealing))
+                            {
+                                // Force immédiatement la connexion au DC.
+                                string connectedServer =
+                                    context.ConnectedServer;
+
+                                WriteToFile(
+                                    "Connected to Active Directory server : " +
+                                    connectedServer);
+
+                                using (UserPrincipal searchTemplate =
+                                    new UserPrincipal(context))
+                                using (PrincipalSearcher searcher =
+                                    new PrincipalSearcher(searchTemplate))
+                                using (PrincipalSearchResult<Principal> results =
+                                    searcher.FindAll())
+                                using (SqlConnection connection =
+                                    new SqlConnection(sql_connexion))
+                                using (SqlCommand command =
+                                    new SqlCommand(insertSql, connection))
+                                {
+                                    command.CommandTimeout = 300;
+
+                                    SqlParameter employeeIdParameter =
+                                        command.Parameters.Add(
+                                            "@EMPLOYEE_ID",
+                                            SqlDbType.NVarChar,
+                                            6);
+
+                                    connection.Open();
+
+                                    foreach (Principal principal in results)
+                                    {
+                                        currentUsersRead++;
+
+                                        UserPrincipal user =
+                                            principal as UserPrincipal;
+
+                                        if (user == null)
+                                        {
+                                            continue;
+                                        }
+
+                                        string employeeId =
+                                            (user.EmployeeId ?? "").Trim();
+
+                                        if (employeeId.Length != 6 ||
+                                            employeeId == "000000")
+                                        {
+                                            continue;
+                                        }
+
+                                        currentValidUsers++;
+                                        employeeIdParameter.Value = employeeId;
+
+                                        currentSubscriptionsInserted +=
+                                            command.ExecuteNonQuery();
+                                    }
+                                }
+                            }
+
+                            usersRead = currentUsersRead;
+                            validUsers = currentValidUsers;
+                            subscriptionsInserted =
+                                currentSubscriptionsInserted;
+                            synchronizationCompleted = true;
+
+                            WriteToFile(
+                                "Active Directory synchronization completed " +
+                                "using server : " + domainController);
+
+                            break;
                         }
-
-                        string employeeId = (user.EmployeeId ?? "").Trim();
-
-                        if (employeeId.Length != 6 ||
-                            employeeId == "000000")
+                        catch (PrincipalServerDownException ex)
                         {
-                            continue;
-                        }
+                            lastServerException = ex;
 
-                        validUsers++;
-                        employeeIdParameter.Value = employeeId;
-                        subscriptionsInserted += command.ExecuteNonQuery();
+                            WriteToFile(
+                                "Active Directory server unavailable : " +
+                                domainController +
+                                " - Attempt " + attempt + "/" +
+                                maximumAttemptsPerDomainController +
+                                " - " + ex.Message);
+
+                            if (attempt < maximumAttemptsPerDomainController)
+                            {
+                                System.Threading.Thread.Sleep(
+                                    delayBetweenAttemptsMilliseconds);
+                            }
+                        }
                     }
+
+                    if (synchronizationCompleted)
+                    {
+                        break;
+                    }
+                }
+
+                if (!synchronizationCompleted)
+                {
+                    string errorMessage =
+                        "No configured Active Directory server could be " +
+                        "contacted after " +
+                        maximumAttemptsPerDomainController +
+                        " attempts per server. Servers tested : " +
+                        string.Join(", ", domainControllers);
+
+                    if (lastServerException != null)
+                    {
+                        errorMessage +=
+                            ". Last error : " +
+                            lastServerException.Message;
+                    }
+
+                    WriteToFile(
+                        "French AD tract subscription synchronization " +
+                        "skipped. " + errorMessage);
+
+                    SendTechnicalIssueMail(
+                        nameof(Recherche_AD_FR_Pour_Tracts_Syndicaux),
+                        "",
+                        errorMessage +
+                        ". The synchronization will be retried during " +
+                        "the next execution.",
+                        "AD SYNCHRONIZATION");
+
+                    // L'indisponibilité de l'AD ne bloque pas IMCA.
+                    return;
                 }
 
                 WriteToFile(
                     "French AD tract subscription synchronization completed");
-
                 WriteToFile(
                     "   Users read               : " + usersRead);
-
                 WriteToFile(
                     "   Valid users              : " + validUsers);
-
                 WriteToFile(
                     "   Subscriptions inserted   : " +
                     subscriptionsInserted);
@@ -1312,7 +1462,7 @@ namespace TRACT_SYNDICAL_FR
             {
                 WriteToFile(
                     "Error sending technical issue email : " +
-                    mailEx.Message);
+                    mailEx.ToString());
             }
         }
 
@@ -1380,10 +1530,33 @@ namespace TRACT_SYNDICAL_FR
                     SaveToSentItems = true
                 };
 
-            string senderMailbox =
-                !string.IsNullOrWhiteSpace(mailboxe_reponse)
-                    ? mailboxe_reponse
-                    : sharedmailbox_name;
+            string senderMailbox = "";
+
+            if (!string.IsNullOrWhiteSpace(mailboxe_reponse))
+            {
+                senderMailbox = mailboxe_reponse.Trim();
+            }
+            else if (!string.IsNullOrWhiteSpace(fr_graph_send_as))
+            {
+                senderMailbox = fr_graph_send_as.Trim();
+            }
+            else if (!string.IsNullOrWhiteSpace(sharedmailbox_name))
+            {
+                senderMailbox = sharedmailbox_name.Trim();
+            }
+
+            if (!IsEmailAddress(senderMailbox))
+            {
+                throw new InvalidOperationException(
+                    "No valid sender mailbox is available for Graph. " +
+                    "mailboxe_reponse='" + mailboxe_reponse + "', " +
+                    "fr_graph_send_as='" + fr_graph_send_as + "', " +
+                    "sharedmailbox_name='" + sharedmailbox_name + "'.");
+            }
+
+            WriteToFile(
+                "Sending email with Graph from : " +
+                senderMailbox);
 
             graphService.Users[senderMailbox]
                 .SendMail
@@ -1858,6 +2031,12 @@ namespace TRACT_SYNDICAL_FR
         {
             email_in_case_of_technical_issue_parameter_global =
                 value ?? "";
+        }
+
+        public void setFrGraphSendAsParameterGlobal(
+            string value)
+        {
+            fr_graph_send_as_parameter_global = value ?? "";
         }
     }
 }
