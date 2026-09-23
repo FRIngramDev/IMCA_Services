@@ -1563,8 +1563,8 @@ WHERE SK_VALID=0 AND PARAMETER=@PARAMETER";
                             }
 
 
-                            // Check if a TODO action must be reserved (SELECT TOP 1)
-                            cmd.CommandText = "SET LANGUAGE FRENCH;SELECT TOP 1 action.ID,admin.ACTION,admin.RUN_ON_1,admin.RUN_ON_2,admin.RUN_ON_3,admin.RUN_ON_4,admin.RUN_ON_5,admin.RUN_ON_6,admin.RUN_ON_7,isnull(list_valid_user,'') as  VALID_USERID " +
+                            // Check if a TODO action must be reserved 
+                            cmd.CommandText = "SET LANGUAGE FRENCH;SELECT action.ID,admin.ACTION,admin.RUN_ON_1,admin.RUN_ON_2,admin.RUN_ON_3,admin.RUN_ON_4,admin.RUN_ON_5,admin.RUN_ON_6,admin.RUN_ON_7,isnull(list_valid_user,'') as  VALID_USERID " +
                                               " FROM [IMCA_BACKOFFICE].[dbo].[PCM_TAB_IMCA_ACTION_ADMIN] admin " +
                                               " INNER JOIN [IMCA_BACKOFFICE].[dbo].[PCM_TAB_IMCA_ACTION] action on admin.ACTION=action.ACTION " +
                                               " LEFT JOIN(SELECT distinct ACTION, STUFF((SELECT  distinct tn2.[USERID] + '#' FROM   PCM_TAB_IMCA_ACTION_USERVALIDATION tn2 inner join  PCM_TAB_IMCA_ACTION_USERVALIDATION " +
@@ -1656,12 +1656,17 @@ WHERE SK_VALID=0 AND PARAMETER=@PARAMETER";
 
                                         if (to_execute == true)
                                         {
+                                            int nb_ligne_affected = 0;
                                             cmd2.Connection = con;
                                             cmd2.CommandTimeout = 300;
                                             cmd2.CommandText = "UPDATE [IMCA_BACKOFFICE].[dbo].[PCM_TAB_IMCA_ACTION] set TODO_BY='" + session_name.ToUpper() + "' where ID=" + dt["ID"].ToString() + " AND TODO_BY='TODO'";
-                                            cmd2.ExecuteNonQuery();
+                                            nb_ligne_affected = cmd2.ExecuteNonQuery();
+                                            if (nb_ligne_affected > 0)
+                                            {
+                                                bol = false;
 
-                                            WriteToFile("       " + session_name.ToUpper() + " reserved ACTION  " + dt["ACTION"].ToString() + " (ID : " + dt["ID"].ToString() + ") at " + DateTime.Now.ToString("dd/MM/yyyy HH:mm:ss"));
+                                                WriteToFile("       " + session_name.ToUpper() + " reserved ACTION  " + dt["ACTION"].ToString() + " (ID : " + dt["ID"].ToString() + ") at " + DateTime.Now.ToString("dd/MM/yyyy HH:mm:ss"));
+                                            }
                                         }
                                         else
                                         {
