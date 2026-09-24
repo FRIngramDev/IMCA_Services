@@ -487,6 +487,27 @@ namespace CREDIT_EMAILS_MANAGEMENT_FR
                 return ProcessingOutcome.Ignored;
             }
             CreditMailData data = ParseCreditMail(email);
+
+            // Comportement historique : sans numéro d'autorisation,
+            // aucun traitement métier n'est exécuté et aucune alerte technique
+            // n'est envoyée. Le message est journalisé puis archivé normalement.
+            if (string.IsNullOrWhiteSpace(data.AuthorizationNumber))
+            {
+                WriteLog(
+                    "       Authorization number is missing. " +
+                    "Business processing skipped and message archived.");
+
+                FinalizeGraphMessage(email.Id, outputFolderId);
+
+                UpsertProcessingState(
+                    email,
+                    "S",
+                    null,
+                    "Authorization number missing - message archived without business processing");
+
+                return ProcessingOutcome.Completed;
+            }
+
             if (AuthorizationExists(data.AuthorizationNumber) || data.CustomerCode.Equals("21000007", StringComparison.OrdinalIgnoreCase))
             {
                 FinalizeGraphMessage(email.Id, outputFolderId);
@@ -533,7 +554,6 @@ namespace CREDIT_EMAILS_MANAGEMENT_FR
             d.Amount = amount;
             if (d.CustomerCode.Length < 2) throw new InvalidDataException("Customer code is missing");
             d.CustomerBranch = d.CustomerCode.Substring(0, 2);
-            if (string.IsNullOrWhiteSpace(d.AuthorizationNumber)) throw new InvalidDataException("Authorization number is missing");
             return d;
         }
 
