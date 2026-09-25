@@ -26,6 +26,7 @@ namespace IMIT_EMAILS_MANAGEMENT_FR
         private const string imit_mailbox_fr = "IMIT_FR_4@ingrammicro.com";
         private const string imit_mailbox_es = "IMIT_ES@ingrammicro.com";
         private const string processedPropertyId = "String {B4A15BD8-83F0-4212-A932-4D9A14DF2889} Name IMCAProcessed";
+        private const string immutableIdPreference = "IdType=\"ImmutableId\"";
         private string country = "";
         private string name = "";
         private string active = "";
@@ -421,23 +422,40 @@ ORDER BY m.raffraichissement_min, m.id_mailboxe;";
                     {
                         existing++;
                         WriteLog("       Email already present in T_contenu_email");
-                        MarkMessageAsProcessed(email.Id);
-                        if (IsCurrentCountryImitMailbox()) MarkAsRead(email.Id);
+                        TryMarkMessageAsProcessed(
+                            email.Id,
+                            IsCurrentCountryImitMailbox());
                         continue;
                     }
 
                     inserted++;
                     WriteLog("       Email inserted in T_contenu_email. ID : " + emailDatabaseId);
                     ProcessBusinessRules(email, emailDatabaseId);
-                    MarkMessageAsProcessed(email.Id);
-                    if (IsCurrentCountryImitMailbox())
+                    bool graphTrackingUpdated =
+                        TryMarkMessageAsProcessed(
+                            email.Id,
+                            IsCurrentCountryImitMailbox());
+
+                    if (IsCurrentCountryImitMailbox() &&
+                        graphTrackingUpdated)
                     {
-                        MarkAsRead(email.Id);
-                        WriteLog("       IMIT mailbox message marked as read");
+                        WriteLog(
+                            "       IMIT mailbox message marked as " +
+                            "processed and read");
                     }
                 }
                 catch (Exception ex)
                 {
+                    if (IsGraphObjectNotFound(ex))
+                    {
+                        WriteLog(
+                            "       Graph message is no longer available. " +
+                            "It may have been moved or deleted by another " +
+                            "process. Subject : " +
+                            (summary.Subject ?? "<no subject>"));
+                        continue;
+                    }
+
                     WriteLog("       Error processing email : " + ex.Message);
                     if (!(ex is TechnicalAlertAlreadySentException))
                         SendTechnicalAlert(nameof(ReadCurrentMailbox), mailboxAddress + " - Mail : " + (summary.Subject ?? "<no subject>") + " - " + ex.Message, "EMAIL PROCESSING");
@@ -485,6 +503,7 @@ ORDER BY m.raffraichissement_min, m.id_mailboxe;";
             DateTime date = mailboxFilterDate > new DateTime(1900, 1, 1) ? mailboxFilterDate : ParseStartDate();
             return graphService.Users[mailboxAddress].MailFolders[folderId].Messages.GetAsync(config =>
             {
+                AddImmutableIdHeader(config.Headers);
                 config.QueryParameters.Top = top;
                 config.QueryParameters.Orderby = new[] { "receivedDateTime asc" };
                 string filter = "receivedDateTime gt " + date.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.fffZ", CultureInfo.InvariantCulture);
@@ -502,7 +521,10 @@ ORDER BY m.raffraichissement_min, m.id_mailboxe;";
         {
             return graphService.Users[mailboxAddress].Messages[messageId].GetAsync(config =>
             {
-                config.Headers.Add("Prefer", "outlook.body-content-type=\"text\"");
+                config.Headers.Add(
+                    "Prefer",
+                    "outlook.body-content-type=\"text\", " +
+                    immutableIdPreference);
                 config.QueryParameters.Select = new[]
                 {
                     "id", "subject", "body", "bodyPreview", "from", "sender", "toRecipients", "ccRecipients",
@@ -513,7 +535,10 @@ ORDER BY m.raffraichissement_min, m.id_mailboxe;";
 
         private byte[] GetMimeContent(string messageId)
         {
-            using (Stream input = graphService.Users[mailboxAddress].Messages[messageId].Content.GetAsync().GetAwaiter().GetResult())
+            using (Stream input = graphService.Users[mailboxAddress].Messages[messageId].Content.GetAsync(config =>
+            {
+                AddImmutableIdHeader(config.Headers);
+            }).GetAwaiter().GetResult())
             using (var output = new MemoryStream())
             {
                 input.CopyTo(output);
@@ -1736,12 +1761,18 @@ WHERE CountryCode=@COUNTRY AND ReportMonth=@MONTH;";
         {
             if (string.IsNullOrWhiteSpace(destinationFolder)) destinationFolder = tempFolder;
             Directory.CreateDirectory(destinationFolder);
-            AttachmentCollectionResponse response = graphService.Users[mailboxAddress].Messages[messageId].Attachments.GetAsync().GetAwaiter().GetResult();
+            AttachmentCollectionResponse response = graphService.Users[mailboxAddress].Messages[messageId].Attachments.GetAsync(config =>
+            {
+                AddImmutableIdHeader(config.Headers);
+            }).GetAwaiter().GetResult();
             foreach (Microsoft.Graph.Models.Attachment item in response?.Value ?? new List<Microsoft.Graph.Models.Attachment>())
             {
                 if (!(item is FileAttachment file) || !(file.Name ?? "").StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) continue;
                 if (file.ContentBytes == null && !string.IsNullOrWhiteSpace(file.Id))
-                    file = graphService.Users[mailboxAddress].Messages[messageId].Attachments[file.Id].GetAsync().GetAwaiter().GetResult() as FileAttachment;
+                    file = graphService.Users[mailboxAddress].Messages[messageId].Attachments[file.Id].GetAsync(config =>
+                    {
+                        AddImmutableIdHeader(config.Headers);
+                    }).GetAwaiter().GetResult() as FileAttachment;
                 if (file?.ContentBytes == null) throw new InvalidOperationException("Attachment content is empty : " + item.Name);
                 string path = Path.Combine(destinationFolder, CleanFileName(file.Name));
                 File.WriteAllBytes(path, file.ContentBytes);
@@ -1912,21 +1943,150 @@ WHERE CountryCode=@COUNTRY AND ReportMonth=@MONTH;";
             return current.Message ?? "";
         }
 
-        private void MarkMessageAsProcessed(string messageId)
+        private bool TryMarkMessageAsProcessed(
+            string messageId,
+            bool markAsRead)
         {
-            var processedProperty = new SingleValueLegacyExtendedProperty
+            const int maximumAttempts = 3;
+            Exception lastException = null;
+
+            for (int attempt = 1; attempt <= maximumAttempts; attempt++)
             {
-                Id = processedPropertyId,
-                Value = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ", CultureInfo.InvariantCulture)
-            };
-            var update = new Message
-            {
-                SingleValueExtendedProperties = new List<SingleValueLegacyExtendedProperty>
+                try
                 {
-                    processedProperty
+                    var processedProperty =
+                        new SingleValueLegacyExtendedProperty
+                        {
+                            Id = processedPropertyId,
+                            Value = DateTime.UtcNow.ToString(
+                                "yyyy-MM-ddTHH:mm:ss.fffZ",
+                                CultureInfo.InvariantCulture)
+                        };
+
+                    var update = new Message
+                    {
+                        SingleValueExtendedProperties =
+                            new List<SingleValueLegacyExtendedProperty>
+                            {
+                                processedProperty
+                            }
+                    };
+
+                    if (markAsRead)
+                    {
+                        update.IsRead = true;
+                    }
+
+                    graphService.Users[mailboxAddress]
+                        .Messages[messageId]
+                        .PatchAsync(update, config =>
+                        {
+                            AddImmutableIdHeader(config.Headers);
+                        })
+                        .GetAwaiter()
+                        .GetResult();
+
+                    return true;
                 }
-            };
-            graphService.Users[mailboxAddress].Messages[messageId].PatchAsync(update).GetAwaiter().GetResult();
+                catch (Exception ex) when (IsChangeKeyConflict(ex))
+                {
+                    lastException = ex;
+                    if (attempt >= maximumAttempts) break;
+
+                    int delayMilliseconds = attempt * 500;
+                    WriteLog(
+                        "       Temporary Graph change-key conflict. " +
+                        "Attempt " + attempt + "/" + maximumAttempts +
+                        ". Retry in " + delayMilliseconds + " ms.");
+                    System.Threading.Thread.Sleep(delayMilliseconds);
+                }
+                catch (Exception ex) when (IsGraphObjectNotFound(ex))
+                {
+                    WriteLog(
+                        "       Warning: Graph message is no longer " +
+                        "available while adding IMCAProcessed. " +
+                        "Message ID : " + messageId +
+                        ". SQL processing is kept.");
+                    return false;
+                }
+                catch (Exception ex)
+                {
+                    lastException = ex;
+                    break;
+                }
+            }
+
+            string error = mailboxAddress +
+                " - Unable to add IMCAProcessed" +
+                (markAsRead ? " and mark the message as read" : "") +
+                ". Message ID: " + messageId + " - " +
+                GetInnermostExceptionMessage(lastException);
+
+            WriteLog("       Warning: " + error);
+            SendTechnicalAlert(
+                nameof(TryMarkMessageAsProcessed),
+                error,
+                "MESSAGE TRACKING");
+            return false;
+        }
+
+        private static bool IsChangeKeyConflict(Exception exception)
+        {
+            Exception current = exception;
+            while (current != null)
+            {
+                string message = current.Message ?? "";
+                if (message.IndexOf(
+                        "change key",
+                        StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    message.IndexOf(
+                        "ErrorIrresolvableConflict",
+                        StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    message.IndexOf(
+                        "PreconditionFailed",
+                        StringComparison.OrdinalIgnoreCase) >= 0)
+                    return true;
+
+                if (current is ApiException apiException &&
+                    (apiException.ResponseStatusCode == 409 ||
+                     apiException.ResponseStatusCode == 412))
+                    return true;
+
+                current = current.InnerException;
+            }
+            return false;
+        }
+
+        private static bool IsGraphObjectNotFound(Exception exception)
+        {
+            Exception current = exception;
+            while (current != null)
+            {
+                string message = current.Message ?? "";
+                if (message.IndexOf(
+                        "specified object was not found",
+                        StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    message.IndexOf(
+                        "not found in the store",
+                        StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    message.IndexOf(
+                        "failed to get the correct properties",
+                        StringComparison.OrdinalIgnoreCase) >= 0)
+                    return true;
+
+                if (current is ApiException apiException &&
+                    apiException.ResponseStatusCode == 404)
+                    return true;
+
+                current = current.InnerException;
+            }
+            return false;
+        }
+
+        private static void AddImmutableIdHeader(
+            RequestHeaders headers)
+        {
+            headers.Add("Prefer", immutableIdPreference);
         }
 
         private static bool IsMessageAlreadyProcessed(Message message)
@@ -1943,13 +2103,19 @@ WHERE CountryCode=@COUNTRY AND ReportMonth=@MONTH;";
 
         private void MarkAsRead(string messageId)
         {
-            graphService.Users[mailboxAddress].Messages[messageId].PatchAsync(new Message { IsRead = true }).GetAwaiter().GetResult();
+            graphService.Users[mailboxAddress].Messages[messageId].PatchAsync(
+                new Message { IsRead = true },
+                config => AddImmutableIdHeader(config.Headers))
+                .GetAwaiter().GetResult();
         }
 
         private void MoveMessage(string messageId, string destinationId)
         {
             var body = new Microsoft.Graph.Users.Item.Messages.Item.Move.MovePostRequestBody { DestinationId = destinationId };
-            graphService.Users[mailboxAddress].Messages[messageId].Move.PostAsync(body).GetAwaiter().GetResult();
+            graphService.Users[mailboxAddress].Messages[messageId].Move.PostAsync(
+                body,
+                config => AddImmutableIdHeader(config.Headers))
+                .GetAwaiter().GetResult();
         }
 
         private int InsertComment(int issueId, string comment, string commentName, int emailDatabaseId, string messageWebLink = "")
@@ -1978,51 +2144,27 @@ WHERE CountryCode=@COUNTRY AND ReportMonth=@MONTH;";
             LinkEmailToComment(emailDatabaseId, commentId);
             LinkEmailAttachmentsToComment(emailDatabaseId, commentId);
 
+            // Le webLink est déjà demandé dans GetCompleteMessage().
+            // Aucun second appel Graph n'est effectué ici.
             if (string.IsNullOrWhiteSpace(messageWebLink))
-                messageWebLink = GetMessageWebLinkFromGraph(emailDatabaseId);
+            {
+                WriteLog(
+                    "       Warning: webLink was not returned with the " +
+                    "original Graph message for comment ID " +
+                    commentId +
+                    ". T_comment.fichier was not updated.");
+            }
+            else
+            {
+                UpdateCommentWebLink(commentId, messageWebLink);
+            }
 
-            UpdateCommentWebLink(commentId, messageWebLink);
-            WriteLog("       Email database ID " + emailDatabaseId + " linked to comment ID " + commentId + " for issue " + issueId);
+            WriteLog(
+                "       Email database ID " + emailDatabaseId +
+                " linked to comment ID " + commentId +
+                " for issue " + issueId);
+
             return commentId;
-        }
-
-        private string GetMessageWebLinkFromGraph(int emailDatabaseId)
-        {
-            const string sql = @"SELECT ISNULL(EwsID,'') AS GraphMessageId,
-       ISNULL(boite_mail,'') AS Mailbox
-FROM dbo.T_contenu_email
-WHERE id=@EMAIL_ID;";
-
-            string graphMessageId = "";
-            string sourceMailbox = "";
-            using (var connection = new SqlConnection(sql_connexion))
-            using (var command = new SqlCommand(sql, connection))
-            {
-                command.CommandTimeout = 300;
-                command.Parameters.Add("@EMAIL_ID", SqlDbType.Int).Value = emailDatabaseId;
-                connection.Open();
-                using (SqlDataReader reader = command.ExecuteReader(CommandBehavior.SingleRow))
-                {
-                    if (!reader.Read())
-                        throw new InvalidOperationException("T_contenu_email row not found while resolving webLink. ID : " + emailDatabaseId);
-
-                    graphMessageId = Convert.ToString(reader["GraphMessageId"]).Trim();
-                    sourceMailbox = Convert.ToString(reader["Mailbox"]).Trim();
-                }
-            }
-
-            if (string.IsNullOrWhiteSpace(graphMessageId) || string.IsNullOrWhiteSpace(sourceMailbox))
-            {
-                WriteLog("       Warning: Graph message ID or source mailbox is empty for email database ID " + emailDatabaseId + ".");
-                return "";
-            }
-
-            Message graphMessage = graphService.Users[sourceMailbox].Messages[graphMessageId].GetAsync(config =>
-            {
-                config.QueryParameters.Select = new[] { "webLink" };
-            }).GetAwaiter().GetResult();
-
-            return graphMessage?.WebLink ?? "";
         }
 
         private void UpdateCommentWebLink(int commentId, string messageWebLink)
@@ -2076,6 +2218,7 @@ IF @@ROWCOUNT=0 THROW 50001, 'T_contenu_email row not found while linking commen
             AttachmentCollectionResponse response = graphService.Users[mailboxAddress]
                 .Messages[graphMessageId].Attachments.GetAsync(config =>
                 {
+                    AddImmutableIdHeader(config.Headers);
                     config.QueryParameters.Top = 999;
                     config.QueryParameters.Select = new[] { "id", "name" };
                 }).GetAwaiter().GetResult();

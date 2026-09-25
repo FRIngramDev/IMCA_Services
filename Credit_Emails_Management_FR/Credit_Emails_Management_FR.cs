@@ -12,6 +12,7 @@ using System.Linq;
 using System.Net;
 using System.Net.Http;
 using System.Text.RegularExpressions;
+using System.Xml;
 namespace CREDIT_EMAILS_MANAGEMENT_FR
 {
     public class CREDIT_EMAILS_MANAGEMENT_FR
@@ -20,6 +21,7 @@ namespace CREDIT_EMAILS_MANAGEMENT_FR
         private const string immutable_id_preference = "IdType=\"ImmutableId\"";
         private const string processed_property_id = "String {8BF48C6E-2C72-46F0-965D-919A7C2E54A9} Name IMCACreditProcessed";
         private const string credit_card_mailbox_name = "Cartes Bleues";
+        private const string score_fraud_mailbox_name = "Surveillance ScoreFraud";
         private const int retry_delay_hours = 2;
         private string country = "", name = "", active = "", debug = "", start_date_scan = "", number_Of_Mails = "10";
         private string sharedmailbox_folder_in = "Inbox", sharedmailbox_folder_out = "Archives";
@@ -29,6 +31,10 @@ namespace CREDIT_EMAILS_MANAGEMENT_FR
         private string email_in_case_of_technical_issue_parameter_global = "", email_in_case_of_technical_issue = "";
         private string fr_graph_send_as_parameter_global = "", fr_graph_send_as = "";
         private string credit_managers_contentieux = "", contentieux_recipients = "";
+        private string path_archives = "";
+        private string dss_con_openrowset_parameter_global = "";
+        private string dss_con_openrowset = "";
+        private string uri_webservice = "";
         private HashSet<string> credit_managers_contentieux_list = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private string logsFolder = "", tempFolder = "", sessionName = "";
         private GraphServiceClient graphService;
@@ -70,6 +76,9 @@ namespace CREDIT_EMAILS_MANAGEMENT_FR
             public string credit_managers_contentieux { get; set; } = "";
 
             public string contentieux_recipients { get; set; } = "";
+            public string path_archives { get; set; } = "";
+            public string dss_con_openrowset_parameter_global { get; set; } = "";
+            public string uri_webservice { get; set; } = "";
         }
 
         private sealed class MailboxConfiguration
@@ -272,11 +281,15 @@ namespace CREDIT_EMAILS_MANAGEMENT_FR
             fr_graph_send_as_parameter_global = i.fr_graph_send_as_parameter_global ?? "";
             credit_managers_contentieux = i.credit_managers_contentieux ?? "";
             contentieux_recipients = i.contentieux_recipients ?? "";
+            path_archives = i.path_archives ?? "";
+            dss_con_openrowset_parameter_global = i.dss_con_openrowset_parameter_global ?? "";
+            uri_webservice = i.uri_webservice ?? "";
             sql_connexion = GetImcaParameter(imca, sql_connexion_parameter_global);
             sql_gestion_cdes = GetImcaParameter(imca, sql_gestion_cdes_parameter_global);
             sql_dss_copie = GetImcaParameter(imca, sql_dss_copie_parameter_global);
             email_in_case_of_technical_issue = GetImcaParameter(imca, email_in_case_of_technical_issue_parameter_global);
             fr_graph_send_as = GetImcaParameter(imca, fr_graph_send_as_parameter_global);
+            dss_con_openrowset = GetImcaParameter(imca, dss_con_openrowset_parameter_global);
             credit_managers_contentieux_list = SplitQuotedValues(credit_managers_contentieux).ToHashSet(StringComparer.OrdinalIgnoreCase);
         }
 
@@ -312,14 +325,21 @@ namespace CREDIT_EMAILS_MANAGEMENT_FR
             mailboxFilterDate = b.FilterDate;
             refreshMinutes = b.RefreshMinutes;
             lastRefresh = b.LastRefresh;
-            inputFolderName = b.InputFolder;
-            outputFolderName = b.OutputFolder;
+            inputFolderName = string.IsNullOrWhiteSpace(b.InputFolder) ? sharedmailbox_folder_in : b.InputFolder;
+            outputFolderName = string.IsNullOrWhiteSpace(b.OutputFolder) ? sharedmailbox_folder_out : b.OutputFolder;
             allowedSenders = SplitValues(b.SenderAllowed).ToHashSet(StringComparer.OrdinalIgnoreCase);
         }
 
         private DateTime? ReadCurrentMailbox()
         {
             ValidateMailboxConfiguration();
+
+            if (mailboxName.Equals(
+                    score_fraud_mailbox_name,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                return ReadScoreFraudMailbox();
+            }
 
             if (!mailboxName.Equals(
                     credit_card_mailbox_name,
@@ -417,6 +437,478 @@ namespace CREDIT_EMAILS_MANAGEMENT_FR
             return latest;
         }
 
+        private DateTime? ReadScoreFraudMailbox()
+        {
+            if (string.IsNullOrWhiteSpace(path_archives))
+            {
+                throw new InvalidOperationException(
+                    "path_archives is empty for Surveillance ScoreFraud");
+            }
+
+            Directory.CreateDirectory(path_archives);
+
+            MailFolder input = GetRequiredFolder(inputFolderName);
+            MailFolder output = GetRequiredFolder(outputFolderName);
+            List<Message> messages = GetCandidateMessages(input.Id);
+
+            WriteLog(
+                "       ScoreFraud email(s) found for processing : " +
+                messages.Count);
+
+            DateTime? latest = null;
+            int archived = 0;
+            int deleted = 0;
+            int xmlFiles = 0;
+            int errors = 0;
+
+            foreach (Message summary in messages)
+            {
+                DateTime receptionDate =
+                    summary.ReceivedDateTime?.LocalDateTime ?? DateTime.Now;
+
+                if (!latest.HasValue || receptionDate > latest.Value)
+                {
+                    latest = receptionDate;
+                }
+
+                try
+                {
+                    Message email = GetScoreFraudMessage(summary.Id);
+
+                    if (email.ReceivedDateTime.HasValue)
+                    {
+                        receptionDate =
+                            email.ReceivedDateTime.Value.LocalDateTime;
+                    }
+
+                    WriteLog(
+                        "       Subject : " +
+                        (email.Subject ?? "<no subject>"));
+
+                    AttachmentCollectionResponse response =
+                        GetScoreFraudAttachments(email.Id);
+
+                    bool containsCsv = false;
+                    int messageXmlFiles = 0;
+
+                    foreach (Microsoft.Graph.Models.Attachment attachment
+                        in response?.Value
+                        ?? new List<Microsoft.Graph.Models.Attachment>())
+                    {
+                        string attachmentName = attachment?.Name ?? "";
+
+                        // Comportement historique : recherche de la chaîne
+                        // .CSV ou .XML dans le nom, sans exiger que ce soit
+                        // l'extension finale.
+                        if (attachmentName.IndexOf(
+                                ".CSV",
+                                StringComparison.OrdinalIgnoreCase) >= 0)
+                        {
+                            containsCsv = true;
+                        }
+
+                        if (attachmentName.IndexOf(
+                                ".XML",
+                                StringComparison.OrdinalIgnoreCase) >= 0)
+                        {
+                            FileAttachment file =
+                                GetFileAttachmentContent(
+                                    email.Id,
+                                    attachment);
+
+                            if (file?.ContentBytes == null)
+                            {
+                                throw new InvalidDataException(
+                                    "Attachment content is empty : " +
+                                    attachmentName);
+                            }
+
+                            string safeAttachmentName =
+                                CleanFileName(attachmentName);
+
+                            string workingXmlPath =
+                                Path.Combine(
+                                    tempFolder,
+                                    safeAttachmentName);
+
+                            Directory.CreateDirectory(tempFolder);
+                            File.WriteAllBytes(
+                                workingXmlPath,
+                                file.ContentBytes);
+
+                            WriteLog(
+                                "       ScoreFraud XML attachment downloaded : " +
+                                workingXmlPath);
+
+                            string archivedXmlPath =
+                                TraitementFichiersXmlNew(
+                                    workingXmlPath,
+                                    safeAttachmentName,
+                                    receptionDate);
+
+                            messageXmlFiles++;
+                            xmlFiles++;
+
+                            WriteLog(
+                                "       ScoreFraud XML processing completed : " +
+                                archivedXmlPath);
+                        }
+                    }
+
+                    if (containsCsv)
+                    {
+                        // Équivalent Graph du DeleteMode.HardDelete historique.
+                        PermanentlyDeleteMessage(email.Id);
+                        deleted++;
+
+                        WriteLog(
+                            "       Message permanently deleted because " +
+                            "a CSV attachment was found");
+                    }
+                    else
+                    {
+                        // Comportement historique : lecture puis déplacement
+                        // dans le dossier Archives.
+                        MarkMessageAsReadAndMove(
+                            email.Id,
+                            output.Id);
+
+                        archived++;
+
+                        WriteLog(
+                            "       Message marked as read and moved to " +
+                            outputFolderName +
+                            " - XML attachment(s) : " +
+                            messageXmlFiles);
+                    }
+
+                }
+                catch (Exception ex)
+                {
+                    errors++;
+
+                    WriteLog(
+                        "       ScoreFraud email processing error : " +
+                        ex.Message);
+
+                    SendTechnicalAlert(
+                        nameof(ReadScoreFraudMailbox),
+                        mailboxAddress +
+                        " - Mail : " +
+                        (summary.Subject ?? "<no subject>") +
+                        " - " +
+                        ex.Message,
+                        "SCOREFRAUD EMAIL PROCESSING");
+                }
+            }
+
+            WriteLog(
+                "       ScoreFraud email processing summary - Found : " +
+                messages.Count +
+                " - Archived : " + archived +
+                " - Permanently deleted : " + deleted +
+                " - XML files saved : " + xmlFiles +
+                " - Errors : " + errors);
+
+            return latest;
+        }
+
+        private string TraitementFichiersXmlNew(string fullPath, string fileName, DateTime graphReceptionDate)
+        {
+            if (string.IsNullOrWhiteSpace(fullPath) || !File.Exists(fullPath)) throw new FileNotFoundException("ScoreFraud XML file not found", fullPath);
+            if (string.IsNullOrWhiteSpace(uri_webservice)) throw new InvalidOperationException("uri_webservice is empty");
+            if (string.IsNullOrWhiteSpace(dss_con_openrowset)) throw new InvalidOperationException("dss_con_openrowset is empty");
+
+            string period = ExtractHistoricalScoreFraudPeriod(fileName);
+            DateTime archiveDate = DateTime.Now;
+            var document = new XmlDocument();
+            document.Load(fullPath);
+            XmlNodeList reports = document.DocumentElement?.SelectNodes("//reports/report");
+            if (reports == null || reports.Count == 0) throw new InvalidDataException("No //reports/report node found in " + fileName);
+
+            using (var connection = new SqlConnection(sql_connexion))
+            {
+                connection.Open();
+                ExecuteHistoricalSql(connection, "DELETE FROM dbo.T_messages_ORT WHERE date_reception IS NULL;");
+                foreach (XmlNode report in reports)
+                {
+                    InsertHistoricalScoreFraudReport(connection, "dbo.T_messages_ORT", report);
+                    InsertHistoricalScoreFraudReport(connection, "dbo.T_messages_ORT_TRANSFERT_CAPGEMINI", report);
+                }
+                ExecuteHistoricalSql(connection, "UPDATE dbo.T_messages_ORT SET top_selection=NULL,note=0 WHERE date_reception IS NULL; UPDATE dbo.T_messages_ORT_TRANSFERT_CAPGEMINI SET top_selection=NULL,note=0 WHERE date_reception IS NULL;");
+                EnrichHistoricalScoreFraudRows(connection);
+                string[] historicalQueries = new[]
+                {
+                @"UPDATE T_messages_ORT_TRANSFERT_CAPGEMINI SET id_rapport=(select id_rapport from T_messages_ORT where  T_messages_ORT.date_reception is null and  T_messages_ORT.num_siren=T_messages_ORT_TRANSFERT_CAPGEMINI.num_siren), valeur_score=(select valeur_score from T_messages_ORT where  T_messages_ORT.date_reception is null and  T_messages_ORT.num_siren=T_messages_ORT_TRANSFERT_CAPGEMINI.num_siren) WHERE  date_reception is null ",
+                @"UPDATE T_messages_ORT SET top_selection='O'  WHERE(date_reception Is null) AND EXISTS(Select 1 FROM T_GENERAL as gen WHERE (NB_PRIVILEGE >0 OR NB_PRIVILEGE_TRESOR>0) AND T_messages_ORT.id_rapport = gen.id_rapport)",
+                @"UPDATE T_messages_ORT_TRANSFERT_CAPGEMINI SET top_selection='O'  WHERE(date_reception Is null) AND EXISTS(Select 1 FROM T_GENERAL as gen WHERE (NB_PRIVILEGE >0 OR NB_PRIVILEGE_TRESOR>0) AND T_messages_ORT_TRANSFERT_CAPGEMINI.id_rapport = gen.id_rapport)",
+                @"UPDATE T_messages_ORT SET top_selection='O'  WHERE date_reception Is null AND EXISTS (SELECT 1 FROM T_BODACC as Bodac WHERE lower(ref_evenement) = 'modification sur les représentants' AND datediff(month,date_parution,getdate())<=6              AND T_messages_ORT.id_rapport = Bodac.id_rapport) AND EXISTS (SELECT 1 FROM T_BODACC as Bodac WHERE lower(ref_evenement) = 'modification de l''adresse de l''établissement principal'              AND datediff(month,date_parution,getdate())<=6 AND T_messages_ORT.id_rapport = Bodac.id_rapport)",
+                @"UPDATE T_messages_ORT_TRANSFERT_CAPGEMINI SET top_selection='O'  WHERE date_reception Is null AND EXISTS (SELECT 1 FROM T_BODACC as Bodac WHERE lower(ref_evenement) = 'modification sur les représentants' AND datediff(month,date_parution,getdate())<=6              AND T_messages_ORT_TRANSFERT_CAPGEMINI.id_rapport = Bodac.id_rapport) AND EXISTS (SELECT 1 FROM T_BODACC as Bodac WHERE lower(ref_evenement) = 'modification de l''adresse de l''établissement principal'              AND datediff(month,date_parution,getdate())<=6 AND T_messages_ORT_TRANSFERT_CAPGEMINI.id_rapport = Bodac.id_rapport)",
+                @"UPDATE T_messages_ORT SET top_selection='O'  WHERE date_reception Is null AND EXISTS (SELECT 1 FROM T_BODACC as Bodac WHERE lower(ref_evenement) = 'modification sur les représentants' AND datediff(month,date_parution,getdate())<=6              AND T_messages_ORT.id_rapport = Bodac.id_rapport)",
+                @"UPDATE T_messages_ORT_TRANSFERT_CAPGEMINI SET top_selection='O'  WHERE date_reception Is null AND EXISTS (SELECT 1 FROM T_BODACC as Bodac WHERE lower(ref_evenement) = 'modification sur les représentants' AND datediff(month,date_parution,getdate())<=6              AND T_messages_ORT_TRANSFERT_CAPGEMINI.id_rapport = Bodac.id_rapport)",
+                @"UPDATE T_messages_ORT SET top_selection='O'  WHERE(date_reception Is null) AND EXISTS(Select 1 FROM T_GENERAL as gen WHERE (PROC_COLLECTIVE ='O') AND T_messages_ORT.id_rapport = gen.id_rapport)",
+                @"UPDATE T_messages_ORT_TRANSFERT_CAPGEMINI SET top_selection='O'  WHERE(date_reception Is null) AND EXISTS(Select 1 FROM T_GENERAL as gen WHERE (PROC_COLLECTIVE ='O') AND T_messages_ORT_TRANSFERT_CAPGEMINI.id_rapport = gen.id_rapport)",
+                @"UPDATE T_messages_ORT SET top_selection='N' WHERE(date_reception Is null) AND cast(anc_cotation as varchar) = cast(new_cotation as varchar) AND ( EXISTS(Select 1 FROM T_GENERAL as gen WHERE (PROC_COLLECTIVE ='N' OR PROC_COLLECTIVE IS NULL) AND T_messages_ORT.id_rapport = gen.id_rapport) AND EXISTS(Select 1 FROM T_GENERAL as gen WHERE (NB_PRIVILEGE =0 OR NB_PRIVILEGE IS NULL) AND (NB_PRIVILEGE_TRESOR=0 OR NB_PRIVILEGE_TRESOR IS NULL)            AND T_messages_ORT.id_rapport = gen.id_rapport) AND NOT EXISTS (SELECT 1 FROM T_BODACC as Bodac WHERE lower(ref_evenement) = 'modification sur les représentants' AND datediff(month,date_parution,getdate())<=6              AND T_messages_ORT.id_rapport = Bodac.id_rapport)    )",
+                @"UPDATE T_messages_ORT_TRANSFERT_CAPGEMINI SET top_selection='N' WHERE(date_reception Is null) AND cast(anc_cotation as varchar) = cast(new_cotation as varchar) AND ( EXISTS(Select 1 FROM T_GENERAL as gen WHERE (PROC_COLLECTIVE ='N' OR PROC_COLLECTIVE IS NULL) AND T_messages_ORT_TRANSFERT_CAPGEMINI.id_rapport = gen.id_rapport) AND EXISTS(Select 1 FROM T_GENERAL as gen WHERE (NB_PRIVILEGE =0 OR NB_PRIVILEGE IS NULL) AND (NB_PRIVILEGE_TRESOR=0 OR NB_PRIVILEGE_TRESOR IS NULL)            AND T_messages_ORT_TRANSFERT_CAPGEMINI.id_rapport = gen.id_rapport) AND NOT EXISTS (SELECT 1 FROM T_BODACC as Bodac WHERE lower(ref_evenement) = 'modification sur les représentants' AND datediff(month,date_parution,getdate())<=6              AND T_messages_ORT_TRANSFERT_CAPGEMINI.id_rapport = Bodac.id_rapport)    )",
+                @"UPDATE T_messages_ORT SET top_selection='N' WHERE(date_reception Is null) AND (new_cotation<>'NA' AND anc_cotation<>'NA') AND cast(anc_cotation as integer) > cast(new_cotation as integer) AND cast(new_cotation as integer)>=7 AND ( EXISTS(Select 1 FROM T_GENERAL as gen WHERE (PROC_COLLECTIVE ='N' OR PROC_COLLECTIVE IS NULL) AND T_messages_ORT.id_rapport = gen.id_rapport) AND EXISTS(Select 1 FROM T_GENERAL as gen WHERE (NB_PRIVILEGE =0 OR NB_PRIVILEGE IS NULL) AND( NB_PRIVILEGE_TRESOR=0 OR NB_PRIVILEGE_TRESOR IS NULL)            AND T_messages_ORT.id_rapport = gen.id_rapport) AND NOT EXISTS (SELECT 1 FROM T_BODACC as Bodac WHERE lower(ref_evenement) = 'modification sur les représentants' AND datediff(month,date_parution,getdate())<=6              AND T_messages_ORT.id_rapport = Bodac.id_rapport) AND NOT EXISTS (SELECT 1 FROM T_BODACC as Bodac WHERE lower(ref_evenement) = 'modification de l''adresse de l''établissement principal'              AND datediff(month,date_parution,getdate())<=6  AND T_messages_ORT.id_rapport = Bodac.id_rapport)    )",
+                @"UPDATE T_messages_ORT_TRANSFERT_CAPGEMINI SET top_selection='N' WHERE(date_reception Is null) AND (new_cotation<>'NA' AND anc_cotation<>'NA') AND cast(anc_cotation as integer) > cast(new_cotation as integer) AND cast(new_cotation as integer)>=7 AND ( EXISTS(Select 1 FROM T_GENERAL as gen WHERE (PROC_COLLECTIVE ='N' OR PROC_COLLECTIVE IS NULL) AND T_messages_ORT_TRANSFERT_CAPGEMINI.id_rapport = gen.id_rapport) AND EXISTS(Select 1 FROM T_GENERAL as gen WHERE (NB_PRIVILEGE =0 OR NB_PRIVILEGE IS NULL) AND( NB_PRIVILEGE_TRESOR=0 OR NB_PRIVILEGE_TRESOR IS NULL)            AND T_messages_ORT_TRANSFERT_CAPGEMINI.id_rapport = gen.id_rapport) AND NOT EXISTS (SELECT 1 FROM T_BODACC as Bodac WHERE lower(ref_evenement) = 'modification sur les représentants' AND datediff(month,date_parution,getdate())<=6              AND T_messages_ORT_TRANSFERT_CAPGEMINI.id_rapport = Bodac.id_rapport) AND NOT EXISTS (SELECT 1 FROM T_BODACC as Bodac WHERE lower(ref_evenement) = 'modification de l''adresse de l''établissement principal'              AND datediff(month,date_parution,getdate())<=6  AND T_messages_ORT_TRANSFERT_CAPGEMINI.id_rapport = Bodac.id_rapport)    )",
+                @"UPDATE T_messages_ORT SET top_selection='O' WHERE cast(anc_cotation as integer) > cast(new_cotation as integer) AND cast(new_cotation as integer)<=6 AND date_reception is null AND (new_cotation<>'NA' AND anc_cotation<>'NA')",
+                @"UPDATE T_messages_ORT_TRANSFERT_CAPGEMINI SET top_selection='O' WHERE cast(anc_cotation as integer) > cast(new_cotation as integer) AND cast(new_cotation as integer)<=6 AND date_reception is null AND (new_cotation<>'NA' AND anc_cotation<>'NA')",
+                @"UPDATE T_messages_ORT SET top_selection='O' WHERE  ( (new_cotation<>'NA' AND cast(new_cotation as integer) = 0) OR new_cotation = 'NA') AND date_reception is null",
+                @"UPDATE T_messages_ORT_TRANSFERT_CAPGEMINI SET top_selection='O' WHERE  ( (new_cotation<>'NA' AND cast(new_cotation as integer) = 0) OR new_cotation = 'NA') AND date_reception is null",
+                @"UPDATE T_messages_ORT SET client =(select TOP 1 dss.branch_customer_nbr from openrowset('SQLOLEDB', {OPENROWSET}, 'Select credit_limit,customer_location.branch_customer_nbr,tax_exempt_nbr FROM  customer_location  INNER JOIN customer ON customer_location.branch_nbr = dbo.customer.branch_nbr AND customer_location.customer_nbr = customer.customer_nbr WHERE (customer_location.suffix = ''000'') AND (customer_location.branch_nbr = ''21'' and StatusCustFlg <> ''D'')') dss where dss.tax_exempt_nbr like '%'+T_messages_ORT.num_siren+'%' order by credit_limit desc) WHERE top_selection='O' AND date_reception is null",
+                @"UPDATE T_messages_ORT_TRANSFERT_CAPGEMINI SET client =(select TOP 1 dss.branch_customer_nbr from openrowset('SQLOLEDB', {OPENROWSET}, 'Select credit_limit,customer_location.branch_customer_nbr,tax_exempt_nbr FROM  customer_location  INNER JOIN customer ON customer_location.branch_nbr = dbo.customer.branch_nbr AND customer_location.customer_nbr = customer.customer_nbr WHERE (customer_location.suffix = ''000'') AND (customer_location.branch_nbr = ''21'' and StatusCustFlg <> ''D'')') dss where dss.tax_exempt_nbr like '%'+T_messages_ORT_TRANSFERT_CAPGEMINI.num_siren+'%' order by credit_limit desc) WHERE top_selection='O' AND date_reception is null",
+                @"UPDATE T_messages_ORT SET top_selection='N' WHERE (client is null OR client ='' OR top_selection is null) AND date_reception is null",
+                @"UPDATE T_messages_ORT_TRANSFERT_CAPGEMINI SET top_selection='N' WHERE (client is null OR client ='' OR top_selection is null) AND date_reception is null",
+                @"update T_messages_ORT set credit_limit =(select dss.credit_limit from openrowset('SQLOLEDB', {OPENROWSET}, 'Select branch_customer_nbr,credit_limit FROM  customer where CompanyCd = ''FR''') dss where dss.branch_customer_nbr=T_messages_ORT.client) where top_selection='O' and date_reception is null",
+                @"update T_messages_ORT_TRANSFERT_CAPGEMINI set credit_limit =(select dss.credit_limit from openrowset('SQLOLEDB', {OPENROWSET}, 'Select branch_customer_nbr,credit_limit FROM  customer where CompanyCd = ''FR''') dss where dss.branch_customer_nbr=T_messages_ORT_TRANSFERT_CAPGEMINI.client) where top_selection='O' and date_reception is null",
+                @"update T_messages_ORT set credit_limit=0 where credit_limit is null and date_reception is null",
+                @"update T_messages_ORT_TRANSFERT_CAPGEMINI set credit_limit=0 where credit_limit is null and date_reception is null",
+                @"delete from T_calcul_note where indice in (select indice from T_messages_ORT where date_reception is null)",
+                @"delete from T_calcul_note_TRANSFERT_CAPGEMINI where indice in (select indice from T_messages_ORT_TRANSFERT_CAPGEMINI  where date_reception is null)",
+                @"UPDATE T_messages_ORT set top_selection='2' where date_reception is null AND (top_selection='O' and ((new_cotation<>'NA' AND cast(new_cotation as integer) = 0) OR new_cotation = 'NA')) OR (top_selection='O' AND EXISTS(Select 1 FROM T_GENERAL as gen WHERE PROC_COLLECTIVE ='O' AND T_messages_ORT.id_rapport = gen.id_rapport))",
+                @"UPDATE T_messages_ORT_TRANSFERT_CAPGEMINI set top_selection='2' where date_reception is null AND (top_selection='O' and ((new_cotation<>'NA' AND cast(new_cotation as integer) = 0) OR new_cotation = 'NA')) OR (top_selection='O' AND EXISTS(Select 1 FROM T_GENERAL as gen WHERE PROC_COLLECTIVE ='O' AND T_messages_ORT_TRANSFERT_CAPGEMINI.id_rapport = gen.id_rapport))",
+                @"update T_messages_ORT set top_selection='1' where top_selection='O' AND date_reception is null AND credit_limit>1 AND new_cotation<>'NA' AND cast(new_cotation as integer) <> 0 ",
+                @"update T_messages_ORT_TRANSFERT_CAPGEMINI set top_selection='1' where top_selection='O' AND date_reception is null AND credit_limit>1 AND new_cotation<>'NA' AND cast(new_cotation as integer) <> 0 ",
+                @"UPDATE T_messages_ORT SET top_selection='1' WHERE(date_reception Is null) AND top_selection='O' AND credit_limit>1 AND (( EXISTS(Select 1 FROM T_GENERAL as gen WHERE (NB_PRIVILEGE >0 OR NB_PRIVILEGE_TRESOR>0) AND T_messages_ORT.id_rapport = gen.id_rapport)   OR ( EXISTS (SELECT 1 FROM T_BODACC as Bodac WHERE lower(ref_evenement) = 'modification sur les représentants' AND datediff(month,date_parution,getdate())<=6              AND T_messages_ORT.id_rapport = Bodac.id_rapport)      AND  EXISTS (SELECT 1 FROM T_BODACC as Bodac WHERE lower(ref_evenement) = 'modification de l''adresse de l''établissement principal'              AND datediff(month,date_parution,getdate())<=6  AND T_messages_ORT.id_rapport = Bodac.id_rapport)      )   OR EXISTS(Select 1 FROM T_GENERAL as gen WHERE (PROC_COLLECTIVE ='O') AND T_messages_ORT.id_rapport = gen.id_rapport)    ))",
+                @"UPDATE T_messages_ORT_TRANSFERT_CAPGEMINI SET top_selection='1' WHERE(date_reception Is null) AND top_selection='O' AND credit_limit>1 AND (( EXISTS(Select 1 FROM T_GENERAL as gen WHERE (NB_PRIVILEGE >0 OR NB_PRIVILEGE_TRESOR>0) AND T_messages_ORT_TRANSFERT_CAPGEMINI.id_rapport = gen.id_rapport)   OR ( EXISTS (SELECT 1 FROM T_BODACC as Bodac WHERE lower(ref_evenement) = 'modification sur les représentants' AND datediff(month,date_parution,getdate())<=6              AND T_messages_ORT_TRANSFERT_CAPGEMINI.id_rapport = Bodac.id_rapport)      AND  EXISTS (SELECT 1 FROM T_BODACC as Bodac WHERE lower(ref_evenement) = 'modification de l''adresse de l''établissement principal'              AND datediff(month,date_parution,getdate())<=6  AND T_messages_ORT_TRANSFERT_CAPGEMINI.id_rapport = Bodac.id_rapport)      )   OR EXISTS(Select 1 FROM T_GENERAL as gen WHERE (PROC_COLLECTIVE ='O') AND T_messages_ORT_TRANSFERT_CAPGEMINI.id_rapport = gen.id_rapport)    ))",
+                @"UPDATE T_messages_ORT set montant_balance =(select dss.TotalBalanceAmt from openrowset('SQLOLEDB', {OPENROWSET}, 'Select branch_customer_nbr,TotalBalanceAmt FROM  customer') dss where dss.branch_customer_nbr=T_messages_ORT.client) where (top_selection='1' OR top_selection='2') and date_reception is null",
+                @"UPDATE T_messages_ORT_TRANSFERT_CAPGEMINI set montant_balance =(select dss.TotalBalanceAmt from openrowset('SQLOLEDB', {OPENROWSET}, 'Select branch_customer_nbr,TotalBalanceAmt FROM  customer') dss where dss.branch_customer_nbr=T_messages_ORT_TRANSFERT_CAPGEMINI.client) where (top_selection='1' OR top_selection='2') and date_reception is null",
+                @"UPDATE T_messages_ORT set montant_balance = 0 WHERE montant_balance is null AND date_reception is null AND (top_selection='1' OR top_selection='2')",
+                @"UPDATE T_messages_ORT_TRANSFERT_CAPGEMINI set montant_balance = 0 WHERE montant_balance is null AND date_reception is null AND (top_selection='1' OR top_selection='2')",
+                @"UPDATE T_messages_ORT set note=note+3 where top_selection='1' AND date_reception is null AND ( (new_cotation<>'NA' AND cast(new_cotation as integer) <=3) OR new_cotation ='NA')",
+                @"UPDATE T_messages_ORT_TRANSFERT_CAPGEMINI set note=note+3 where top_selection='1' AND date_reception is null AND ( (new_cotation<>'NA' AND cast(new_cotation as integer) <=3) OR new_cotation ='NA')",
+                @"insert into T_calcul_note select indice,'COTATION',3 from T_messages_ORT  where top_selection='1' AND date_reception is null AND ( (new_cotation<>'NA' AND cast(new_cotation as integer) <=3) OR new_cotation ='NA')",
+                @"insert into T_calcul_note_TRANSFERT_CAPGEMINI select indice,'COTATION',3 from T_messages_ORT_TRANSFERT_CAPGEMINI  where top_selection='1' AND date_reception is null AND ( (new_cotation<>'NA' AND cast(new_cotation as integer) <=3) OR new_cotation ='NA')",
+                @"UPDATE T_messages_ORT set note=note+2 where top_selection='1' AND date_reception is null AND cast(new_cotation as integer) >3 AND cast(new_cotation as integer) <=4 AND new_cotation<>'NA'",
+                @"UPDATE T_messages_ORT_TRANSFERT_CAPGEMINI set note=note+2 where top_selection='1' AND date_reception is null AND cast(new_cotation as integer) >3 AND cast(new_cotation as integer) <=4 AND new_cotation<>'NA'",
+                @"insert into T_calcul_note select indice,'COTATION',2 from T_messages_ORT  where top_selection='1' AND date_reception is null AND cast(new_cotation as integer) >3 AND cast(new_cotation as integer) <=4 AND new_cotation<>'NA'",
+                @"insert into T_calcul_note_TRANSFERT_CAPGEMINI select indice,'COTATION',2 from T_messages_ORT_TRANSFERT_CAPGEMINI  where top_selection='1' AND date_reception is null AND cast(new_cotation as integer) >3 AND cast(new_cotation as integer) <=4 AND new_cotation<>'NA'",
+                @"update T_messages_ORT set note=note+1 where top_selection='1' and cast(new_cotation as integer) >4 and cast(new_cotation as integer) <7 AND new_cotation<>'NA' and date_reception is null",
+                @"update T_messages_ORT_TRANSFERT_CAPGEMINI set note=note+1 where top_selection='1' and cast(new_cotation as integer) >4 and cast(new_cotation as integer) <7 AND new_cotation<>'NA' and date_reception is null",
+                @"insert into T_calcul_note select indice,'COTATION',1 from T_messages_ORT  where top_selection='1' and cast(new_cotation as integer) >4 and cast(new_cotation as integer) <7 AND new_cotation<>'NA' and date_reception is null",
+                @"insert into T_calcul_note_TRANSFERT_CAPGEMINI select indice,'COTATION',1 from T_messages_ORT_TRANSFERT_CAPGEMINI  where top_selection='1' and cast(new_cotation as integer) >4 and cast(new_cotation as integer) <7 AND new_cotation<>'NA' and date_reception is null",
+                @"update T_messages_ORT set note=note+2 where valeur_score>=6  and date_reception is null and  top_selection='1' ",
+                @"update T_messages_ORT_TRANSFERT_CAPGEMINI set note=note+2 where valeur_score>=6  and date_reception is null and  top_selection='1' ",
+                @"insert into T_calcul_note select indice,'SCORE',2 from T_messages_ORT  where valeur_score>=6  and date_reception is null and  top_selection='1'",
+                @"insert into T_calcul_note_TRANSFERT_CAPGEMINI select indice,'SCORE',2 from T_messages_ORT_TRANSFERT_CAPGEMINI  where valeur_score>=6  and date_reception is null and  top_selection='1'",
+                @"update T_messages_ORT set note=note+1 where valeur_score>=3 and valeur_score<6 and date_reception is null and  top_selection='1' ",
+                @"update T_messages_ORT_TRANSFERT_CAPGEMINI set note=note+1 where valeur_score>=3 and valeur_score<6 and date_reception is null and  top_selection='1' ",
+                @"insert into T_calcul_note select indice,'SCORE',1 from T_messages_ORT  where valeur_score>=3 and valeur_score<6 and date_reception is null and  top_selection='1' ",
+                @"insert into T_calcul_note_TRANSFERT_CAPGEMINI select indice,'SCORE',1 from T_messages_ORT_TRANSFERT_CAPGEMINI  where valeur_score>=3 and valeur_score<6 and date_reception is null and  top_selection='1' ",
+                @"update T_messages_ORT set note=note+1 where exists (select TOP 1 DECISIONNING_CREDIT from T_score INNER JOIN t_general ON T_score.ID_RAPPORT = T_General.ID_RAPPORT where DECISIONNING_CREDIT not like 'Accord|%' and T_general.S_SIREN = T_messages_ORT.num_siren ORDER BY T_score.date_score DESC) and date_reception is null and  top_selection='1' ",
+                @"update T_messages_ORT_TRANSFERT_CAPGEMINI set note=note+1 where exists (select TOP 1 DECISIONNING_CREDIT from T_score INNER JOIN t_general ON T_score.ID_RAPPORT = T_General.ID_RAPPORT where DECISIONNING_CREDIT not like 'Accord|%' and T_general.S_SIREN = T_messages_ORT_TRANSFERT_CAPGEMINI.num_siren ORDER BY T_score.date_score DESC) and date_reception is null and  top_selection='1' ",
+                @"insert into T_calcul_note select indice,'DECISIONNING',1 from T_messages_ORT  where exists (select TOP 1 DECISIONNING_CREDIT from T_score INNER JOIN t_general ON T_score.ID_RAPPORT = T_General.ID_RAPPORT where DECISIONNING_CREDIT not like 'Accord|%' and T_general.S_SIREN = T_messages_ORT.num_siren ORDER BY T_score.date_score DESC) and date_reception is null and  top_selection='1'",
+                @"insert into T_calcul_note_TRANSFERT_CAPGEMINI select indice,'DECISIONNING',1 from T_messages_ORT_TRANSFERT_CAPGEMINI  where exists (select TOP 1 DECISIONNING_CREDIT from T_score INNER JOIN t_general ON T_score.ID_RAPPORT = T_General.ID_RAPPORT where DECISIONNING_CREDIT not like 'Accord|%' and T_general.S_SIREN = T_messages_ORT_TRANSFERT_CAPGEMINI.num_siren ORDER BY T_score.date_score DESC) and date_reception is null and  top_selection='1'",
+                @"update T_messages_ORT set potientiel_accorde = (SELECT TOP 1 CASE WHEN CHARINDEX(' ke|', dbo.T_score.DECISIONNING_CREDIT) - CHARINDEX('jusque ', dbo.T_score.DECISIONNING_CREDIT) - 7 <= 0 THEN 0 ELSE SUBSTRING(DECISIONNING_CREDIT, CHARINDEX('jusque ', DECISIONNING_CREDIT) + 7, CHARINDEX(' ke|', DECISIONNING_CREDIT) - CHARINDEX('jusque ', DECISIONNING_CREDIT) - 7) END AS Montant FROM T_score INNER JOIN T_General ON T_score.ID_RAPPORT = T_General.ID_RAPPORT  WHERE T_General.S_SIREN = T_messages_ORT.num_siren and (DECISIONNING_CREDIT IS NOT NULL) AND (DECISIONNING_CREDIT LIKE 'Accord|potentiel jusque %') ORDER BY T_General.id_rapport) where top_selection='1' and date_reception is null",
+                @"update T_messages_ORT_TRANSFERT_CAPGEMINI set potientiel_accorde = (SELECT TOP 1 CASE WHEN CHARINDEX(' ke|', dbo.T_score.DECISIONNING_CREDIT) - CHARINDEX('jusque ', dbo.T_score.DECISIONNING_CREDIT) - 7 <= 0 THEN 0 ELSE SUBSTRING(DECISIONNING_CREDIT, CHARINDEX('jusque ', DECISIONNING_CREDIT) + 7, CHARINDEX(' ke|', DECISIONNING_CREDIT) - CHARINDEX('jusque ', DECISIONNING_CREDIT) - 7) END AS Montant FROM T_score INNER JOIN T_General ON T_score.ID_RAPPORT = T_General.ID_RAPPORT  WHERE T_General.S_SIREN = T_messages_ORT_TRANSFERT_CAPGEMINI.num_siren and (DECISIONNING_CREDIT IS NOT NULL) AND (DECISIONNING_CREDIT LIKE 'Accord|potentiel jusque %') ORDER BY T_General.id_rapport) where top_selection='1' and date_reception is null",
+                @"update T_messages_ORT set potientiel_accorde = 1000* potientiel_accorde where potientiel_accorde is not null and date_reception is null",
+                @"update T_messages_ORT_TRANSFERT_CAPGEMINI set potientiel_accorde = 1000* potientiel_accorde where potientiel_accorde is not null and date_reception is null",
+                @"update T_messages_ORT set note=note+2 where top_selection='1' and potientiel_accorde<credit_limit and potientiel_accorde is not null and date_reception is null",
+                @"update T_messages_ORT_TRANSFERT_CAPGEMINI set note=note+2 where top_selection='1' and potientiel_accorde<credit_limit and potientiel_accorde is not null and date_reception is null",
+                @"insert into T_calcul_note select indice,'DECISIONNING',2 from T_messages_ORT  where top_selection='1' and potientiel_accorde<credit_limit and potientiel_accorde is not null and date_reception is null",
+                @"insert into T_calcul_note_TRANSFERT_CAPGEMINI select indice,'DECISIONNING',2 from T_messages_ORT_TRANSFERT_CAPGEMINI  where top_selection='1' and potientiel_accorde<credit_limit and potientiel_accorde is not null and date_reception is null",
+                @"update T_messages_ORT set potientiel_accorde=0 where top_selection='1' and potientiel_accorde is null and date_reception is null",
+                @"update T_messages_ORT_TRANSFERT_CAPGEMINI set potientiel_accorde=0 where top_selection='1' and potientiel_accorde is null and date_reception is null",
+                @"UPDATE T_messages_ORT SET note=note+1  WHERE(date_reception Is null) AND  top_selection='1' AND EXISTS(Select 1 FROM T_GENERAL as gen WHERE (NB_PRIVILEGE >0 OR NB_PRIVILEGE_TRESOR>0) AND T_messages_ORT.id_rapport = gen.id_rapport)",
+                @"UPDATE T_messages_ORT_TRANSFERT_CAPGEMINI SET note=note+1  WHERE(date_reception Is null) AND  top_selection='1' AND EXISTS(Select 1 FROM T_GENERAL as gen WHERE (NB_PRIVILEGE >0 OR NB_PRIVILEGE_TRESOR>0) AND T_messages_ORT_TRANSFERT_CAPGEMINI.id_rapport = gen.id_rapport)",
+                @"insert into T_calcul_note select indice,'PRESENCE DE PRIVILEGES',1 from T_messages_ORT  where  date_reception is null  and  top_selection='1' ",
+                @"insert into T_calcul_note_TRANSFERT_CAPGEMINI select indice,'PRESENCE DE PRIVILEGES',1 from T_messages_ORT_TRANSFERT_CAPGEMINI  where  date_reception is null  and  top_selection='1' ",
+                @"update T_messages_ORT set note=note+1 where top_selection='1' and exists (select dss.OpenOrderAmt from openrowset('SQLOLEDB', {OPENROWSET}, 'select branch_customer_nbr,OpenOrderAmt from customer where OpenOrderAmt >0 and branch_nbr=''21''') dss where dss.branch_customer_nbr=T_messages_ORT.client) and date_reception is null",
+                @"update T_messages_ORT_TRANSFERT_CAPGEMINI set note=note+1 where top_selection='1' and exists (select dss.OpenOrderAmt from openrowset('SQLOLEDB', {OPENROWSET}, 'select branch_customer_nbr,OpenOrderAmt from customer where OpenOrderAmt >0 and branch_nbr=''21''') dss where dss.branch_customer_nbr=T_messages_ORT_TRANSFERT_CAPGEMINI.client) and date_reception is null",
+                @"insert into T_calcul_note select indice,'OPEN ORDER',1 from T_messages_ORT  where top_selection='1' and exists (select dss.OpenOrderAmt from openrowset('SQLOLEDB', {OPENROWSET}, 'select branch_customer_nbr,OpenOrderAmt from customer where OpenOrderAmt >0 and branch_nbr=''21''') dss where dss.branch_customer_nbr=T_messages_ORT.client) and date_reception is null",
+                @"insert into T_calcul_note_TRANSFERT_CAPGEMINI select indice,'OPEN ORDER',1 from T_messages_ORT_TRANSFERT_CAPGEMINI  where top_selection='1' and exists (select dss.OpenOrderAmt from openrowset('SQLOLEDB', {OPENROWSET}, 'select branch_customer_nbr,OpenOrderAmt from customer where OpenOrderAmt >0 and branch_nbr=''21''') dss where dss.branch_customer_nbr=T_messages_ORT_TRANSFERT_CAPGEMINI.client) and date_reception is null",
+                @"update T_messages_ORT set note=note+2 where top_selection='1' and exists (select dss.past_due_31_60 from openrowset('SQLOLEDB', {OPENROWSET}, 'select branch_customer_nbr,past_due_31_60, past_due_61_90, past_due_91 from customer where (past_due_31_60 > 0 or past_due_61_90 > 0 or past_due_91 > 0 ) and branch_nbr=''21''') dss where dss.branch_customer_nbr=T_messages_ORT.client) and date_reception is null",
+                @"update T_messages_ORT_TRANSFERT_CAPGEMINI set note=note+2 where top_selection='1' and exists (select dss.past_due_31_60 from openrowset('SQLOLEDB', {OPENROWSET}, 'select branch_customer_nbr,past_due_31_60, past_due_61_90, past_due_91 from customer where (past_due_31_60 > 0 or past_due_61_90 > 0 or past_due_91 > 0 ) and branch_nbr=''21''') dss where dss.branch_customer_nbr=T_messages_ORT_TRANSFERT_CAPGEMINI.client) and date_reception is null",
+                @"insert into T_calcul_note select indice,'BALANCE AGEES IMFR',2 from T_messages_ORT  where top_selection='1' and exists (select dss.past_due_31_60 from openrowset('SQLOLEDB', {OPENROWSET}, 'select branch_customer_nbr,past_due_31_60, past_due_61_90, past_due_91 from customer where (past_due_31_60 > 0 or past_due_61_90 > 0 or past_due_91 > 0 ) and branch_nbr=''21''') dss where dss.branch_customer_nbr=T_messages_ORT.client) and date_reception is null",
+                @"insert into T_calcul_note_TRANSFERT_CAPGEMINI select indice,'BALANCE AGEES IMFR',2 from T_messages_ORT_TRANSFERT_CAPGEMINI  where top_selection='1' and exists (select dss.past_due_31_60 from openrowset('SQLOLEDB', {OPENROWSET}, 'select branch_customer_nbr,past_due_31_60, past_due_61_90, past_due_91 from customer where (past_due_31_60 > 0 or past_due_61_90 > 0 or past_due_91 > 0 ) and branch_nbr=''21''') dss where dss.branch_customer_nbr=T_messages_ORT_TRANSFERT_CAPGEMINI.client) and date_reception is null",
+                @"update T_messages_ORT set note=note+1 where top_selection='1' and exists (select dss.past_due_16_30 from openrowset('SQLOLEDB', {OPENROWSET}, 'select branch_customer_nbr,past_due_16_30 from customer where past_due_16_30 >0 and branch_nbr=''21''') dss where dss.branch_customer_nbr=T_messages_ORT.client) and date_reception is null",
+                @"update T_messages_ORT_TRANSFERT_CAPGEMINI set note=note+1 where top_selection='1' and exists (select dss.past_due_16_30 from openrowset('SQLOLEDB', {OPENROWSET}, 'select branch_customer_nbr,past_due_16_30 from customer where past_due_16_30 >0 and branch_nbr=''21''') dss where dss.branch_customer_nbr=T_messages_ORT_TRANSFERT_CAPGEMINI.client) and date_reception is null",
+                @"insert into T_calcul_note select indice,'BALANCE AGEES IMFR',1 from T_messages_ORT  where top_selection='1' and exists (select dss.past_due_16_30 from openrowset('SQLOLEDB', {OPENROWSET}, 'select branch_customer_nbr,past_due_16_30 from customer where past_due_16_30 >0 and branch_nbr=''21''') dss where dss.branch_customer_nbr=T_messages_ORT.client) and date_reception is null",
+                @"insert into T_calcul_note_TRANSFERT_CAPGEMINI select indice,'BALANCE AGEES IMFR',1 from T_messages_ORT_TRANSFERT_CAPGEMINI  where top_selection='1' and exists (select dss.past_due_16_30 from openrowset('SQLOLEDB', {OPENROWSET}, 'select branch_customer_nbr,past_due_16_30 from customer where past_due_16_30 >0 and branch_nbr=''21''') dss where dss.branch_customer_nbr=T_messages_ORT_TRANSFERT_CAPGEMINI.client) and date_reception is null",
+                @"UPDATE T_messages_ORT SET note=note+2  WHERE date_reception Is null AND  top_selection='1' AND  EXISTS (SELECT 1 FROM T_BODACC as Bodac WHERE lower(ref_evenement) = 'modification sur les représentants' AND datediff(month,date_parution,getdate())<=6              AND T_messages_ORT.id_rapport = Bodac.id_rapport)",
+                @"UPDATE T_messages_ORT_TRANSFERT_CAPGEMINI SET note=note+2  WHERE date_reception Is null AND  top_selection='1' AND  EXISTS (SELECT 1 FROM T_BODACC as Bodac WHERE lower(ref_evenement) = 'modification sur les représentants' AND datediff(month,date_parution,getdate())<=6              AND T_messages_ORT_TRANSFERT_CAPGEMINI.id_rapport = Bodac.id_rapport)",
+                @"insert into T_calcul_note select indice,'CHANGEMENT REPRESENTANT BODACC',2 from T_messages_ORT  where top_selection='1' and date_reception Is null ",
+                @"insert into T_calcul_note_TRANSFERT_CAPGEMINI select indice,'CHANGEMENT REPRESENTANT BODACC',2 from T_messages_ORT_TRANSFERT_CAPGEMINI  where top_selection='1' and date_reception Is null ",
+                @"UPDATE T_messages_ORT SET note=note+3  WHERE date_reception Is null AND  top_selection='1' AND EXISTS(Select 1 FROM T_GENERAL as gen WHERE (PROC_COLLECTIVE ='O') AND T_messages_ORT.id_rapport = gen.id_rapport)",
+                @"UPDATE T_messages_ORT_TRANSFERT_CAPGEMINI SET note=note+3  WHERE date_reception Is null AND  top_selection='1' AND EXISTS(Select 1 FROM T_GENERAL as gen WHERE (PROC_COLLECTIVE ='O') AND T_messages_ORT_TRANSFERT_CAPGEMINI.id_rapport = gen.id_rapport)",
+                @"insert into T_calcul_note select indice,'PROCEDURES COLLECTIVES',3 from T_messages_ORT  where top_selection='1' and date_reception Is null ",
+                @"insert into T_calcul_note_TRANSFERT_CAPGEMINI select indice,'PROCEDURES COLLECTIVES',3 from T_messages_ORT_TRANSFERT_CAPGEMINI  where top_selection='1' and date_reception Is null ",
+                @"update T_messages_ORT set note=note+1 WHERE top_selection='2' AND credit_limit > 1 AND date_reception is null",
+                @"update T_messages_ORT_TRANSFERT_CAPGEMINI set note=note+1 WHERE top_selection='2' AND credit_limit > 1 AND date_reception is null",
+                @"insert into T_calcul_note select indice,'CREDIT LIMIT',1 from T_messages_ORT  WHERE top_selection='2'  AND credit_limit > 1 AND date_reception is null",
+                @"insert into T_calcul_note_TRANSFERT_CAPGEMINI select indice,'CREDIT LIMIT',1 from T_messages_ORT_TRANSFERT_CAPGEMINI  WHERE top_selection='2'  AND credit_limit > 1 AND date_reception is null",
+                @"update T_messages_ORT set note=note+1 where top_selection='2' and exists (select dss.total_past_due from openrowset('SQLOLEDB', {OPENROWSET}, 'select branch_customer_nbr,total_past_due from customer where total_past_due >0 and branch_nbr=''21''') dss where dss.branch_customer_nbr=T_messages_ORT.client) and date_reception is null",
+                @"update T_messages_ORT_TRANSFERT_CAPGEMINI set note=note+1 where top_selection='2' and exists (select dss.total_past_due from openrowset('SQLOLEDB', {OPENROWSET}, 'select branch_customer_nbr,total_past_due from customer where total_past_due >0 and branch_nbr=''21''') dss where dss.branch_customer_nbr=T_messages_ORT_TRANSFERT_CAPGEMINI.client) and date_reception is null",
+                @"insert into T_calcul_note select indice,'BALANCE AGEES',1 from T_messages_ORT  where top_selection='2' and exists (select dss.total_past_due from openrowset('SQLOLEDB', {OPENROWSET}, 'select branch_customer_nbr,total_past_due from customer where total_past_due >0 and branch_nbr=''21''') dss where dss.branch_customer_nbr=T_messages_ORT.client) and date_reception is null",
+                @"insert into T_calcul_note_TRANSFERT_CAPGEMINI select indice,'BALANCE AGEES',1 from T_messages_ORT_TRANSFERT_CAPGEMINI  where top_selection='2' and exists (select dss.total_past_due from openrowset('SQLOLEDB', {OPENROWSET}, 'select branch_customer_nbr,total_past_due from customer where total_past_due >0 and branch_nbr=''21''') dss where dss.branch_customer_nbr=T_messages_ORT_TRANSFERT_CAPGEMINI.client) and date_reception is null",
+                @"update T_messages_ORT set note=note+1 where top_selection='2' and exists (select dss.OpenOrderAmt from openrowset('SQLOLEDB', {OPENROWSET}, 'select branch_customer_nbr,OpenOrderAmt from customer where OpenOrderAmt >0 and branch_nbr=''21''') dss where dss.branch_customer_nbr=T_messages_ORT.client) and date_reception is null",
+                @"update T_messages_ORT_TRANSFERT_CAPGEMINI set note=note+1 where top_selection='2' and exists (select dss.OpenOrderAmt from openrowset('SQLOLEDB', {OPENROWSET}, 'select branch_customer_nbr,OpenOrderAmt from customer where OpenOrderAmt >0 and branch_nbr=''21''') dss where dss.branch_customer_nbr=T_messages_ORT_TRANSFERT_CAPGEMINI.client) and date_reception is null",
+                @"insert into T_calcul_note select indice,'OPEN ORDER',1 from T_messages_ORT  where top_selection='2' and exists (select dss.OpenOrderAmt from openrowset('SQLOLEDB', {OPENROWSET}, 'select branch_customer_nbr,OpenOrderAmt from customer where OpenOrderAmt >0 and branch_nbr=''21''') dss where dss.branch_customer_nbr=T_messages_ORT.client) and date_reception is null",
+                @"insert into T_calcul_note_TRANSFERT_CAPGEMINI select indice,'OPEN ORDER',1 from T_messages_ORT_TRANSFERT_CAPGEMINI  where top_selection='2' and exists (select dss.OpenOrderAmt from openrowset('SQLOLEDB', {OPENROWSET}, 'select branch_customer_nbr,OpenOrderAmt from customer where OpenOrderAmt >0 and branch_nbr=''21''') dss where dss.branch_customer_nbr=T_messages_ORT_TRANSFERT_CAPGEMINI.client) and date_reception is null",
+                @"UPDATE T_messages_ORT SET pole_analyse = 'SMB' WHERE date_reception Is null AND  top_selection='1'  AND credit_limit <=250000 AND (cast(new_cotation as integer) BETWEEN 1 and 5 OR new_cotation ='NA') AND exists (select dss.branch_customer_nbr from openrowset('SQLOLEDB', {OPENROWSET}, 'Select branch_customer_nbr FROM  customer WHERE analyst_risk in (''SMB'',''EXP'')') dss where dss.branch_customer_nbr=T_messages_ORT.client)",
+                @"UPDATE T_messages_ORT SET pole_analyse = 'MG',personne_affectee='15'  WHERE date_reception Is null And top_selection ='1' AND (cast(new_cotation as integer) BETWEEN 1 and 5 OR new_cotation ='NA')  And exists(select dss.branch_customer_nbr from openrowset('SQLOLEDB', {OPENROWSET}, 'Select branch_customer_nbr FROM  customer where analyst_risk in (''XER'')') dss where dss.branch_customer_nbr=T_messages_ORT.client)",
+                @"UPDATE T_messages_ORT  SET pole_analyse = 'CF',personne_affectee='13'  WHERE date_reception Is null And top_selection ='1' AND (cast(new_cotation as integer) BETWEEN 1 and 5 OR new_cotation ='NA')  And exists(select dss.branch_customer_nbr from openrowset('SQLOLEDB', {OPENROWSET}, 'Select branch_customer_nbr FROM  customer where analyst_risk in (''GMS'') ') dss where dss.branch_customer_nbr=T_messages_ORT.client)  Or ( (date_reception Is null And  top_selection='1' and credit_limit >250000 and credit_limit <=1000000) AND (cast(new_cotation as integer) BETWEEN 1 and 5 OR new_cotation ='NA') AND (personne_affectee is null or personne_affectee = '')  And exists (select dss.branch_customer_nbr from openrowset('SQLOLEDB', {OPENROWSET}, 'Select branch_customer_nbr FROM  customer  where analyst_risk in(''SMB'',''EXP'')') dss where dss.branch_customer_nbr=T_messages_ORT.client)) ",
+                @"UPDATE T_messages_ORT SET pole_analyse = 'TC',personne_affectee='4'  WHERE date_reception Is null AND  top_selection='1' AND (cast(new_cotation as integer) BETWEEN 1 and 5 OR new_cotation ='NA') AND exists (select dss.branch_customer_nbr from openrowset('SQLOLEDB', {OPENROWSET}, 'Select branch_customer_nbr FROM  customer where analyst_risk in(''KEY'')') dss where dss.branch_customer_nbr=T_messages_ORT.client)  OR ( (date_reception Is null AND  top_selection='1' and credit_limit >1000000) AND (cast(new_cotation as integer) BETWEEN 1 and 5 OR new_cotation ='NA') AND (personne_affectee is null or personne_affectee = '') AND exists (select dss.branch_customer_nbr from openrowset('SQLOLEDB', {OPENROWSET}, 'Select branch_customer_nbr FROM  customer  where analyst_risk in(''SMB'',''EXP'')') dss where dss.branch_customer_nbr=T_messages_ORT.client)) ",
+                @"UPDATE T_messages_ORT SET pole_analyse = 'IA',personne_affectee='14'  WHERE date_reception Is null AND  top_selection='1' AND (cast(new_cotation as integer) BETWEEN 1 and 5 OR new_cotation ='NA') AND exists (select dss.branch_customer_nbr from openrowset('SQLOLEDB', {OPENROWSET}, 'Select branch_customer_nbr FROM  customer where analyst_risk in (''APP'',''DCP'')') dss where dss.branch_customer_nbr=T_messages_ORT.client)",
+                @"UPDATE T_messages_ORT SET pole_analyse = 'PANEURO',personne_affectee='7'  WHERE ( date_reception Is null AND  top_selection='1' AND (cast(new_cotation as integer) BETWEEN 1 and 5 OR new_cotation ='NA') AND (personne_affectee is null or personne_affectee = '') AND exists (select dss.branch_customer_nbr from openrowset('SQLOLEDB', {OPENROWSET}, 'Select branch_customer_nbr FROM  customer  where analyst_risk in(''PAN'')') dss where dss.branch_customer_nbr=T_messages_ORT.client)) ",
+                @"UPDATE T_messages_ORT SET pole_analyse = 'ALERTE CONCURRENT',personne_affectee='12'  WHERE ((date_reception Is null AND  top_selection='1') AND (cast(new_cotation as integer) BETWEEN 1 and 5 OR new_cotation ='NA') AND (personne_affectee is null or personne_affectee = '') AND exists (select dss.branch_customer_nbr from openrowset('SQLOLEDB', {OPENROWSET}, 'Select branch_customer_nbr FROM  customer  where analyst_risk in(''CON'')') dss where dss.branch_customer_nbr=T_messages_ORT.client)) ",
+                @"update T_messages_ORT set pole_analyse = 'ALERTE ELLISPHERE',personne_affectee='9' where top_selection='2' and date_reception is null",
+                @"UPDATE T_messages_ORT SET  pole_analyse = 'ALERTE FRAUDE',personne_affectee='10'  WHERE (date_reception Is null AND  top_selection='1'and credit_limit <=50000)  AND EXISTS (SELECT 1 FROM T_BODACC as Bodac WHERE lower(ref_evenement) = 'modification sur les représentants' AND datediff(month,date_parution,getdate())<=6  AND T_messages_ORT.id_rapport = Bodac.id_rapport) AND EXISTS (SELECT 1 FROM T_BODACC as Bodac WHERE lower(ref_evenement) = 'modification de l''adresse de l''établissement principal'  AND datediff(month,date_parution,getdate())<=6 AND T_messages_ORT.id_rapport = Bodac.id_rapport)",
+                @"UPDATE T_messages_ORT SET  pole_analyse = 'ALERTE REPRESENTANT',personne_affectee='11'  WHERE (date_reception Is null AND  top_selection='1' and credit_limit >50000)  AND EXISTS (SELECT 1 FROM T_BODACC as Bodac WHERE lower(ref_evenement) = 'modification sur les représentants' AND datediff(month,date_parution,getdate())<=6  AND T_messages_ORT.id_rapport = Bodac.id_rapport)",
+                @"UPDATE T_messages_ORT SET pole_analyse = 'SMB' WHERE date_reception Is null AND  top_selection='1' and credit_limit <=250000 AND (cast(new_cotation as integer) BETWEEN 1 and 5 OR new_cotation ='NA') AND (personne_affectee is null or personne_affectee = '') ",
+                @"UPDATE T_messages_ORT_TRANSFERT_CAPGEMINI SET pole_analyse = 'ALERTE CONCURRENT',personne_affectee='12'  WHERE ((date_reception Is null AND  top_selection='1') AND (cast(new_cotation as integer) BETWEEN 1 and 5 OR new_cotation ='NA') AND (personne_affectee is null or personne_affectee = '') AND exists (select dss.branch_customer_nbr from openrowset('SQLOLEDB', {OPENROWSET}, 'Select branch_customer_nbr FROM  customer  where analyst_risk in(''CON'')') dss where dss.branch_customer_nbr=T_messages_ORT_TRANSFERT_CAPGEMINI.client)) ",
+                @"update T_messages_ORT_TRANSFERT_CAPGEMINI set pole_analyse = 'ALERTE ELLISPHERE',personne_affectee='9' where top_selection='2' and date_reception is null",
+                @"UPDATE T_messages_ORT_TRANSFERT_CAPGEMINI SET  pole_analyse = 'ALERTE FRAUDE',personne_affectee='10'  WHERE (date_reception Is null AND  top_selection='1'and credit_limit <=50000)  AND EXISTS (SELECT 1 FROM T_BODACC as Bodac WHERE lower(ref_evenement) = 'modification sur les représentants' AND datediff(month,date_parution,getdate())<=6  AND T_messages_ORT_TRANSFERT_CAPGEMINI.id_rapport = Bodac.id_rapport) AND EXISTS (SELECT 1 FROM T_BODACC as Bodac WHERE lower(ref_evenement) = 'modification de l''adresse de l''établissement principal'  AND datediff(month,date_parution,getdate())<=6 AND T_messages_ORT_TRANSFERT_CAPGEMINI.id_rapport = Bodac.id_rapport)",
+                @"UPDATE T_messages_ORT_TRANSFERT_CAPGEMINI SET  pole_analyse = 'ALERTE REPRESENTANT',personne_affectee='11'  WHERE (date_reception Is null AND  top_selection='1' and credit_limit >50000)  AND EXISTS (SELECT 1 FROM T_BODACC as Bodac WHERE lower(ref_evenement) = 'modification sur les représentants' AND datediff(month,date_parution,getdate())<=6  AND T_messages_ORT_TRANSFERT_CAPGEMINI.id_rapport = Bodac.id_rapport)",
+                @"UPDATE T_messages_ORT_TRANSFERT_CAPGEMINI SET pole_analyse = 'CAP GEMINI',personne_affectee='1'  WHERE date_reception Is null And top_selection ='1' AND (cast(new_cotation as integer) BETWEEN 1 and 5 OR new_cotation ='NA')  And exists(select dss.branch_customer_nbr from openrowset('SQLOLEDB', {OPENROWSET}, 'Select branch_customer_nbr FROM  customer where analyst_risk in (''CAP'',''CDC'',''MOO'')') dss where dss.branch_customer_nbr=T_messages_ORT_TRANSFERT_CAPGEMINI.client)",
+                @"UPDATE T_messages_ORT_TRANSFERT_CAPGEMINI SET pole_analyse = 'PANEURO',personne_affectee='7'  WHERE ( date_reception Is null AND  top_selection='1' AND (cast(new_cotation as integer) BETWEEN 1 and 5 OR new_cotation ='NA') AND (personne_affectee is null or personne_affectee = '') AND exists (select dss.branch_customer_nbr from openrowset('SQLOLEDB', {OPENROWSET}, 'Select branch_customer_nbr FROM  customer  where analyst_risk in (''PAN'')') dss where dss.branch_customer_nbr=T_messages_ORT_TRANSFERT_CAPGEMINI.client)) ",
+                @"UPDATE T_messages_ORT_TRANSFERT_CAPGEMINI  SET pole_analyse = 'CF',personne_affectee='13'  WHERE date_reception Is null And top_selection ='1' AND (cast(new_cotation as integer) BETWEEN 1 and 5 OR new_cotation ='NA')  And exists(select dss.branch_customer_nbr from openrowset('SQLOLEDB', {OPENROWSET}, 'Select branch_customer_nbr FROM  customer where analyst_risk in (''CS1'',''RET'') ') dss where dss.branch_customer_nbr=T_messages_ORT_TRANSFERT_CAPGEMINI.client) ",
+                @"UPDATE T_messages_ORT_TRANSFERT_CAPGEMINI SET pole_analyse = 'TC',personne_affectee='4'  WHERE date_reception Is null AND  top_selection='1' AND (cast(new_cotation as integer) BETWEEN 1 and 5 OR new_cotation ='NA') AND exists (select dss.branch_customer_nbr from openrowset('SQLOLEDB', {OPENROWSET}, 'Select branch_customer_nbr FROM  customer where analyst_risk in (''KEY'')') dss where dss.branch_customer_nbr=T_messages_ORT_TRANSFERT_CAPGEMINI.client) ",
+                @"UPDATE T_messages_ORT_TRANSFERT_CAPGEMINI SET pole_analyse = 'IA',personne_affectee='14'  WHERE date_reception Is null AND  top_selection='1' AND (cast(new_cotation as integer) BETWEEN 1 and 5 OR new_cotation ='NA') AND exists (select dss.branch_customer_nbr from openrowset('SQLOLEDB', {OPENROWSET}, 'Select branch_customer_nbr FROM  customer where analyst_risk in (''APP'',''CS2'')') dss where dss.branch_customer_nbr=T_messages_ORT_TRANSFERT_CAPGEMINI.client)",
+                @"UPDATE T_messages_ORT_TRANSFERT_CAPGEMINI SET pole_analyse = 'GLOBAL',personne_affectee='99'  WHERE date_reception Is null AND  top_selection='1' AND (cast(new_cotation as integer) BETWEEN 1 and 5 OR new_cotation ='NA') AND exists (select dss.branch_customer_nbr from openrowset('SQLOLEDB', {OPENROWSET}, 'Select branch_customer_nbr FROM  customer where analyst_risk not in (''CAP'',''CDC'',''MOO'',''APP'',''CS2'',''CS1'',''RET'',''KEY'',''PAN'',''COM'',''PER'')') dss where dss.branch_customer_nbr=T_messages_ORT_TRANSFERT_CAPGEMINI.client)"
+                };
+                foreach (string historicalQuery in historicalQueries)
+                    ExecuteHistoricalSql(connection, historicalQuery.Replace("{OPENROWSET}", dss_con_openrowset));
+                ApplyHistoricalSmbRoundRobin(connection);
+                ExecuteHistoricalSql(connection, "UPDATE dbo.T_messages_ORT SET date_reception=@P WHERE date_reception IS NULL; UPDATE dbo.T_messages_ORT_TRANSFERT_CAPGEMINI SET date_reception=@P WHERE date_reception IS NULL;", new SqlParameter("@P", SqlDbType.Char, 8) { Value = period });
+                string month = archiveDate.ToString("yyyyMM", CultureInfo.InvariantCulture);
+                string folder = Path.Combine(path_archives, month);
+                Directory.CreateDirectory(folder);
+                ExecuteHistoricalSql(connection, "INSERT INTO dbo.T_surveillances VALUES(@F,@D,@M);", new SqlParameter("@F", SqlDbType.NVarChar, 500) { Value = fileName }, new SqlParameter("@D", SqlDbType.Char, 8) { Value = archiveDate.ToString("yyyyMMdd", CultureInfo.InvariantCulture) }, new SqlParameter("@M", SqlDbType.VarChar, 6) { Value = month });
+                string archivePath = Path.Combine(folder, fileName);
+                File.Move(fullPath, archivePath);
+                return archivePath;
+            }
+        }
+
+        private static string ExtractHistoricalScoreFraudPeriod(string fileName)
+        {
+            string value = Path.GetFileName(fileName) ?? "";
+            if (value.StartsWith("surv_score_", StringComparison.OrdinalIgnoreCase)) value = value.Substring("surv_score_".Length);
+            if (value.Length < 8) throw new InvalidDataException("Unable to extract ScoreFraud period from " + fileName);
+            return value.Substring(0, 8);
+        }
+
+        private static string ReadXmlValue(XmlNode node, string xpath)
+        {
+            return node?.SelectSingleNode(xpath)?.InnerText ?? "";
+        }
+
+        private static void InsertHistoricalScoreFraudReport(SqlConnection connection, string table, XmlNode report)
+        {
+            var values = new List<KeyValuePair<string, string>>
+            {
+                new KeyValuePair<string,string>("nom_client",ReadXmlValue(report,"officialCompanyName")),
+                new KeyValuePair<string,string>("commentaires_ORT",ReadXmlValue(report,"variationScoreMotive")),
+                new KeyValuePair<string,string>("num_siren",ReadXmlValue(report,"companyId")),
+                new KeyValuePair<string,string>("anc_cotation",ReadXmlValue(report,"previousScore/score")),
+                new KeyValuePair<string,string>("new_cotation",ReadXmlValue(report,"actualScore/score")),
+                new KeyValuePair<string,string>("avis_credit",ReadXmlValue(report,"lastCreditOpinion/amount")),
+                new KeyValuePair<string,string>("new_avis_credit",ReadXmlValue(report,"creditOpinion/amount"))
+            }.Where(x => !string.IsNullOrEmpty(x.Value)).ToList();
+            if (values.Count == 0) return;
+            string cols = string.Join(",", values.Select(x => x.Key));
+            string pars = string.Join(",", values.Select((x, i) => "@P" + i));
+            using (var cmd = new SqlCommand("INSERT INTO " + table + " (" + cols + ") VALUES (" + pars + ");", connection))
+            {
+                cmd.CommandTimeout = 300;
+                for (int i = 0; i < values.Count; i++) cmd.Parameters.Add("@P" + i, SqlDbType.NVarChar, -1).Value = values[i].Value;
+                cmd.ExecuteNonQuery();
+            }
+        }
+
+        private void EnrichHistoricalScoreFraudRows(SqlConnection connection)
+        {
+            var rows = new List<Tuple<int, string>>();
+            using (var cmd = new SqlCommand("SELECT indice,ISNULL(num_siren,'') FROM dbo.T_messages_ORT WHERE date_reception IS NULL;", connection))
+            { cmd.CommandTimeout = 300; using (SqlDataReader r = cmd.ExecuteReader()) while (r.Read()) rows.Add(Tuple.Create(Convert.ToInt32(r[0]), Convert.ToString(r[1]))); }
+            foreach (var row in rows)
+            {
+                string siren = row.Item2 ?? ""; if (siren.Length > 9) siren = siren.Substring(0, 9); if (siren.Length == 0) continue;
+                try
+                {
+                    string response = CallScoreFraudWebService(siren); if (string.IsNullOrWhiteSpace(response)) continue;
+                    var xml = new XmlDocument(); xml.LoadXml(response); if (!string.Equals(xml.DocumentElement?.Name, "response", StringComparison.OrdinalIgnoreCase)) continue;
+                    string report = xml.SelectSingleNode("//response/id_rapport")?.InnerText ?? ""; string score = xml.SelectSingleNode("//response/score_fraude")?.InnerText ?? "";
+                    ExecuteHistoricalSql(connection, "UPDATE dbo.T_messages_ORT SET id_rapport=@R,valeur_score=@S WHERE indice=@I;", new SqlParameter("@R", SqlDbType.VarChar, 100) { Value = report }, new SqlParameter("@S", SqlDbType.VarChar, 100) { Value = score }, new SqlParameter("@I", SqlDbType.Int) { Value = row.Item1 });
+                }
+                catch (Exception ex) { WriteLog("       ScoreFraud webservice error for SIREN " + siren + " : " + ex.Message); }
+            }
+        }
+
+        private string CallScoreFraudWebService(string siren)
+        {
+            string separator = uri_webservice.Contains("?") ? "&" : "?";
+            var request = (HttpWebRequest)WebRequest.Create(uri_webservice.Trim() + separator + "siren=" + Uri.EscapeDataString(siren) + "&type=1");
+            request.Credentials = CredentialCache.DefaultCredentials; request.Timeout = 120000; request.ReadWriteTimeout = 120000;
+            using (var response = (HttpWebResponse)request.GetResponse()) using (Stream stream = response.GetResponseStream())
+            { if (stream == null) return ""; using (var reader = new StreamReader(stream)) return reader.ReadToEnd(); }
+        }
+
+        private static void ApplyHistoricalSmbRoundRobin(SqlConnection connection)
+        {
+            var ids = new List<int>();
+            using (var cmd = new SqlCommand("SELECT indice FROM dbo.T_messages_ORT WHERE date_reception IS NULL AND pole_analyse='SMB' AND (personne_affectee IS NULL OR personne_affectee='');", connection))
+            using (SqlDataReader r = cmd.ExecuteReader()) while (r.Read()) ids.Add(Convert.ToInt32(r[0]));
+            for (int i = 0; i < ids.Count; i++) ExecuteHistoricalSql(connection, "UPDATE dbo.T_messages_ORT SET personne_affectee=@P WHERE indice=@I;", new SqlParameter("@P", SqlDbType.VarChar, 10) { Value = (i + 1) % 2 == 0 ? "14" : "15" }, new SqlParameter("@I", SqlDbType.Int) { Value = ids[i] });
+        }
+
+        private static void ExecuteHistoricalSql(SqlConnection connection, string sql, params SqlParameter[] parameters)
+        {
+            using (var cmd = new SqlCommand(sql, connection)) { cmd.CommandTimeout = 300; if (parameters != null && parameters.Length > 0) cmd.Parameters.AddRange(parameters); cmd.ExecuteNonQuery(); }
+        }
+
+        private Message GetScoreFraudMessage(string messageId)
+        {
+            return ExecuteGraphWithRetry(() => graphService.Users[mailboxAddress].Messages[messageId].GetAsync(config =>
+            {
+                AddImmutableHeader(config.Headers);
+                config.QueryParameters.Select = new[] { "id", "subject", "receivedDateTime", "hasAttachments" };
+            }).GetAwaiter().GetResult(), "Get ScoreFraud message");
+        }
+
+        private AttachmentCollectionResponse GetScoreFraudAttachments(string messageId)
+        {
+            return ExecuteGraphWithRetry(() => graphService.Users[mailboxAddress].Messages[messageId].Attachments.GetAsync(config =>
+            {
+                AddImmutableHeader(config.Headers);
+                config.QueryParameters.Top = 999;
+                // Do not select contentBytes on the generic Attachment collection.
+            }).GetAwaiter().GetResult(), "Read ScoreFraud attachments");
+        }
+
+        private FileAttachment GetFileAttachmentContent(string messageId, Microsoft.Graph.Models.Attachment attachment)
+        {
+            if (attachment is FileAttachment loaded && loaded.ContentBytes != null) return loaded;
+            if (string.IsNullOrWhiteSpace(attachment?.Id)) return null;
+            return ExecuteGraphWithRetry(() => graphService.Users[mailboxAddress].Messages[messageId].Attachments[attachment.Id].GetAsync(config => AddImmutableHeader(config.Headers)).GetAwaiter().GetResult() as FileAttachment, "Download ScoreFraud attachment " + (attachment.Name ?? attachment.Id));
+        }
+
+        private void MarkMessageAsReadAndMove(string messageId, string destinationFolderId)
+        {
+            ExecuteGraphWithRetry(() =>
+            {
+                graphService.Users[mailboxAddress].Messages[messageId].PatchAsync(new Message { IsRead = true }, config => AddImmutableHeader(config.Headers)).GetAwaiter().GetResult();
+                return true;
+            }, "Mark ScoreFraud message as read");
+            ExecuteGraphWithRetry(() =>
+            {
+                var request = new Microsoft.Graph.Users.Item.Messages.Item.Move.MovePostRequestBody { DestinationId = destinationFolderId };
+                graphService.Users[mailboxAddress].Messages[messageId].Move.PostAsync(request, config => AddImmutableHeader(config.Headers)).GetAwaiter().GetResult();
+                return true;
+            }, "Move ScoreFraud message to " + outputFolderName);
+        }
+
+        private void PermanentlyDeleteMessage(string messageId)
+        {
+            ExecuteGraphWithRetry(() =>
+            {
+                graphService.Users[mailboxAddress].Messages[messageId].PermanentDelete.PostAsync(config => AddImmutableHeader(config.Headers)).GetAwaiter().GetResult();
+                return true;
+            }, "Permanently delete ScoreFraud CSV message");
+        }
+
         private List<Message> GetCandidateMessages(string folderId)
         {
             int top;
@@ -431,7 +923,21 @@ namespace CREDIT_EMAILS_MANAGEMENT_FR
                     "receivedDateTime asc"
                 }
                 ;
-                q.QueryParameters.Filter = "receivedDateTime gt " + date.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.fffZ", CultureInfo.InvariantCulture);
+                string filter =
+                    "receivedDateTime gt " +
+                    date.ToUniversalTime().ToString(
+                        "yyyy-MM-ddTHH:mm:ss.fffZ",
+                        CultureInfo.InvariantCulture);
+
+                // L'ancien appel Read_Email(True) ne lisait que les messages non lus.
+                if (mailboxName.Equals(
+                        score_fraud_mailbox_name,
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    filter += " and isRead eq false";
+                }
+
+                q.QueryParameters.Filter = filter;
                 q.QueryParameters.Select = new[]
                 {
                     "id","subject","receivedDateTime","internetMessageId","from"
@@ -487,27 +993,12 @@ namespace CREDIT_EMAILS_MANAGEMENT_FR
                 return ProcessingOutcome.Ignored;
             }
             CreditMailData data = ParseCreditMail(email);
-
-            // Comportement historique : sans numéro d'autorisation,
-            // aucun traitement métier n'est exécuté et aucune alerte technique
-            // n'est envoyée. Le message est journalisé puis archivé normalement.
             if (string.IsNullOrWhiteSpace(data.AuthorizationNumber))
             {
-                WriteLog(
-                    "       Authorization number is missing. " +
-                    "Business processing skipped and message archived.");
-
                 FinalizeGraphMessage(email.Id, outputFolderId);
-
-                UpsertProcessingState(
-                    email,
-                    "S",
-                    null,
-                    "Authorization number missing - message archived without business processing");
-
+                UpsertProcessingState(email, "S", null, "Authorization number missing - archived without business processing");
                 return ProcessingOutcome.Completed;
             }
-
             if (AuthorizationExists(data.AuthorizationNumber) || data.CustomerCode.Equals("21000007", StringComparison.OrdinalIgnoreCase))
             {
                 FinalizeGraphMessage(email.Id, outputFolderId);
@@ -839,12 +1330,10 @@ namespace CREDIT_EMAILS_MANAGEMENT_FR
 
         private MailFolder GetRequiredFolder(string name)
         {
-            MailFolderCollectionResponse res = ExecuteGraphWithRetry(() => graphService.Users[mailboxAddress].MailFolders["inbox"].ChildFolders.GetAsync(q =>
-            {
-                q.QueryParameters.Top = 100;
-                q.QueryParameters.Filter = "displayName eq '" + EscapeODataString(name) + "'";
-            }
-            ).GetAwaiter().GetResult(), "Find folder " + name);
+            if (string.IsNullOrWhiteSpace(name)) throw new ArgumentException("Folder name is empty", nameof(name));
+            if (name.Equals("Inbox", StringComparison.OrdinalIgnoreCase))
+                return ExecuteGraphWithRetry(() => graphService.Users[mailboxAddress].MailFolders["inbox"].GetAsync(q => AddImmutableHeader(q.Headers)).GetAwaiter().GetResult(), "Read Inbox folder");
+            MailFolderCollectionResponse res = ExecuteGraphWithRetry(() => graphService.Users[mailboxAddress].MailFolders["inbox"].ChildFolders.GetAsync(q => { AddImmutableHeader(q.Headers); q.QueryParameters.Top = 100; q.QueryParameters.Filter = "displayName eq '" + EscapeODataString(name) + "'"; }).GetAwaiter().GetResult(), "Find folder " + name);
             MailFolder f = res?.Value?.FirstOrDefault(x => string.Equals(x.DisplayName, name, StringComparison.OrdinalIgnoreCase));
             if (f == null) throw new DirectoryNotFoundException("Folder not found under Inbox : " + name);
             return f;
@@ -957,13 +1446,25 @@ namespace CREDIT_EMAILS_MANAGEMENT_FR
 
         private void ValidateCountryConfiguration()
         {
-            if (string.IsNullOrWhiteSpace(sql_connexion) || string.IsNullOrWhiteSpace(sql_gestion_cdes) || string.IsNullOrWhiteSpace(sql_dss_copie) || string.IsNullOrWhiteSpace(email_in_case_of_technical_issue) || string.IsNullOrWhiteSpace(fr_graph_send_as)) throw new InvalidOperationException("Country configuration is incomplete");
+            if (string.IsNullOrWhiteSpace(sql_connexion) ||
+                string.IsNullOrWhiteSpace(sql_gestion_cdes) ||
+                string.IsNullOrWhiteSpace(sql_dss_copie) ||
+                string.IsNullOrWhiteSpace(email_in_case_of_technical_issue) ||
+                string.IsNullOrWhiteSpace(fr_graph_send_as) ||
+                string.IsNullOrWhiteSpace(path_archives) ||
+                string.IsNullOrWhiteSpace(dss_con_openrowset) ||
+                string.IsNullOrWhiteSpace(uri_webservice))
+            {
+                throw new InvalidOperationException(
+                    "Country configuration is incomplete");
+            }
             if (credit_managers_contentieux_list.Count == 0 || BuildRecipients(contentieux_recipients).Count == 0) throw new InvalidOperationException("Contentieux configuration is invalid");
         }
 
         private void ValidateMailboxConfiguration()
         {
-            if (mailboxId <= 0 || string.IsNullOrWhiteSpace(mailboxAddress) || string.IsNullOrWhiteSpace(inputFolderName) || string.IsNullOrWhiteSpace(outputFolderName) || allowedSenders.Count == 0) throw new InvalidOperationException("Mailbox configuration is incomplete");
+            if (mailboxId <= 0 || string.IsNullOrWhiteSpace(mailboxAddress) || string.IsNullOrWhiteSpace(inputFolderName) || string.IsNullOrWhiteSpace(outputFolderName)) throw new InvalidOperationException("Mailbox configuration is incomplete");
+            if (mailboxName.Equals(credit_card_mailbox_name, StringComparison.OrdinalIgnoreCase) && allowedSenders.Count == 0) throw new InvalidOperationException("sender_allowed is empty for the Cartes Bleues mailbox");
         }
 
         private DateTime ParseStartDate()
