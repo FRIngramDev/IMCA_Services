@@ -1559,7 +1559,6 @@ WHERE SK_VALID=0 AND PARAMETER=@PARAMETER";
                                     execute_IMCA_Action(dr, logs, temp_folder, false);
                                 }
 
-                                System.Threading.Thread.Sleep(500);
                             }
 
 
