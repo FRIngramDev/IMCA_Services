@@ -38,6 +38,8 @@ namespace IMCA_Services
         private int service_is_stopping = 0;
         private string logs_folder = "";
         private string temp_folder = "";
+        //contrôle journalier de nettoyage des fichiers logs
+        private DateTime _lastLogCleanup = DateTime.MinValue;
 
         // Synchronizes log file writes performed by concurrent action threads.
         private static readonly object logLock = new object();
@@ -164,8 +166,9 @@ namespace IMCA_Services
                 }
 
 
-                // Delete old logs files
-                class_dev_tools.Fonction.DeleteFichiers(service_path + "\\" + logs_folder, -7);
+                // Purge old log files at startup, then once per day while the service is running.
+                PurgeLogs();
+                _lastLogCleanup = DateTime.Now;
 
                 WriteToFile("IMCA Services started at                   : " + DateTime.Now.ToString("dd/MM/yyyy HH:mm:ss"), 0, logs_folder);
                 WriteToFile("   Session Name                            : " + session_name.ToUpper(), 0, logs_folder);
@@ -1479,6 +1482,58 @@ WHERE SK_VALID=0 AND PARAMETER=@PARAMETER";
             }
         }
 
+        /// <summary>
+        /// Deletes log files whose last modification date is older than the retention period.
+        /// A failure on one file does not stop the cleanup of the remaining files.
+        /// </summary>
+        private void PurgeLogs()
+        {
+            const int retentionDays = 7;
+            string logPath = Path.Combine(service_path, logs_folder ?? "logs");
+
+            if (!Directory.Exists(logPath))
+            {
+                return;
+            }
+
+            DateTime limitDate = DateTime.Now.Date.AddDays(-retentionDays);
+            int deletedFiles = 0;
+            int failedFiles = 0;
+
+            string[] files;
+            try
+            {
+                files = Directory.GetFiles(logPath, "*.txt", SearchOption.AllDirectories);
+            }
+            catch (Exception ex)
+            {
+                WriteToFile("Log cleanup failed while listing files : " + ex.Message);
+                return;
+            }
+
+            foreach (string file in files)
+            {
+                try
+                {
+                    if (File.GetLastWriteTime(file).Date < limitDate)
+                    {
+                        File.Delete(file);
+                        deletedFiles++;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    failedFiles++;
+                    WriteToFile("Unable to delete log file [" + file + "] : " + ex.Message);
+                }
+            }
+
+            WriteToFile(
+                "Log cleanup completed. Deleted files : " + deletedFiles +
+                ", failed files : " + failedFiles +
+                ", retention : " + retentionDays + " day(s)");
+        }
+
         protected void check_if_TODO(string logs, string temp_folder)
         {
             // Publish the callback state before opening SQL connections.
@@ -1488,7 +1543,12 @@ WHERE SK_VALID=0 AND PARAMETER=@PARAMETER";
 
             try
             {
-
+                // Run the cleanup once per calendar day, before opening SQL connections.
+                if (_lastLogCleanup.Date != DateTime.Today)
+                {
+                    PurgeLogs();
+                    _lastLogCleanup = DateTime.Now;
+                }
 
                 using (SqlConnection con = new SqlConnection(sql_con))
                 {
@@ -1527,13 +1587,13 @@ WHERE SK_VALID=0 AND PARAMETER=@PARAMETER";
                             foreach (DataRow dr in row.Rows)
                             {
                                 long currentActionId = Convert.ToInt64(dr["ID"]);
-                                
+
                                 // Prevent the same unavailable action from being checked
                                 // multiple times during the current timer cycle.
 
                                 if (!checkedActionIds.Add(currentActionId))
-                                { 
-                                continue;
+                                {
+                                    continue;
                                 }
 
                                 // USE_THREAD is configured per action in PCM_TAB_IMCA_ACTION_FLAG.
@@ -1673,7 +1733,7 @@ WHERE SK_VALID=0 AND PARAMETER=@PARAMETER";
 
                                             if (valid_user == true)
                                             {
-                                                WriteToFile("       ACTION  " + dt["ACTION"].ToString() + " (ID : " + dt["ID"].ToString() + ") not allowed to start on " + DateAndTime.Now.DayOfWeek.ToString() + " at " + DateTime.Now.ToString("dd/MM/yyyy HH:mm:ss"));
+                                                WriteToFile("       ACTION : " + dt["ACTION"].ToString() + " (ID : " + dt["ID"].ToString() + ") not allowed to start on " + DateAndTime.Now.DayOfWeek.ToString() + " at " + DateTime.Now.ToString("dd/MM/yyyy HH:mm:ss"));
                                             }
 
                                         }
