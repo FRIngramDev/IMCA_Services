@@ -824,7 +824,7 @@ namespace IMCA_Services
                     targetLogsFolder,
                     "IMCA_" + global_session_name + "_" +
                     DateTime.Now.ToString("dd_MM_yyyy") + "_" +
-                    pays + "_FORTINET_BID_TO_COP.txt");
+                    pays + "_SBO IMPORT FORTINET_.txt");
 
                 string line = (message ?? "") + Environment.NewLine;
 

@@ -3194,19 +3194,395 @@ ORDER BY q.id;";
 
         private string CreateOpeningStatisticsReport()
         {
-            string source = SafeResourcePath("stat_ouverture_compte.xlsx"); string output = Path.Combine(tempFolder, DateTime.Now.ToString("yyyyMMdd_HHmmss") + "_stat_ouverture_compte.xlsx"); File.Copy(source, output, true);
-            using (var wb = new XLWorkbook(output))
+            int reportYear = DateTime.Now.Year;
+            DateTime periodStart = new DateTime(reportYear, 1, 1);
+            DateTime periodEnd = periodStart.AddYears(1);
+
+            string output = Path.Combine(
+                tempFolder,
+                DateTime.Now.ToString("yyyyMMdd_HHmmss") +
+                "_stat_ouverture_compte_" +
+                reportYear +
+                ".xlsx");
+
+            DataTable requests = FillDataTable(
+                sql_creation_compte,
+                @"SELECT CONVERT(char(6), Date_integration_intranet, 112) AS Mois,
+                         COUNT(*) AS nb_dde
+                  FROM dbo.T_customer
+                  WHERE Date_integration_intranet >= @START
+                    AND Date_integration_intranet < @END
+                  GROUP BY CONVERT(char(6), Date_integration_intranet, 112)
+                  ORDER BY Mois;",
+                new SqlParameter("@START", SqlDbType.DateTime2) { Value = periodStart },
+                new SqlParameter("@END", SqlDbType.DateTime2) { Value = periodEnd });
+
+            DataTable creationsByType = FillDataTable(
+                sql_creation_compte,
+                @"SELECT CONVERT(char(6), s.Date, 112) AS Mois,
+                         ISNULL(NULLIF(LTRIM(RTRIM(t.libel_type_customer)), ''), 'Non renseigné') AS TypeClient,
+                         COUNT(*) AS nb_creation
+                  FROM dbo.T_Statut AS s
+                  INNER JOIN dbo.T_customer AS c
+                      ON c.id = s.idDossier
+                  LEFT JOIN dbo.T_type_customer AS t
+                      ON t.id_type_customer = c.id_type_customer
+                  WHERE s.idStatut = 6
+                    AND s.Date >= @START
+                    AND s.Date < @END
+                  GROUP BY CONVERT(char(6), s.Date, 112),
+                           ISNULL(NULLIF(LTRIM(RTRIM(t.libel_type_customer)), ''), 'Non renseigné')
+                  ORDER BY Mois, TypeClient;",
+                new SqlParameter("@START", SqlDbType.DateTime2) { Value = periodStart },
+                new SqlParameter("@END", SqlDbType.DateTime2) { Value = periodEnd });
+
+            DataTable creations = FillDataTable(
+                sql_creation_compte,
+                @"SELECT CONVERT(char(6), s.Date, 112) AS Mois,
+                         COUNT(*) AS nb_creation
+                  FROM dbo.T_Statut AS s
+                  WHERE s.idStatut = 6
+                    AND s.Date >= @START
+                    AND s.Date < @END
+                  GROUP BY CONVERT(char(6), s.Date, 112)
+                  ORDER BY Mois;",
+                new SqlParameter("@START", SqlDbType.DateTime2) { Value = periodStart },
+                new SqlParameter("@END", SqlDbType.DateTime2) { Value = periodEnd });
+
+            DataTable refusals = FillDataTable(
+                sql_creation_compte,
+                @"SELECT CONVERT(char(6), s.Date, 112) AS Mois,
+                         COUNT(*) AS nb_refus
+                  FROM dbo.T_Statut AS s
+                  WHERE s.idStatut = 4
+                    AND s.Date >= @START
+                    AND s.Date < @END
+                  GROUP BY CONVERT(char(6), s.Date, 112)
+                  ORDER BY Mois;",
+                new SqlParameter("@START", SqlDbType.DateTime2) { Value = periodStart },
+                new SqlParameter("@END", SqlDbType.DateTime2) { Value = periodEnd });
+
+            DataTable refusalDetails = FillDataTable(
+                sql_creation_compte,
+                @"SELECT s.idDossier,
+                         s.Date,
+                         CASE
+                             WHEN r.libelle_refus IS NULL THEN s.Comment
+                             ELSE r.libelle_refus
+                         END AS motif_refus,
+                         CONVERT(char(6), s.Date, 112) AS Mois,
+                         YEAR(s.Date) AS Annee
+                  FROM dbo.T_Statut AS s
+                  LEFT JOIN dbo.T_customer_libelle_refus AS r
+                      ON s.Comment = CONVERT(varchar(20), r.id_motif_refus)
+                  WHERE s.idStatut = 4
+                    AND s.Date >= @START
+                    AND s.Date < @END
+                  ORDER BY s.Date DESC, s.idDossier DESC;",
+                new SqlParameter("@START", SqlDbType.DateTime2) { Value = periodStart },
+                new SqlParameter("@END", SqlDbType.DateTime2) { Value = periodEnd });
+
+            DataTable refusedThenCreated = FillDataTable(
+                sql_creation_compte,
+                @"SELECT CONVERT(char(6), ref.Date, 112) AS Mois,
+                         COUNT(DISTINCT cre.idDossier) AS nb_refuse_puis_cree
+                  FROM
+                  (
+                      SELECT idDossier, MIN(Date) AS Date
+                      FROM dbo.T_historique
+                      WHERE idStatut = 4
+                        AND Date >= @START
+                        AND Date < @END
+                      GROUP BY idDossier
+                  ) AS ref
+                  INNER JOIN
+                  (
+                      SELECT idDossier, MIN(Date) AS Date
+                      FROM dbo.T_historique
+                      WHERE idStatut = 6
+                        AND Date >= @START
+                        AND Date < @END
+                      GROUP BY idDossier
+                  ) AS cre
+                      ON cre.idDossier = ref.idDossier
+                     AND ref.Date < cre.Date
+                  GROUP BY CONVERT(char(6), ref.Date, 112)
+                  ORDER BY Mois;",
+                new SqlParameter("@START", SqlDbType.DateTime2) { Value = periodStart },
+                new SqlParameter("@END", SqlDbType.DateTime2) { Value = periodEnd });
+
+            using (var workbook = new XLWorkbook())
             {
-                IXLWorksheet ws = wb.Worksheet("datas");
-                WriteQuery(ws, "A1", "A:B", @"SELECT COUNT(*) nb_dde,CONVERT(char(6),Date_integration_intranet,112) Mois FROM dbo.T_customer WHERE Date_integration_intranet>='20150101' GROUP BY CONVERT(char(6),Date_integration_intranet,112) ORDER BY Mois");
-                WriteQuery(ws, "K1", "K:M", @"SELECT CONVERT(char(6),s.Date,112) Mois,ISNULL(t.libel_type_customer,'') type,COUNT(*) nb_creation FROM dbo.T_Statut s JOIN dbo.T_customer c ON c.id=s.idDossier LEFT JOIN dbo.T_type_customer t ON t.id_type_customer=c.id_type_customer WHERE s.idStatut=6 AND s.Date>='20150101' GROUP BY CONVERT(char(6),s.Date,112),t.libel_type_customer ORDER BY Mois");
-                WriteQuery(ws, "G1", "G:H", @"SELECT CONVERT(char(6),s.Date,112) Mois,COUNT(*) nb_creation FROM dbo.T_Statut s WHERE s.idStatut=6 AND s.Date>='20150101' GROUP BY CONVERT(char(6),s.Date,112) ORDER BY Mois");
-                WriteQuery(ws, "D1", "D:E", @"SELECT CONVERT(char(6),s.Date,112) Mois,COUNT(*) nb_refus FROM dbo.T_Statut s WHERE s.idStatut=4 AND s.Date>='20150101' GROUP BY CONVERT(char(6),s.Date,112) ORDER BY Mois");
-                WriteQuery(ws, "P1", "P:T", @"SELECT s.idDossier,s.Date,CASE WHEN r.libelle_refus IS NULL THEN s.Comment ELSE r.libelle_refus END motif_refus,CONVERT(char(6),s.Date,112) date_mois,YEAR(s.Date) Annee FROM dbo.T_Statut s LEFT JOIN dbo.T_customer_libelle_refus r ON s.Comment=CONVERT(varchar(20),r.id_motif_refus) WHERE s.idStatut=4 AND s.Date>='20150101' ORDER BY s.idDossier DESC");
-                WriteQuery(ws, "W1", "W:X", @"SELECT LEFT(CONVERT(varchar,ref.Date,112),6) [Date],COUNT(cre.idDossier) [Nb dossier refusé puis créé] FROM (SELECT idDossier,Date FROM dbo.T_historique WHERE idStatut=4 AND Date>'20170101') ref JOIN (SELECT idDossier,Date FROM dbo.T_historique WHERE idStatut=6 AND Date>'20170101') cre ON ref.idDossier=cre.idDossier AND ref.Date<cre.Date GROUP BY LEFT(CONVERT(varchar,ref.Date,112),6)");
-                wb.Save();
+                IXLWorksheet creationSheet = workbook.AddWorksheet("creation");
+                WriteCrossTab(
+                    creationSheet,
+                    "Ouvertures de compte " + reportYear,
+                    creationsByType,
+                    "TypeClient",
+                    "Mois",
+                    "nb_creation");
+
+                IXLWorksheet refusalReasonSheet = workbook.AddWorksheet("refus 1");
+                WriteRefusalReasonCrossTab(
+                    refusalReasonSheet,
+                    "Refus par motif " + reportYear,
+                    refusalDetails);
+
+                IXLWorksheet refusalSummarySheet = workbook.AddWorksheet("refus 2");
+                WriteMonthlySummary(
+                    refusalSummarySheet,
+                    "Synthèse mensuelle " + reportYear,
+                    requests,
+                    creations,
+                    refusals,
+                    refusedThenCreated);
+
+                IXLWorksheet dataSheet = workbook.AddWorksheet("datas");
+                int nextRow = 1;
+                nextRow = WriteDataSection(dataSheet, nextRow, "Demandes", requests);
+                nextRow = WriteDataSection(dataSheet, nextRow, "Créations par type", creationsByType);
+                nextRow = WriteDataSection(dataSheet, nextRow, "Créations", creations);
+                nextRow = WriteDataSection(dataSheet, nextRow, "Refus", refusals);
+                nextRow = WriteDataSection(dataSheet, nextRow, "Détail des refus", refusalDetails);
+                WriteDataSection(
+                    dataSheet,
+                    nextRow,
+                    "Dossiers refusés puis créés",
+                    refusedThenCreated);
+
+                foreach (IXLWorksheet worksheet in workbook.Worksheets)
+                {
+                    worksheet.SheetView.FreezeRows(2);
+                    worksheet.Columns().AdjustToContents(1, 60);
+                    worksheet.Rows().AdjustToContents();
+                }
+
+                workbook.SaveAs(output);
             }
+
+            WriteLog(
+                "       Opening account statistics workbook generated" +
+                " - Year : " + reportYear +
+                " - Requests : " + SumColumn(requests, "nb_dde") +
+                " - Creations : " + SumColumn(creations, "nb_creation") +
+                " - Refusals : " + SumColumn(refusals, "nb_refus") +
+                " - File : " + output);
+
             return output;
+        }
+
+        private static int WriteDataSection(
+            IXLWorksheet worksheet,
+            int startRow,
+            string title,
+            DataTable data)
+        {
+            worksheet.Cell(startRow, 1).Value = title;
+            worksheet.Cell(startRow, 1).Style.Font.Bold = true;
+            worksheet.Cell(startRow, 1).Style.Fill.BackgroundColor = XLColor.DarkBlue;
+            worksheet.Cell(startRow, 1).Style.Font.FontColor = XLColor.White;
+
+            int tableRow = startRow + 1;
+            if (data.Rows.Count == 0)
+            {
+                worksheet.Cell(tableRow, 1).Value = "Aucune donnée";
+                return tableRow + 2;
+            }
+
+            worksheet.Cell(tableRow, 1).InsertTable(data, false);
+            return tableRow + data.Rows.Count + 3;
+        }
+
+        private static void WriteCrossTab(
+            IXLWorksheet worksheet,
+            string title,
+            DataTable source,
+            string rowField,
+            string columnField,
+            string valueField)
+        {
+            worksheet.Cell("A1").Value = title;
+            worksheet.Cell("A1").Style.Font.Bold = true;
+            worksheet.Cell("A1").Style.Font.FontSize = 14;
+
+            List<string> months = source.AsEnumerable()
+                .Select(row => Convert.ToString(row[columnField]))
+                .Where(value => !string.IsNullOrWhiteSpace(value))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(value => value)
+                .ToList();
+
+            List<string> categories = source.AsEnumerable()
+                .Select(row => Convert.ToString(row[rowField]))
+                .Where(value => !string.IsNullOrWhiteSpace(value))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(value => value)
+                .ToList();
+
+            worksheet.Cell(2, 1).Value = rowField;
+            for (int index = 0; index < months.Count; index++)
+                worksheet.Cell(2, index + 2).Value = months[index];
+            worksheet.Cell(2, months.Count + 2).Value = "Total";
+
+            int rowNumber = 3;
+            foreach (string category in categories)
+            {
+                worksheet.Cell(rowNumber, 1).Value = category;
+                int categoryTotal = 0;
+                for (int monthIndex = 0; monthIndex < months.Count; monthIndex++)
+                {
+                    int value = source.AsEnumerable()
+                        .Where(row => string.Equals(
+                            Convert.ToString(row[rowField]),
+                            category,
+                            StringComparison.OrdinalIgnoreCase))
+                        .Where(row => string.Equals(
+                            Convert.ToString(row[columnField]),
+                            months[monthIndex],
+                            StringComparison.OrdinalIgnoreCase))
+                        .Sum(row => Convert.ToInt32(row[valueField]));
+                    worksheet.Cell(rowNumber, monthIndex + 2).Value = value;
+                    categoryTotal += value;
+                }
+                worksheet.Cell(rowNumber, months.Count + 2).Value = categoryTotal;
+                rowNumber++;
+            }
+
+            worksheet.Cell(rowNumber, 1).Value = "Total général";
+            for (int monthIndex = 0; monthIndex < months.Count; monthIndex++)
+            {
+                int monthTotal = source.AsEnumerable()
+                    .Where(row => string.Equals(
+                        Convert.ToString(row[columnField]),
+                        months[monthIndex],
+                        StringComparison.OrdinalIgnoreCase))
+                    .Sum(row => Convert.ToInt32(row[valueField]));
+                worksheet.Cell(rowNumber, monthIndex + 2).Value = monthTotal;
+            }
+            worksheet.Cell(rowNumber, months.Count + 2).Value =
+                source.AsEnumerable().Sum(row => Convert.ToInt32(row[valueField]));
+
+            StyleSummaryRange(worksheet, rowNumber, months.Count + 2);
+        }
+
+        private static void WriteRefusalReasonCrossTab(
+            IXLWorksheet worksheet,
+            string title,
+            DataTable details)
+        {
+            DataTable summarized = new DataTable();
+            summarized.Columns.Add("Motif", typeof(string));
+            summarized.Columns.Add("Mois", typeof(string));
+            summarized.Columns.Add("Nombre", typeof(int));
+
+            var groups = details.AsEnumerable()
+                .GroupBy(row => new
+                {
+                    Motif = string.IsNullOrWhiteSpace(Convert.ToString(row["motif_refus"]))
+                        ? "Non renseigné"
+                        : Convert.ToString(row["motif_refus"]),
+                    Mois = Convert.ToString(row["Mois"])
+                });
+
+            foreach (var group in groups)
+                summarized.Rows.Add(group.Key.Motif, group.Key.Mois, group.Count());
+
+            WriteCrossTab(
+                worksheet,
+                title,
+                summarized,
+                "Motif",
+                "Mois",
+                "Nombre");
+        }
+
+        private static void WriteMonthlySummary(
+            IXLWorksheet worksheet,
+            string title,
+            DataTable requests,
+            DataTable creations,
+            DataTable refusals,
+            DataTable refusedThenCreated)
+        {
+            worksheet.Cell("A1").Value = title;
+            worksheet.Cell("A1").Style.Font.Bold = true;
+            worksheet.Cell("A1").Style.Font.FontSize = 14;
+
+            string[] headers =
+            {
+                "Mois",
+                "Demandes",
+                "Créations",
+                "Refus",
+                "Refusés puis créés"
+            };
+            for (int index = 0; index < headers.Length; index++)
+                worksheet.Cell(2, index + 1).Value = headers[index];
+
+            int year = DateTime.Now.Year;
+            for (int month = 1; month <= 12; month++)
+            {
+                string monthKey = year.ToString(CultureInfo.InvariantCulture) +
+                                  month.ToString("00", CultureInfo.InvariantCulture);
+                int row = month + 2;
+                worksheet.Cell(row, 1).Value = monthKey;
+                worksheet.Cell(row, 2).Value = FindMonthlyValue(requests, monthKey, "nb_dde");
+                worksheet.Cell(row, 3).Value = FindMonthlyValue(creations, monthKey, "nb_creation");
+                worksheet.Cell(row, 4).Value = FindMonthlyValue(refusals, monthKey, "nb_refus");
+                worksheet.Cell(row, 5).Value = FindMonthlyValue(
+                    refusedThenCreated,
+                    monthKey,
+                    "nb_refuse_puis_cree");
+            }
+
+            worksheet.Cell(15, 1).Value = "Total général";
+            worksheet.Cell(15, 2).Value = SumColumn(requests, "nb_dde");
+            worksheet.Cell(15, 3).Value = SumColumn(creations, "nb_creation");
+            worksheet.Cell(15, 4).Value = SumColumn(refusals, "nb_refus");
+            worksheet.Cell(15, 5).Value = SumColumn(
+                refusedThenCreated,
+                "nb_refuse_puis_cree");
+
+            StyleSummaryRange(worksheet, 15, 5);
+        }
+
+        private static int FindMonthlyValue(
+            DataTable table,
+            string month,
+            string valueColumn)
+        {
+            DataRow row = table.AsEnumerable().FirstOrDefault(item =>
+                string.Equals(
+                    Convert.ToString(item["Mois"]),
+                    month,
+                    StringComparison.OrdinalIgnoreCase));
+            return row == null ? 0 : Convert.ToInt32(row[valueColumn]);
+        }
+
+        private static int SumColumn(DataTable table, string columnName)
+        {
+            return table.AsEnumerable().Sum(row =>
+                row[columnName] == DBNull.Value
+                    ? 0
+                    : Convert.ToInt32(row[columnName]));
+        }
+
+        private static void StyleSummaryRange(
+            IXLWorksheet worksheet,
+            int lastRow,
+            int lastColumn)
+        {
+            IXLRange header = worksheet.Range(2, 1, 2, lastColumn);
+            header.Style.Font.Bold = true;
+            header.Style.Fill.BackgroundColor = XLColor.DarkBlue;
+            header.Style.Font.FontColor = XLColor.White;
+
+            IXLRange total = worksheet.Range(lastRow, 1, lastRow, lastColumn);
+            total.Style.Font.Bold = true;
+            total.Style.Fill.BackgroundColor = XLColor.LightBlue;
+
+            worksheet.Range(2, 1, lastRow, lastColumn)
+                .Style.Border.BottomBorder = XLBorderStyleValues.Thin;
         }
 
         private void WriteQuery(IXLWorksheet ws, string start, string clearColumns, string sql)
