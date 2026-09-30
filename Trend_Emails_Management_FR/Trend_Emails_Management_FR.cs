@@ -11,6 +11,7 @@ using System.IO;
 using System.IO.Compression;
 using System.Linq;
 using System.Net;
+using System.Text;
 using System.Text.RegularExpressions;
 
 namespace TREND_EMAILS_MANAGEMENT_FR
@@ -56,6 +57,7 @@ namespace TREND_EMAILS_MANAGEMENT_FR
         private string sql_connexion_parameter_global = "";
 
         // ----- Microsoft Graph client -----
+        private static readonly object logSyncRoot = new object();
         private GraphServiceClient graphService = null;
 
         public class JSON_file
@@ -156,7 +158,7 @@ namespace TREND_EMAILS_MANAGEMENT_FR
                     setParamDebug(p.debug);
                     setStartDateScan(p.start_date_scan);
                     setNumber_of_mails(p.number_of_mails);
-                    setsharedmailbox_folder_in( p.sharedmailbox_folder_in);
+                    setsharedmailbox_folder_in(p.sharedmailbox_folder_in);
                     setsharedmailbox_folder_out(p.sharedmailbox_folder_out);
                     setSqlConnexionParam(p.sql_connexion_parameter_global);
                     setEmailInCaseOfTechnicalIssueParam(p.email_in_case_of_technical_issue_parameter_global);
@@ -1316,25 +1318,160 @@ WHERE SK_VALID = 0
 
         private void WriteToFile(string message)
         {
-            if (string.IsNullOrWhiteSpace(logs_folder))
+            try
             {
-                logs_folder =
-                    AppDomain.CurrentDomain.BaseDirectory;
+                string targetLogsFolder = logs_folder;
+                if (string.IsNullOrWhiteSpace(targetLogsFolder))
+                    targetLogsFolder = AppDomain.CurrentDomain.BaseDirectory;
+
+                Directory.CreateDirectory(targetLogsFolder);
+
+                string logPath = Path.Combine(
+                    targetLogsFolder,
+                    "IMCA_" + global_session_name + "_" +
+                    DateTime.Now.ToString("dd_MM_yyyy") + "_" +
+                    country + "_" + global_application_name + ".txt");
+
+                string line =
+                    DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") +
+                    " - " + (message ?? "") + Environment.NewLine;
+
+                lock (logSyncRoot)
+                {
+                    WriteLogLineWithCrossProcessLock(logPath, line);
+                }
             }
+            catch (Exception ex)
+            {
+                WriteEmergencyLog(
+                    "WriteToFile failure" +
+                    " - Error : " + ex.Message +
+                    " - Original message : " + (message ?? ""));
+            }
+        }
 
-            Directory.CreateDirectory(logs_folder);
+        private static void WriteLogLineWithCrossProcessLock(
+            string logPath,
+            string line)
+        {
+            string mutexName =
+                "Local\\IMCA_TREND_LOG_" +
+                GetStableLogNameHash(logPath);
 
-            string filePath = Path.Combine(
-                logs_folder,
-                "IMCA_" + global_session_name + "_" +
-                DateTime.Now.ToString("dd_MM_yyyy") + "_" +
-                country + "_" +
-                global_application_name + ".txt");
+            using (var mutex =
+                new System.Threading.Mutex(false, mutexName))
+            {
+                bool lockTaken = false;
+                try
+                {
+                    try
+                    {
+                        lockTaken = mutex.WaitOne(TimeSpan.FromSeconds(10));
+                    }
+                    catch (System.Threading.AbandonedMutexException)
+                    {
+                        lockTaken = true;
+                    }
 
-            File.AppendAllText(
-                filePath,
-                DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") +
-                " - " + message + Environment.NewLine);
+                    if (!lockTaken)
+                        throw new IOException(
+                            "Unable to acquire the log mutex within 10 seconds");
+
+                    const int maxAttempts = 5;
+                    IOException lastWriteException = null;
+
+                    for (int attempt = 1; attempt <= maxAttempts; attempt++)
+                    {
+                        try
+                        {
+                            byte[] content = Encoding.UTF8.GetBytes(line);
+                            using (var stream = new FileStream(
+                                logPath,
+                                FileMode.Append,
+                                FileAccess.Write,
+                                FileShare.ReadWrite))
+                            {
+                                stream.Write(content, 0, content.Length);
+                                stream.Flush();
+                            }
+                            return;
+                        }
+                        catch (IOException ex)
+                        {
+                            lastWriteException = ex;
+                            if (attempt < maxAttempts)
+                                System.Threading.Thread.Sleep(attempt * 100);
+                        }
+                    }
+
+                    throw new IOException(
+                        "Unable to write the log file after " +
+                        maxAttempts + " attempts : " + logPath,
+                        lastWriteException);
+                }
+                finally
+                {
+                    if (lockTaken)
+                    {
+                        try { mutex.ReleaseMutex(); }
+                        catch (ApplicationException) { }
+                    }
+                }
+            }
+        }
+
+        private void WriteEmergencyLog(string message)
+        {
+            try
+            {
+                string emergencyFolder =
+                    string.IsNullOrWhiteSpace(temp_folder)
+                        ? AppDomain.CurrentDomain.BaseDirectory
+                        : temp_folder;
+
+                Directory.CreateDirectory(emergencyFolder);
+
+                string emergencyFile = Path.Combine(
+                    emergencyFolder,
+                    "IMCA_LOG_FAILURE_" + global_application_name +
+                    "_ACTION_ID_" +
+                    System.Diagnostics.Process.GetCurrentProcess().Id +
+                    "_" + DateTime.Now.ToString("dd_MM_yyyy") + ".txt");
+
+                string line =
+                    DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff") +
+                    " - " + (message ?? "") + Environment.NewLine;
+
+                byte[] content = Encoding.UTF8.GetBytes(line);
+                using (var stream = new FileStream(
+                    emergencyFile,
+                    FileMode.Append,
+                    FileAccess.Write,
+                    FileShare.ReadWrite))
+                {
+                    stream.Write(content, 0, content.Length);
+                    stream.Flush();
+                }
+            }
+            catch
+            {
+                // Last-resort protection: logging must never stop processing.
+            }
+        }
+
+        private static string GetStableLogNameHash(string value)
+        {
+            unchecked
+            {
+                uint hash = 2166136261;
+                foreach (char character in
+                    (value ?? "").ToUpperInvariant())
+                {
+                    hash ^= character;
+                    hash *= 16777619;
+                }
+                return hash.ToString("X8", CultureInfo.InvariantCulture);
+            }
         }
 
         private static string GetServicePath()

@@ -6,6 +6,7 @@ using System.Collections.Generic;
 using System.Data;
 using System.Data.SqlClient;
 using System.Diagnostics;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Reflection;
@@ -1489,6 +1490,8 @@ WHERE SK_VALID=0 AND PARAMETER=@PARAMETER";
         private void PurgeLogs()
         {
             const int retentionDays = 7;
+            const int actionRetentionDays = 1;
+
             string logPath = Path.Combine(service_path, logs_folder ?? "logs");
 
             if (!Directory.Exists(logPath))
@@ -1496,18 +1499,21 @@ WHERE SK_VALID=0 AND PARAMETER=@PARAMETER";
                 return;
             }
 
-            DateTime limitDate = DateTime.Now.Date.AddDays(-retentionDays);
+            DateTime standardLimitDate = DateTime.Now.Date.AddDays(-retentionDays);
+            DateTime actionLimitDate = DateTime.Now.Date.AddDays(-actionRetentionDays);
+
             int deletedFiles = 0;
             int failedFiles = 0;
 
             string[] files;
+
             try
             {
                 files = Directory.GetFiles(logPath, "*.txt", SearchOption.AllDirectories);
             }
             catch (Exception ex)
             {
-                WriteToFile("Log cleanup failed while listing files : " + ex.Message);
+                WriteToFile("       Log cleanup failed while listing files at " + DateTime.Now.ToString("dd / MM / yyyy HH: mm:ss") + " : " + ex.Message);
                 return;
             }
 
@@ -1515,23 +1521,42 @@ WHERE SK_VALID=0 AND PARAMETER=@PARAMETER";
             {
                 try
                 {
-                    if (File.GetLastWriteTime(file).Date < limitDate)
+                    DateTime fileDate = File.GetLastWriteTime(file).Date;
+                    string fileName = Path.GetFileName(file).ToUpperInvariant();
+
+                    bool isActionLog = fileName.Contains("_ACTION_ID_");
+
+                    if (isActionLog)
                     {
-                        File.Delete(file);
-                        deletedFiles++;
+                        // Conservation 1 jour
+                        if (fileDate < actionLimitDate)
+                        {
+                            File.Delete(file);
+                            deletedFiles++;
+                        }
+                    }
+                    else
+                    {
+                        // Conservation 7 jours
+                        if (fileDate < standardLimitDate)
+                        {
+                            File.Delete(file);
+                            deletedFiles++;
+                        }
                     }
                 }
                 catch (Exception ex)
                 {
                     failedFiles++;
-                    WriteToFile("Unable to delete log file [" + file + "] : " + ex.Message);
+                    WriteToFile("       Unable to delete log file [" + file + "] at " + DateTime.Now.ToString("dd / MM / yyyy HH: mm:ss") + " : " + ex.Message);
                 }
             }
 
             WriteToFile(
-                "Log cleanup completed. Deleted files : " + deletedFiles +
+                "       Log cleanup completed at " + DateTime.Now.ToString("dd / MM / yyyy HH: mm:ss") + " . Deleted files : " + deletedFiles +
                 ", failed files : " + failedFiles +
-                ", retention : " + retentionDays + " day(s)");
+                ", retention standard : " + retentionDays +
+                " day(s), action logs : " + actionRetentionDays + " day(s)");
         }
 
         protected void check_if_TODO(string logs, string temp_folder)
@@ -1824,32 +1849,193 @@ SET TODO_BY=@TODO_BY, ERROR=@ERROR_NUMBER, ERROR_TEXT=@ERROR_MSG WHERE ID=@ID";
             }
         }
 
-        public void WriteToFile(string message, long id = 0, string logs_folder = "logs", string action_name = "")
+        public void WriteToFile(
+            string message,
+            long id = 0,
+            string logs_folder = "logs",
+            string action_name = "")
         {
-            string targetFolder = service_path + "\\" + logs_folder;
-
-            lock (logLock)
+            try
             {
-                if (!Directory.Exists(targetFolder))
-                {
-                    Directory.CreateDirectory(targetFolder);
-                }
+                string basePath = string.IsNullOrWhiteSpace(service_path)
+                    ? AppDomain.CurrentDomain.BaseDirectory
+                    : service_path;
 
-                string filePath;
+                string configuredFolder = string.IsNullOrWhiteSpace(logs_folder)
+                    ? "logs"
+                    : logs_folder;
+
+                string targetFolder = Path.IsPathRooted(configuredFolder)
+                    ? configuredFolder
+                    : Path.Combine(basePath, configuredFolder);
+
+                Directory.CreateDirectory(targetFolder);
+
+                string fileName;
                 if (id == 0)
                 {
-                    filePath = targetFolder + "\\IMCA_" + session_name.ToUpper() + "_" +
-                               DateTime.Now.Date.ToString("dd_MM_yyyy") + ".txt";
+                    fileName =
+                        "IMCA_" + session_name.ToUpperInvariant() + "_" +
+                        DateTime.Now.ToString("dd_MM_yyyy") + ".txt";
                 }
                 else
                 {
-                    filePath = targetFolder + "\\IMCA_" + session_name.ToUpper() + "_" +
-                               DateTime.Now.Date.ToString("dd_MM_yyyy") + "_XX_" +
-                               action_name.ToUpper() + "_ACTION_ID_" + id + ".txt";
+                    fileName =
+                        "IMCA_" + session_name.ToUpperInvariant() + "_" +
+                        DateTime.Now.ToString("dd_MM_yyyy") + "_XX_" +
+                        (action_name ?? "").ToUpperInvariant() +
+                        "_ACTION_ID_" + id + ".txt";
                 }
 
-                // AppendAllText creates the file when it does not already exist.
-                File.AppendAllText(filePath, message + Environment.NewLine);
+                string filePath = Path.Combine(targetFolder, fileName);
+                string line = (message ?? "") + Environment.NewLine;
+
+                lock (logLock)
+                {
+                    WriteLogLineWithCrossProcessLock(filePath, line);
+                }
+            }
+            catch (Exception ex)
+            {
+                WriteEmergencyLog(
+                    "WriteToFile failure" +
+                    " - Error : " + ex.Message +
+                    " - Action ID : " + id +
+                    " - Action : " + (action_name ?? "") +
+                    " - Original message : " + (message ?? ""));
+            }
+        }
+
+        private static void WriteLogLineWithCrossProcessLock(
+            string logPath,
+            string line)
+        {
+            string mutexName =
+                "Local\\IMCA_SERVICE_LOG_" +
+                GetStableLogNameHash(logPath);
+
+            using (var mutex = new Mutex(false, mutexName))
+            {
+                bool lockTaken = false;
+                try
+                {
+                    try
+                    {
+                        lockTaken = mutex.WaitOne(TimeSpan.FromSeconds(10));
+                    }
+                    catch (AbandonedMutexException)
+                    {
+                        lockTaken = true;
+                    }
+
+                    if (!lockTaken)
+                    {
+                        throw new IOException(
+                            "Unable to acquire the log mutex within 10 seconds");
+                    }
+
+                    const int maxAttempts = 5;
+                    IOException lastWriteException = null;
+
+                    for (int attempt = 1; attempt <= maxAttempts; attempt++)
+                    {
+                        try
+                        {
+                            byte[] content = Encoding.UTF8.GetBytes(line);
+                            using (var stream = new FileStream(
+                                logPath,
+                                FileMode.Append,
+                                FileAccess.Write,
+                                FileShare.ReadWrite))
+                            {
+                                stream.Write(content, 0, content.Length);
+                                stream.Flush();
+                            }
+                            return;
+                        }
+                        catch (IOException ex)
+                        {
+                            lastWriteException = ex;
+                            if (attempt < maxAttempts)
+                            {
+                                Thread.Sleep(attempt * 100);
+                            }
+                        }
+                    }
+
+                    throw new IOException(
+                        "Unable to write the log file after " +
+                        maxAttempts + " attempts : " + logPath,
+                        lastWriteException);
+                }
+                finally
+                {
+                    if (lockTaken)
+                    {
+                        try { mutex.ReleaseMutex(); }
+                        catch (ApplicationException) { }
+                    }
+                }
+            }
+        }
+
+        private void WriteEmergencyLog(string message)
+        {
+            try
+            {
+                string basePath = string.IsNullOrWhiteSpace(service_path)
+                    ? AppDomain.CurrentDomain.BaseDirectory
+                    : service_path;
+
+                string configuredTempFolder = string.IsNullOrWhiteSpace(temp_folder)
+                    ? "temp"
+                    : temp_folder;
+
+                string emergencyFolder = Path.IsPathRooted(configuredTempFolder)
+                    ? configuredTempFolder
+                    : Path.Combine(basePath, configuredTempFolder);
+
+                Directory.CreateDirectory(emergencyFolder);
+
+                string emergencyFile = Path.Combine(
+                    emergencyFolder,
+                    "IMCA_LOG_FAILURE_IMCA_SERVICES_ACTION_ID_" +
+                    Process.GetCurrentProcess().Id + "_" +
+                    DateTime.Now.ToString("dd_MM_yyyy") + ".txt");
+
+                string line =
+                    DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff") +
+                    " - " + (message ?? "") + Environment.NewLine;
+
+                byte[] content = Encoding.UTF8.GetBytes(line);
+                using (var stream = new FileStream(
+                    emergencyFile,
+                    FileMode.Append,
+                    FileAccess.Write,
+                    FileShare.ReadWrite))
+                {
+                    stream.Write(content, 0, content.Length);
+                    stream.Flush();
+                }
+            }
+            catch
+            {
+                // Last-resort protection: logging must never stop the service.
+            }
+        }
+
+        private static string GetStableLogNameHash(string value)
+        {
+            unchecked
+            {
+                uint hash = 2166136261;
+                foreach (char character in
+                    (value ?? "").ToUpperInvariant())
+                {
+                    hash ^= character;
+                    hash *= 16777619;
+                }
+                return hash.ToString("X8", CultureInfo.InvariantCulture);
             }
         }
     }

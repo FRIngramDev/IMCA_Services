@@ -2,6 +2,7 @@
 using Microsoft.Graph.Models;
 using Microsoft.Kiota.Abstractions;
 using Newtonsoft.Json;
+using ClosedXML.Excel;
 using System;
 using System.Collections.Generic;
 using System.Data;
@@ -11,6 +12,7 @@ using System.IO;
 using System.Linq;
 using System.Net;
 using System.Net.Http;
+using System.Text;
 using System.Text.RegularExpressions;
 using System.Xml;
 namespace CREDIT_EMAILS_MANAGEMENT_FR
@@ -41,6 +43,10 @@ namespace CREDIT_EMAILS_MANAGEMENT_FR
         private string uri_webservice = "";
         private HashSet<string> credit_managers_contentieux_list = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private string logsFolder = "", tempFolder = "", sessionName = "";
+        private string maquettes_rapports_pj_credit = "", fr_ouverture_graph_send_as = "", fr_credit_administration_graph_send_as = "";
+        private string email_rapport_compteur = "", email_rapport_stat_ouverture = "", admin_ventes = "";
+        private string templatesReportsFolder = "";
+        private static readonly object logSyncRoot = new object();
         private GraphServiceClient graphService;
         private int mailboxId, refreshMinutes;
         private string mailboxName = "", mailboxAddress = "", inputFolderName = "", outputFolderName = "";
@@ -84,6 +90,12 @@ namespace CREDIT_EMAILS_MANAGEMENT_FR
             public string path_archives { get; set; } = "";
             public string dss_con_openrowset_parameter_global { get; set; } = "";
             public string uri_webservice { get; set; } = "";
+            public string maquettes_rapports_pj_credit { get; set; } = "";
+            public string fr_ouverture_graph_send_as { get; set; } = "";
+            public string fr_credit_administration_graph_send_as { get; set; } = "";
+            public string email_rapport_compteur { get; set; } = "";
+            public string email_rapport_stat_ouverture { get; set; } = "";
+            public string admin_ventes { get; set; } = "";
         }
 
         private sealed class MailboxConfiguration
@@ -295,6 +307,13 @@ namespace CREDIT_EMAILS_MANAGEMENT_FR
             path_archives = i.path_archives ?? "";
             dss_con_openrowset_parameter_global = i.dss_con_openrowset_parameter_global ?? "";
             uri_webservice = i.uri_webservice ?? "";
+            maquettes_rapports_pj_credit = i.maquettes_rapports_pj_credit ?? "";
+            fr_ouverture_graph_send_as = i.fr_ouverture_graph_send_as ?? "";
+            fr_credit_administration_graph_send_as = i.fr_credit_administration_graph_send_as ?? "";
+            email_rapport_compteur = i.email_rapport_compteur ?? "";
+            email_rapport_stat_ouverture = i.email_rapport_stat_ouverture ?? "";
+            admin_ventes = i.admin_ventes ?? "";
+            templatesReportsFolder = Path.Combine(GetServicePath(), maquettes_rapports_pj_credit);
             sql_connexion = GetImcaParameter(imca, sql_connexion_parameter_global);
             sql_gestion_cdes = GetImcaParameter(imca, sql_gestion_cdes_parameter_global);
             sql_dss_copie = GetImcaParameter(imca, sql_dss_copie_parameter_global);
@@ -2212,10 +2231,191 @@ WHERE MailboxId = @MAILBOX_ID
             return DateTime.TryParseExact(start_date_scan, "yyyyMMdd", CultureInfo.InvariantCulture, DateTimeStyles.None, out DateTime d) ? d : new DateTime(1900, 1, 1);
         }
 
-        private void WriteLog(string m)
+        private void WriteLog(string message)
         {
-            Directory.CreateDirectory(logsFolder);
-            File.AppendAllText(Path.Combine(logsFolder, "IMCA_" + sessionName + "_" + DateTime.Now.ToString("dd_MM_yyyy") + "_" + country + "_" + global_application_name + ".txt"), DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + " - " + m + Environment.NewLine);
+            try
+            {
+                Directory.CreateDirectory(logsFolder);
+
+                string logPath = Path.Combine(
+                    logsFolder,
+                    "IMCA_" +
+                    sessionName + "_" +
+                    DateTime.Now.ToString("dd_MM_yyyy") + "_" +
+                    country + "_" +
+                    global_application_name +
+                    ".txt");
+
+                string line =
+                    DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") +
+                    " - " +
+                    (message ?? "") +
+                    Environment.NewLine;
+
+                lock (logSyncRoot)
+                {
+                    WriteLogLineWithCrossProcessLock(logPath, line);
+                }
+            }
+            catch (Exception ex)
+            {
+                WriteEmergencyLog(
+                    "WriteLog failure" +
+                    " - Error : " + ex.Message +
+                    " - Original message : " + (message ?? ""));
+            }
+        }
+
+        private static void WriteLogLineWithCrossProcessLock(
+            string logPath,
+            string line)
+        {
+            string mutexName =
+                "Local\\IMCA_CREDIT_LOG_" +
+                GetStableLogNameHash(logPath);
+
+            using (var mutex =
+                new System.Threading.Mutex(false, mutexName))
+            {
+                bool lockTaken = false;
+
+                try
+                {
+                    try
+                    {
+                        lockTaken = mutex.WaitOne(
+                            TimeSpan.FromSeconds(10));
+                    }
+                    catch (System.Threading.AbandonedMutexException)
+                    {
+                        lockTaken = true;
+                    }
+
+                    if (!lockTaken)
+                    {
+                        throw new IOException(
+                            "Unable to acquire the log mutex within 10 seconds");
+                    }
+
+                    const int maxAttempts = 5;
+                    IOException lastWriteException = null;
+
+                    for (int attempt = 1;
+                         attempt <= maxAttempts;
+                         attempt++)
+                    {
+                        try
+                        {
+                            byte[] content = Encoding.UTF8.GetBytes(line);
+
+                            using (var stream = new FileStream(
+                                logPath,
+                                FileMode.Append,
+                                FileAccess.Write,
+                                FileShare.ReadWrite))
+                            {
+                                stream.Write(content, 0, content.Length);
+                                stream.Flush();
+                            }
+
+                            return;
+                        }
+                        catch (IOException ex)
+                        {
+                            lastWriteException = ex;
+
+                            if (attempt < maxAttempts)
+                            {
+                                System.Threading.Thread.Sleep(attempt * 100);
+                            }
+                        }
+                    }
+
+                    throw new IOException(
+                        "Unable to write the log file after " +
+                        maxAttempts +
+                        " attempts : " +
+                        logPath,
+                        lastWriteException);
+                }
+                finally
+                {
+                    if (lockTaken)
+                    {
+                        try
+                        {
+                            mutex.ReleaseMutex();
+                        }
+                        catch (ApplicationException)
+                        {
+                        }
+                    }
+                }
+            }
+        }
+
+        private void WriteEmergencyLog(string message)
+        {
+            try
+            {
+                string emergencyFolder =
+                    string.IsNullOrWhiteSpace(tempFolder)
+                        ? AppDomain.CurrentDomain.BaseDirectory
+                        : tempFolder;
+
+                Directory.CreateDirectory(emergencyFolder);
+
+                string emergencyFile = Path.Combine(
+                    emergencyFolder,
+                    "IMCA_LOG_FAILURE_" +
+                    global_application_name +
+                    "_ACTION_ID_" +
+                    System.Diagnostics.Process
+                        .GetCurrentProcess()
+                        .Id +
+                    "_" +
+                    DateTime.Now.ToString("dd_MM_yyyy") +
+                    ".txt");
+
+                string line =
+                    DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff") +
+                    " - " +
+                    (message ?? "") +
+                    Environment.NewLine;
+
+                byte[] content = Encoding.UTF8.GetBytes(line);
+
+                using (var stream = new FileStream(
+                    emergencyFile,
+                    FileMode.Append,
+                    FileAccess.Write,
+                    FileShare.ReadWrite))
+                {
+                    stream.Write(content, 0, content.Length);
+                    stream.Flush();
+                }
+            }
+            catch
+            {
+                // Last-resort protection: logging must never stop processing.
+            }
+        }
+
+        private static string GetStableLogNameHash(string value)
+        {
+            unchecked
+            {
+                uint hash = 2166136261;
+
+                foreach (char character in
+                    (value ?? "").ToUpperInvariant())
+                {
+                    hash ^= character;
+                    hash *= 16777619;
+                }
+
+                return hash.ToString("X8", CultureInfo.InvariantCulture);
+            }
         }
 
         private static IEnumerable<string> SplitQuotedValues(string v)
@@ -2405,5 +2605,653 @@ WHERE MailboxId = @MAILBOX_ID
             string l = System.Reflection.Assembly.GetEntryAssembly()?.Location;
             return string.IsNullOrWhiteSpace(l) ? AppDomain.CurrentDomain.BaseDirectory : Path.GetDirectoryName(l);
         }
+
+        public void Maquettes_Et_Rapports(string sql_con, string logs, string tmp_folder, string session_name)
+        {
+            string root = GetServicePath();
+            logsFolder = Path.Combine(root, logs ?? "");
+            tempFolder = Path.Combine(root, tmp_folder ?? "");
+            sessionName = session_name ?? "";
+            Directory.CreateDirectory(logsFolder);
+            Directory.CreateDirectory(tempFolder);
+
+            JsonFile cfg = JsonConvert.DeserializeObject<JsonFile>(
+                GetImcaParameter(sql_con, global_application_name) ?? "");
+
+            if (cfg?.countries == null || cfg.countries.Count == 0)
+            {
+                throw new InvalidOperationException(
+                    global_application_name + " parameters are empty or invalid");
+            }
+
+            foreach (Country item in cfg.countries)
+            {
+                ApplyCountryConfiguration(item, sql_con);
+                if (!IsTrue(active))
+                    continue;
+
+                ValidateTemplatesReportsConfiguration();
+                graphService = ConnectGraph();
+
+                WriteLog(
+                    "   Starting templates and reports processing" +
+                    " - Resources folder : " + templatesReportsFolder +
+                    " - Temp folder : " + tempFolder);
+
+                try
+                {
+                    WriteLog(
+                        "   Creating automatic opening account reminders and refusals");
+                    CreateAutomaticOpeningRequests();
+
+                    WriteLog(
+                        "   Processing pending opening account templates");
+                    ProcessPendingOpeningTemplates();
+
+                    WriteLog(
+                        "   Processing pending customer change templates");
+                    ProcessPendingCustomerChangeTemplates();
+
+                    WriteLog(
+                        "   Checking scheduled opening account reports");
+                    ProcessDueOpeningReports();
+
+                    WriteLog(
+                        "   Templates and reports processing completed");
+                }
+                catch (Exception ex)
+                {
+                    WriteLog(
+                        "   Maquettes_Et_Rapports error" +
+                        " - Error : " + ex.Message);
+
+                    SendTechnicalAlert(
+                        nameof(Maquettes_Et_Rapports),
+                        ex.Message,
+                        "TEMPLATES AND REPORTS");
+                }
+                finally
+                {
+                    graphService = null;
+                }
+            }
+        }
+
+        private void ValidateTemplatesReportsConfiguration()
+        {
+            if (string.IsNullOrWhiteSpace(sql_creation_compte) ||
+                string.IsNullOrWhiteSpace(templatesReportsFolder) ||
+                string.IsNullOrWhiteSpace(fr_ouverture_graph_send_as) ||
+                string.IsNullOrWhiteSpace(fr_credit_administration_graph_send_as))
+                throw new InvalidOperationException("Templates/reports configuration is incomplete");
+            if (!Directory.Exists(templatesReportsFolder))
+                throw new DirectoryNotFoundException("Templates/reports folder not found : " + templatesReportsFolder);
+        }
+
+        private void CreateAutomaticOpeningRequests()
+        {
+            const string firstReminder = @"
+INSERT INTO dbo.envoi_mail(id_dossier,nom_mail,email_destinataire,date_demande,top_traite)
+SELECT e.id_dossier,
+       CASE WHEN c.id_type_customer IN (2,4) THEN '1ere_relance_expert' ELSE '1ere_relance_export' END,
+       e.email_destinataire,GETDATE(),'N'
+FROM dbo.T_statut s
+JOIN dbo.T_customer c ON c.id=s.idDossier
+JOIN dbo.envoi_mail e ON e.id_dossier=c.id
+JOIN (SELECT idDossier,MAX(Datereception) Datereception FROM dbo.T_Doc_Recu WHERE fichier_valide=0 GROUP BY idDossier) d ON d.idDossier=e.id_dossier
+WHERE e.nom_mail='incomplet_expert' AND e.date_trt IS NOT NULL AND e.top_traite='O'
+  AND s.idStatut=1 AND c.id_type_customer IN (2,3,4)
+  AND DATEDIFF(day,e.date_trt,GETDATE())>=7
+  AND NOT EXISTS(SELECT 1 FROM dbo.envoi_mail x WHERE x.id_dossier=e.id_dossier AND x.nom_mail IN('1ere_relance_expert','1ere_relance_export'));";
+            ExecuteNonQuery(sql_creation_compte, firstReminder);
+
+            const string refusal = @"
+INSERT INTO dbo.envoi_mail(id_dossier,nom_mail,email_destinataire,date_demande,top_traite)
+SELECT e.id_dossier,
+       CASE WHEN c.id_type_customer IN (2,4) THEN 'refus_expert' ELSE 'refus_export' END,
+       e.email_destinataire,GETDATE(),'N'
+FROM dbo.T_statut s
+JOIN dbo.T_customer c ON c.id=s.idDossier
+JOIN dbo.envoi_mail e ON e.id_dossier=c.id
+WHERE e.nom_mail IN('1ere_relance_expert','1ere_relance_export')
+  AND e.date_trt IS NOT NULL AND e.top_traite='O' AND s.idStatut=3
+  AND c.id_type_customer IN (2,3,4) AND DATEDIFF(day,e.date_trt,GETDATE())>=7
+  AND NOT EXISTS(SELECT 1 FROM dbo.envoi_mail x WHERE x.id_dossier=e.id_dossier AND x.nom_mail IN('refus_expert','refus_export') AND x.id>e.id);
+UPDATE s SET Comment='3'
+FROM dbo.T_Statut s
+WHERE EXISTS(SELECT 1 FROM dbo.envoi_mail e WHERE e.id_dossier=s.idDossier AND e.top_traite='N' AND e.nom_mail IN('refus_expert','refus_export'));";
+            ExecuteNonQuery(sql_creation_compte, refusal);
+        }
+
+        private void ProcessPendingOpeningTemplates()
+        {
+            const string sql = @"
+SELECT e.id,
+       e.id_dossier,
+       e.nom_mail,
+       e.email_destinataire,
+       l.pieces_jointes,
+       l.[sujet email] AS sujet_email,
+       l.nom_fic_html,
+       s.idStatut
+FROM dbo.envoi_mail AS e
+INNER JOIN dbo.T_statut AS s
+    ON s.idDossier = e.id_dossier
+INNER JOIN dbo.lien_email AS l
+    ON l.nom_email_court = e.nom_mail
+WHERE e.top_traite = 'N'
+  AND e.id > 12719481
+ORDER BY e.id;";
+
+            DataTable rows = FillDataTable(sql_creation_compte, sql);
+            int sent = 0;
+            int skipped = 0;
+            int errors = 0;
+
+            WriteLog(
+                "       Opening account template queue" +
+                " - Minimum envoi_mail ID excluded : 12719481" +
+                " - Pending mail(s) found : " + rows.Rows.Count);
+
+            foreach (DataRow row in rows.Rows)
+            {
+                int id = Convert.ToInt32(row["id"]);
+                int dossierId = Convert.ToInt32(row["id_dossier"]);
+                int currentStatus = Convert.ToInt32(row["idStatut"]);
+                string mailName = Convert.ToString(row["nom_mail"]).Trim();
+                string recipient = Convert.ToString(row["email_destinataire"]).Trim();
+
+                try
+                {
+                    if (!CanSendOpeningTemplate(mailName, currentStatus))
+                    {
+                        skipped++;
+                        WriteLog(
+                            "       Opening account template skipped" +
+                            " - Queue ID : " + id +
+                            " - Dossier : " + dossierId +
+                            " - Template : " + mailName +
+                            " - Current status : " + currentStatus);
+                        continue;
+                    }
+
+                    string templatePath =
+                        SafeResourcePath(Convert.ToString(row["nom_fic_html"]));
+                    string html = File.ReadAllText(templatePath, Encoding.UTF8);
+                    TemplateCustomerData data =
+                        GetTemplateCustomerData(dossierId, recipient);
+
+                    html = ApplyCommonTemplateValues(html, data, dossierId);
+
+                    if (mailName.StartsWith(
+                            "incomplet_",
+                            StringComparison.OrdinalIgnoreCase) ||
+                        mailName.StartsWith(
+                            "1ere_relance_",
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        html = ApplyDocumentBlocks(html, dossierId);
+                    }
+
+                    if (mailName.StartsWith(
+                            "refus_",
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        html = ApplyRefusalBlocks(html, dossierId);
+                    }
+
+                    ValidateNoKnownUnresolvedMarkers(html, templatePath);
+
+                    string subject = BuildOpeningSubject(
+                        mailName,
+                        Convert.ToString(row["sujet_email"]),
+                        dossierId,
+                        data);
+
+                    List<string> attachments =
+                        ResolveAttachmentPaths(row["pieces_jointes"]);
+
+                    string bcc = "";
+                    if (mailName.Equals(
+                            "bienvenue",
+                            StringComparison.OrdinalIgnoreCase) ||
+                        mailName.Equals(
+                            "bienvenue_export",
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        bcc = "Composant.fr@ingrammicro.com";
+                    }
+                    else if (mailName.Equals(
+                                 "transformation_en_expert",
+                                 StringComparison.OrdinalIgnoreCase))
+                    {
+                        bcc = "Credit.Analystes@IngramMicro.fr";
+                    }
+
+                    string sendAs =
+                        mailName.Equals(
+                            "RIB",
+                            StringComparison.OrdinalIgnoreCase)
+                            ? fr_credit_administration_graph_send_as
+                            : fr_ouverture_graph_send_as;
+
+                    SendGraphMailWithAttachments(
+                        sendAs,
+                        recipient,
+                        "",
+                        bcc,
+                        subject,
+                        html,
+                        attachments);
+
+                    SetMailRequestStatus("dbo.envoi_mail", id, "O");
+
+                    if (mailName.StartsWith(
+                            "1ere_relance_",
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        UpdateOpeningStatus(dossierId, 3);
+                    }
+
+                    if (mailName.StartsWith(
+                            "refus_",
+                            StringComparison.OrdinalIgnoreCase) &&
+                        !mailName.Equals(
+                            "refus_express",
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        UpdateOpeningStatus(dossierId, 4);
+                    }
+
+                    sent++;
+                    WriteLog(
+                        "       Opening account template sent" +
+                        " - Queue ID : " + id +
+                        " - Dossier : " + dossierId +
+                        " - Template : " + mailName +
+                        " - Send as : " + sendAs +
+                        " - Recipient : " + recipient +
+                        " - Attachment(s) : " + attachments.Count +
+                        " - Subject : " + subject);
+                }
+                catch (Exception ex)
+                {
+                    errors++;
+                    SetMailRequestStatus("dbo.envoi_mail", id, "E");
+
+                    WriteLog(
+                        "       Opening account template error" +
+                        " - Queue ID : " + id +
+                        " - Dossier : " + dossierId +
+                        " - Template : " + mailName +
+                        " - Recipient : " + recipient +
+                        " - Error : " + ex.Message);
+
+                    SendTechnicalAlert(
+                        nameof(ProcessPendingOpeningTemplates),
+                        "Dossier " + dossierId + " - " + ex.Message,
+                        "OPENING TEMPLATE");
+                }
+            }
+
+            WriteLog(
+                "       Opening account template queue summary" +
+                " - Found : " + rows.Rows.Count +
+                " - Sent : " + sent +
+                " - Skipped : " + skipped +
+                " - Errors : " + errors);
+        }
+
+        private sealed class TemplateCustomerData
+        {
+            public string LastName = "", FirstName = "", CustomerCode = "", CustomerName = "", Rcs = "", Bank = "", Agency = "", Iban = "", Bic = "";
+        }
+
+        private TemplateCustomerData GetTemplateCustomerData(int dossierId, string recipient)
+        {
+            var d = new TemplateCustomerData();
+            const string sql = @"
+SELECT TOP(1) ISNULL(i.nom,'') nom,ISNULL(i.prenom,'') prenom,
+ ISNULL(c.ImpCustNbr,'') code,ISNULL(c.raison_soc,'') raison,
+ RIGHT(REPLACE(ISNULL(c.siret,''),'FR',''),9) rcs,
+ ISNULL(b.nom_banque,'') banque,ISNULL(b.agence,'') agence,ISNULL(b.IBAN,'') iban,ISNULL(b.Code_BIC,'') bic
+FROM dbo.T_customer c
+LEFT JOIN dbo.T_interlocuteurs i ON i.id=c.id AND i.email=@EMAIL
+LEFT JOIN dbo.T_IBAN b ON b.iddossier=c.id
+WHERE c.id=@ID;";
+            DataTable t = FillDataTable(sql_creation_compte, sql, new SqlParameter("@EMAIL", SqlDbType.VarChar, 320) { Value = recipient ?? "" }, new SqlParameter("@ID", SqlDbType.Int) { Value = dossierId });
+            if (t.Rows.Count == 0) return d;
+            DataRow r = t.Rows[0];
+            d.LastName = Convert.ToString(r["nom"]); d.FirstName = Convert.ToString(r["prenom"]); d.CustomerCode = Convert.ToString(r["code"]); d.CustomerName = Convert.ToString(r["raison"]); d.Rcs = Convert.ToString(r["rcs"]); d.Bank = Convert.ToString(r["banque"]); d.Agency = Convert.ToString(r["agence"]); d.Iban = Convert.ToString(r["iban"]); d.Bic = Convert.ToString(r["bic"]);
+            return d;
+        }
+
+        private static string ApplyCommonTemplateValues(string html, TemplateCustomerData d, int dossierId)
+        {
+            return (html ?? "").Replace("[NOM]", d.LastName).Replace("[PRENOM]", d.FirstName).Replace("[CODE_CLIENT]", d.CustomerCode)
+                .Replace("[NOM_CLIENT]", d.CustomerName).Replace("[RCS]", d.Rcs).Replace("[BANQUE]", d.Bank).Replace("[AGENCE]", d.Agency)
+                .Replace("[IBAN]", d.Iban).Replace("[BIC]", d.Bic).Replace("[NUM_DEMANDE]", dossierId.ToString(CultureInfo.InvariantCulture));
+        }
+
+        private string ApplyDocumentBlocks(string html, int dossierId)
+        {
+            DataTable valid = FillDataTable(sql_creation_compte, "SELECT d.NomDoc FROM dbo.T_Doc_Recu r JOIN dbo.T_Doc d ON d.idDoc=r.idDoc WHERE r.fichier_valide=1 AND r.idDossier=@ID;", new SqlParameter("@ID", SqlDbType.Int) { Value = dossierId });
+            foreach (DataRow r in valid.Rows) html = RemoveDelimitedBlock(html, "[" + Convert.ToString(r[0]) + "]", "[/" + Convert.ToString(r[0]) + "]");
+            DataTable all = FillDataTable(sql_creation_compte, "SELECT NomDoc FROM dbo.T_Doc;");
+            foreach (DataRow r in all.Rows) { string n = Convert.ToString(r[0]); html = html.Replace("[" + n + "]", "").Replace("[/" + n + "]", ""); }
+            return html;
+        }
+
+        private string ApplyRefusalBlocks(string html, int dossierId)
+        {
+            DataTable all = FillDataTable(sql_creation_compte, "SELECT id_motif_refus FROM dbo.T_customer_libelle_refus ORDER BY id_motif_refus;");
+            DataTable selected = FillDataTable(sql_creation_compte, "SELECT TRY_CONVERT(int,Comment) id FROM dbo.T_Statut WHERE idDossier=@ID AND TRY_CONVERT(int,Comment) IS NOT NULL;", new SqlParameter("@ID", SqlDbType.Int) { Value = dossierId });
+            var keep = new HashSet<int>(selected.AsEnumerable().Select(r => Convert.ToInt32(r[0])));
+            foreach (DataRow r in all.Rows) { int n = Convert.ToInt32(r[0]); string a = "[" + n + "]", b = "[/" + n + "]"; html = keep.Contains(n) ? html.Replace(a, "").Replace(b, "") : RemoveDelimitedBlock(html, a, b); }
+            return html;
+        }
+
+        private static string RemoveDelimitedBlock(string value, string start, string end)
+        {
+            int a = (value ?? "").IndexOf(start, StringComparison.OrdinalIgnoreCase); if (a < 0) return value;
+            int b = value.IndexOf(end, a + start.Length, StringComparison.OrdinalIgnoreCase); if (b < 0) return value;
+            return value.Remove(a, b + end.Length - a);
+        }
+
+        private static bool CanSendOpeningTemplate(string name, int status)
+        {
+            if (new[] { "bienvenue", "bienvenue_export", "rgpd", "transformation_en_expert", "RIB" }.Contains(name, StringComparer.OrdinalIgnoreCase)) return status == 6;
+            return name.StartsWith("incomplet_", StringComparison.OrdinalIgnoreCase) || name.StartsWith("refus_", StringComparison.OrdinalIgnoreCase) || name.StartsWith("1ere_relance_", StringComparison.OrdinalIgnoreCase) || name.IndexOf("ligne_credit", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        private static string BuildOpeningSubject(string name, string subject, int dossierId, TemplateCustomerData data)
+        {
+            if (name.Equals("RIB", StringComparison.OrdinalIgnoreCase)) return data.CustomerCode + " - " + data.CustomerName + " - RCS " + data.Rcs + " - Dossier n° " + dossierId;
+            return (subject ?? "").Replace(" - version Export", "").Replace(" - Expert", "").Replace(" - Export", "").Replace(" - Express", "") + " - Dossier n° " + dossierId;
+        }
+
+        private void ProcessPendingCustomerChangeTemplates()
+        {
+            const string sql = @"
+SELECT q.id,
+       q.id_demande,
+       q.nom_mail,
+       w.email_demandeur,
+       t.libelle_typologie,
+       ISNULL(w.motif_refus, '') AS motif_refus,
+       CONVERT(varchar(10), w.quand, 103) AS date_demande,
+       w.branch_customer_nbr,
+       CASE
+           WHEN w.id_typologie = 1 THEN ISNULL(a.cust_name, '')
+           ELSE ISNULL(c.cust_name, '')
+       END AS cust_name
+FROM dbo.T_Changement_coordonnees_client_via_le_WEB_envoi_emails AS q
+INNER JOIN dbo.T_Changement_coordonnees_client_via_le_WEB AS w
+    ON w.id_demande = q.id_demande
+INNER JOIN dbo.T_Changement_coordonnees_client_via_le_WEB_liste_typologie AS t
+    ON t.id_typologie = w.id_typologie
+LEFT JOIN DSS_COPIE.dbo.customer AS c
+    ON c.branch_customer_nbr = w.branch_customer_nbr
+LEFT JOIN dbo.T_Changement_coordonnees_client_via_le_WEB_adresse_facturation AS a
+    ON a.id_demande = w.id_demande
+WHERE q.top_traite = 'N'
+ORDER BY q.id;";
+
+            DataTable rows = FillDataTable(sql_creation_compte, sql);
+            int sent = 0;
+            int errors = 0;
+
+            WriteLog(
+                "       Customer change template queue" +
+                " - Pending mail(s) found : " + rows.Rows.Count);
+
+            foreach (DataRow row in rows.Rows)
+            {
+                int id = Convert.ToInt32(row["id"]);
+                int requestId = Convert.ToInt32(row["id_demande"]);
+                string templateName = Convert.ToString(row["nom_mail"]);
+                string recipient = Convert.ToString(row["email_demandeur"]);
+
+                try
+                {
+                    string path = SafeResourcePath(templateName + ".html");
+                    string html = File.ReadAllText(path, Encoding.UTF8);
+
+                    html = html
+                        .Replace("[CODE_CLIENT]", Convert.ToString(row["branch_customer_nbr"]))
+                        .Replace("[MOTIF]", Convert.ToString(row["libelle_typologie"]))
+                        .Replace("[NOM_CLIENT]", Convert.ToString(row["cust_name"]))
+                        .Replace("[DATE_DEMANDE]", Convert.ToString(row["date_demande"]))
+                        .Replace("[MOTIF_REFUS]", Convert.ToString(row["motif_refus"]))
+                        .Replace(
+                            "[NUM_DEMANDE]",
+                            requestId.ToString(CultureInfo.InvariantCulture));
+
+                    ValidateNoKnownUnresolvedMarkers(html, path);
+
+                    bool refusal = templateName.EndsWith(
+                        "_REFUS",
+                        StringComparison.OrdinalIgnoreCase);
+
+                    string subject =
+                        (refusal ? "Refus" : "Acceptation") +
+                        " de votre demande n° " + requestId +
+                        " (" + Convert.ToString(row["libelle_typologie"]) + ")";
+
+                    string cc = templateName.Contains("LIVRAISON")
+                        ? ""
+                        : admin_ventes;
+                    string bcc = templateName.Contains("RIB")
+                        ? "analystes.credit@ingrammicro.fr"
+                        : "rapports_recouvrement@ingrammicro.com";
+
+                    SendGraphMailWithAttachments(
+                        fr_credit_administration_graph_send_as,
+                        recipient,
+                        cc,
+                        bcc,
+                        subject,
+                        html,
+                        new List<string>());
+
+                    SetMailRequestStatus(
+                        "dbo.T_Changement_coordonnees_client_via_le_WEB_envoi_emails",
+                        id,
+                        "O");
+
+                    sent++;
+                    WriteLog(
+                        "       Customer change template sent" +
+                        " - Queue ID : " + id +
+                        " - Request : " + requestId +
+                        " - Template : " + templateName +
+                        " - Send as : " +
+                        fr_credit_administration_graph_send_as +
+                        " - Recipient : " + recipient +
+                        " - Subject : " + subject);
+                }
+                catch (Exception ex)
+                {
+                    errors++;
+                    SetMailRequestStatus(
+                        "dbo.T_Changement_coordonnees_client_via_le_WEB_envoi_emails",
+                        id,
+                        "E");
+
+                    WriteLog(
+                        "       Customer change template error" +
+                        " - Queue ID : " + id +
+                        " - Request : " + requestId +
+                        " - Template : " + templateName +
+                        " - Recipient : " + recipient +
+                        " - Error : " + ex.Message);
+
+                    SendTechnicalAlert(
+                        nameof(ProcessPendingCustomerChangeTemplates),
+                        "Demande " + requestId + " - " + ex.Message,
+                        "CUSTOMER CHANGE TEMPLATE");
+                }
+            }
+
+            WriteLog(
+                "       Customer change template queue summary" +
+                " - Found : " + rows.Rows.Count +
+                " - Sent : " + sent +
+                " - Errors : " + errors);
+        }
+
+        private void ProcessDueOpeningReports()
+        {
+            DateTime now = DateTime.Now;
+            DateTime nextCounter =
+                GetReportParameterDate("date_envoi_prochain_rapport_compteur");
+
+            WriteLog(
+                "       Opening account report schedule" +
+                " - Current date : " + now.ToString("dd/MM/yyyy HH:mm:ss") +
+                " - Counter report due : " +
+                nextCounter.ToString("dd/MM/yyyy HH:mm:ss"));
+
+            if (now >= nextCounter)
+            {
+                DateTime last = GetReportParameterDate(
+                    "date_envoi_dernier_rapport_compteur");
+
+                WriteLog(
+                    "       Generating detailed opening account report" +
+                    " - Previous report date : " +
+                    last.ToString("dd/MM/yyyy HH:mm:ss"));
+
+                string file = CreateDetailedOpeningReport(last);
+
+                SendGraphMailWithAttachments(
+                    fr_ouverture_graph_send_as,
+                    email_rapport_compteur,
+                    "",
+                    "",
+                    "Détail des ouvertures de compte (Semaine précédente)",
+                    "Ci-joint.",
+                    new List<string> { file });
+
+                SetReportParameterDate(
+                    "date_envoi_dernier_rapport_compteur",
+                    now);
+                SetReportParameterDate(
+                    "date_envoi_prochain_rapport_compteur",
+                    nextCounter.AddDays(7));
+
+                WriteLog(
+                    "       Detailed opening account report sent" +
+                    " - Send as : " + fr_ouverture_graph_send_as +
+                    " - File : " + file +
+                    " - Recipients : " + email_rapport_compteur);
+            }
+            else
+            {
+                WriteLog(
+                    "       Detailed opening account report not due");
+            }
+
+            DateTime nextStats = GetReportParameterDate(
+                "date_envoi_prochain_rapport_stat_ouverture");
+
+            WriteLog(
+                "       Opening account statistics report schedule" +
+                " - Due : " + nextStats.ToString("dd/MM/yyyy HH:mm:ss"));
+
+            if (now >= nextStats)
+            {
+                WriteLog(
+                    "       Generating opening account statistics report");
+
+                string file = CreateOpeningStatisticsReport();
+
+                SendGraphMailWithAttachments(
+                    fr_ouverture_graph_send_as,
+                    email_rapport_stat_ouverture,
+                    "",
+                    "",
+                    "Statistiques ouvertures de compte",
+                    "Ci-joint.",
+                    new List<string> { file });
+
+                SetReportParameterDate(
+                    "date_envoi_prochain_rapport_stat_ouverture",
+                    nextStats.AddDays(7));
+
+                WriteLog(
+                    "       Opening account statistics report sent" +
+                    " - Send as : " + fr_ouverture_graph_send_as +
+                    " - File : " + file +
+                    " - Recipients : " + email_rapport_stat_ouverture);
+            }
+            else
+            {
+                WriteLog(
+                    "       Opening account statistics report not due");
+            }
+        }
+
+        private string CreateOpeningStatisticsReport()
+        {
+            string source = SafeResourcePath("stat_ouverture_compte.xlsx"); string output = Path.Combine(tempFolder, DateTime.Now.ToString("yyyyMMdd_HHmmss") + "_stat_ouverture_compte.xlsx"); File.Copy(source, output, true);
+            using (var wb = new XLWorkbook(output))
+            {
+                IXLWorksheet ws = wb.Worksheet("datas");
+                WriteQuery(ws, "A1", "A:B", @"SELECT COUNT(*) nb_dde,CONVERT(char(6),Date_integration_intranet,112) Mois FROM dbo.T_customer WHERE Date_integration_intranet>='20150101' GROUP BY CONVERT(char(6),Date_integration_intranet,112) ORDER BY Mois");
+                WriteQuery(ws, "K1", "K:M", @"SELECT CONVERT(char(6),s.Date,112) Mois,ISNULL(t.libel_type_customer,'') type,COUNT(*) nb_creation FROM dbo.T_Statut s JOIN dbo.T_customer c ON c.id=s.idDossier LEFT JOIN dbo.T_type_customer t ON t.id_type_customer=c.id_type_customer WHERE s.idStatut=6 AND s.Date>='20150101' GROUP BY CONVERT(char(6),s.Date,112),t.libel_type_customer ORDER BY Mois");
+                WriteQuery(ws, "G1", "G:H", @"SELECT CONVERT(char(6),s.Date,112) Mois,COUNT(*) nb_creation FROM dbo.T_Statut s WHERE s.idStatut=6 AND s.Date>='20150101' GROUP BY CONVERT(char(6),s.Date,112) ORDER BY Mois");
+                WriteQuery(ws, "D1", "D:E", @"SELECT CONVERT(char(6),s.Date,112) Mois,COUNT(*) nb_refus FROM dbo.T_Statut s WHERE s.idStatut=4 AND s.Date>='20150101' GROUP BY CONVERT(char(6),s.Date,112) ORDER BY Mois");
+                WriteQuery(ws, "P1", "P:T", @"SELECT s.idDossier,s.Date,CASE WHEN r.libelle_refus IS NULL THEN s.Comment ELSE r.libelle_refus END motif_refus,CONVERT(char(6),s.Date,112) date_mois,YEAR(s.Date) Annee FROM dbo.T_Statut s LEFT JOIN dbo.T_customer_libelle_refus r ON s.Comment=CONVERT(varchar(20),r.id_motif_refus) WHERE s.idStatut=4 AND s.Date>='20150101' ORDER BY s.idDossier DESC");
+                WriteQuery(ws, "W1", "W:X", @"SELECT LEFT(CONVERT(varchar,ref.Date,112),6) [Date],COUNT(cre.idDossier) [Nb dossier refusé puis créé] FROM (SELECT idDossier,Date FROM dbo.T_historique WHERE idStatut=4 AND Date>'20170101') ref JOIN (SELECT idDossier,Date FROM dbo.T_historique WHERE idStatut=6 AND Date>'20170101') cre ON ref.idDossier=cre.idDossier AND ref.Date<cre.Date GROUP BY LEFT(CONVERT(varchar,ref.Date,112),6)");
+                wb.Save();
+            }
+            return output;
+        }
+
+        private void WriteQuery(IXLWorksheet ws, string start, string clearColumns, string sql)
+        { ws.Columns(clearColumns).Clear(XLClearOptions.Contents); DataTable t = FillDataTable(sql_creation_compte, sql); ws.Cell(start).InsertTable(t, false); }
+
+        private string CreateDetailedOpeningReport(DateTime lastReport)
+        {
+            string source = SafeResourcePath("modele_calendrier_jour_ferie.xlsx"); string output = Path.Combine(tempFolder, DateTime.Now.ToString("yyyyMMdd_HHmmss") + "_detail_ouverture_compte.xlsx"); File.Copy(source, output, true);
+            DataTable data = FillDataTable(sql_creation_compte, BuildDetailedReportSql(), new SqlParameter("@LAST_REPORT", SqlDbType.DateTime2) { Value = lastReport });
+            InsertDetailedStats(data, lastReport);
+            using (var wb = new XLWorkbook(output))
+            {
+                IXLWorksheet result = wb.Worksheets.FirstOrDefault(x => x.Name.Equals("resultat", StringComparison.OrdinalIgnoreCase)) ?? wb.AddWorksheet("resultat"); result.Clear(); result.Cell(1, 1).InsertTable(data, false);
+                IXLWorksheet settings = wb.Worksheet("ne pas modifier"); settings.Cell("E2").Value = DateTime.Now.Year; TimeSpan start = ReadTime(settings, "B2", new TimeSpan(9, 0, 0)), end = ReadTime(settings, "B3", new TimeSpan(18, 0, 0)); HashSet<DateTime> holidays = FrenchHolidays(data.AsEnumerable().SelectMany(r => new[] { AsNullableDate(r, "Date_integration_intranet"), AsNullableDate(r, "Date") }).Where(d => d.HasValue).Select(d => d.Value.Year));
+                for (int i = 0; i < data.Rows.Count; i++) { DataRow r = data.Rows[i]; DateTime? begin = AsNullableDate(r, "Date_integration_intranet"), finish = AsNullableDate(r, "Date"), phoneBegin = AsNullableDate(r, "Date de passage par statut 13 A relancer par téléphone"), phoneEnd = AsNullableDate(r, "Date de passage par statut 14 A créer"); double total = BusinessSeconds(begin, finish, start, end, holidays), phone = BusinessSeconds(phoneBegin, phoneEnd, start, end, holidays), net = Math.Max(0, total - phone); result.Cell(i + 2, 15).Value = TimeSpan.FromSeconds(net); result.Cell(i + 2, 16).Value = TimeSpan.FromSeconds(total); UpdateStatsBusinessDelay(Convert.ToInt32(r["idDossier"]), lastReport, Convert.ToInt32(Math.Round(net))); }
+                result.Column(15).Style.NumberFormat.Format = "[h]:mm:ss"; result.Column(16).Style.NumberFormat.Format = "[h]:mm:ss"; wb.Save();
+            }
+            return output;
+        }
+
+        private static string BuildDetailedReportSql() { return @"SELECT s.idDossier,s.idStatut,l.LibelleStatut,s.Date,c.id_type_customer,t.libel_type_customer,c.Date_integration_intranet,DATEDIFF(hour,c.Date_integration_intranet,s.Date) delai_traitement_en_heure,CAST(NULL AS datetime) [Date passage par statut incomplet],CAST(NULL AS int) [delai entre l'enregistrement et passage en incomplet],CAST(NULL AS int) [delai entre passage en incomplet et dernier statut connu],h13.d [Date de passage par statut 13 A relancer par téléphone],h14.d [Date de passage par statut 14 A créer],DATEDIFF(hour,h13.d,h14.d) [delai de passage entre le statut  13 a relancer par téléphone et le statut 14 à créer],CAST(NULL AS int) [delai traitement en heure déduction faite du temps de relance tel] FROM dbo.T_Statut s JOIN dbo.T_customer c ON c.id=s.idDossier JOIN dbo.T_type_customer t ON t.id_type_customer=c.id_type_customer JOIN dbo.T_Libelle_Statut l ON l.IdStatut=s.idStatut OUTER APPLY(SELECT MIN(Date) d FROM dbo.T_historique WHERE idDossier=s.idDossier AND idStatut=13) h13 OUTER APPLY(SELECT MIN(Date) d FROM dbo.T_historique WHERE idDossier=s.idDossier AND idStatut=14) h14 WHERE s.Date>@LAST_REPORT ORDER BY s.idDossier;"; }
+        private static DateTime? AsNullableDate(DataRow r, string c) { return !r.Table.Columns.Contains(c) || r[c] == DBNull.Value ? (DateTime?)null : Convert.ToDateTime(r[c]); }
+        private static TimeSpan ReadTime(IXLWorksheet ws, string cell, TimeSpan fallback) { try { object v = ws.Cell(cell).Value; if (v is TimeSpan) return (TimeSpan)v; if (v is DateTime) return ((DateTime)v).TimeOfDay; if (TimeSpan.TryParse(Convert.ToString(v), out TimeSpan parsed)) return parsed; } catch { } return fallback; }
+        private static double BusinessSeconds(DateTime? from, DateTime? to, TimeSpan start, TimeSpan end, HashSet<DateTime> holidays) { if (!from.HasValue || !to.HasValue || to <= from) return 0; double seconds = 0; for (DateTime d = from.Value.Date; d <= to.Value.Date; d = d.AddDays(1)) { if (d.DayOfWeek == DayOfWeek.Saturday || d.DayOfWeek == DayOfWeek.Sunday || holidays.Contains(d)) continue; DateTime a = d + start, b = d + end, left = from.Value > a ? from.Value : a, right = to.Value < b ? to.Value : b; if (right > left) seconds += (right - left).TotalSeconds; } return seconds; }
+        private static HashSet<DateTime> FrenchHolidays(IEnumerable<int> years) { var h = new HashSet<DateTime>(); foreach (int y in years.Distinct()) { DateTime easter = EasterSunday(y); foreach (DateTime d in new[] { new DateTime(y, 1, 1), easter.AddDays(1), new DateTime(y, 5, 1), new DateTime(y, 5, 8), easter.AddDays(39), easter.AddDays(50), new DateTime(y, 7, 14), new DateTime(y, 8, 15), new DateTime(y, 11, 1), new DateTime(y, 11, 11), new DateTime(y, 12, 25) }) h.Add(d.Date); } return h; }
+        private static DateTime EasterSunday(int year) { int a = year % 19, b = year / 100, c = year % 100, d = b / 4, e = b % 4, f = (b + 8) / 25, g = (b - f + 1) / 3, h = (19 * a + b - d - g + 15) % 30, i = c / 4, k = c % 4, l = (32 + 2 * e + 2 * i - h - k) % 7, m = (a + 11 * h + 22 * l) / 451, month = (h + l - 7 * m + 114) / 31, day = (h + l - 7 * m + 114) % 31 + 1; return new DateTime(year, month, day); }
+        private void InsertDetailedStats(DataTable data, DateTime lastReport) { foreach (DataRow r in data.Rows) { ExecuteNonQuery(sql_creation_compte, @"IF NOT EXISTS(SELECT 1 FROM dbo.T_STATS_OUVERTURE_COMPTE WHERE idDossier=@ID AND annee=DATEPART(year,@D) AND num_sem=DATEPART(week,@D)) INSERT INTO dbo.T_STATS_OUVERTURE_COMPTE(idDossier,idStatut,LibelleStatut,[Date],id_type_customer,libel_type_customer,Date_integration_intranet,delai_traitement_en_heure,annee,num_sem) VALUES(@ID,@S,@L,@DATE,@T,@TL,@I,@H,DATEPART(year,@D),DATEPART(week,@D));", new SqlParameter("@ID", SqlDbType.Int) { Value = r["idDossier"] }, new SqlParameter("@S", SqlDbType.Int) { Value = r["idStatut"] }, new SqlParameter("@L", SqlDbType.NVarChar, 500) { Value = Convert.ToString(r["LibelleStatut"]) }, new SqlParameter("@DATE", SqlDbType.DateTime) { Value = r["Date"] }, new SqlParameter("@T", SqlDbType.Int) { Value = r["id_type_customer"] }, new SqlParameter("@TL", SqlDbType.NVarChar, 500) { Value = Convert.ToString(r["libel_type_customer"]) }, new SqlParameter("@I", SqlDbType.DateTime) { Value = r["Date_integration_intranet"] }, new SqlParameter("@H", SqlDbType.Int) { Value = r["delai_traitement_en_heure"] == DBNull.Value ? (object)DBNull.Value : r["delai_traitement_en_heure"] }, new SqlParameter("@D", SqlDbType.DateTime) { Value = lastReport }); } }
+        private void UpdateStatsBusinessDelay(int dossierId, DateTime period, int seconds) { ExecuteNonQuery(sql_creation_compte, "UPDATE dbo.T_STATS_OUVERTURE_COMPTE SET [delai traitement en heure déduction faite du temps de relance tel]=@S WHERE idDossier=@ID AND annee=DATEPART(year,@D) AND num_sem=DATEPART(week,@D);", new SqlParameter("@S", SqlDbType.Int) { Value = seconds }, new SqlParameter("@ID", SqlDbType.Int) { Value = dossierId }, new SqlParameter("@D", SqlDbType.DateTime) { Value = period }); }
+
+        private DateTime GetReportParameterDate(string name) { string v = ExecuteScalarString(sql_creation_compte, "SELECT ISNULL(ParameterValue,'') FROM dbo.T_STATS_OUVERTURE_COMPTEUR_PARAMETERS WHERE ParameterName=@N;", new SqlParameter("@N", SqlDbType.VarChar, 100) { Value = name }); if (!DateTime.TryParse(v, CultureInfo.InvariantCulture, DateTimeStyles.AssumeLocal, out DateTime d)) throw new InvalidDataException("Invalid report parameter " + name + " : " + v); return d; }
+        private void SetReportParameterDate(string name, DateTime value) { ExecuteNonQuery(sql_creation_compte, @"MERGE dbo.T_STATS_OUVERTURE_COMPTEUR_PARAMETERS t USING(SELECT @N ParameterName)s ON s.ParameterName=t.ParameterName WHEN MATCHED THEN UPDATE SET ParameterValue=@V,UpdatedAtUtc=SYSUTCDATETIME() WHEN NOT MATCHED THEN INSERT(ParameterName,ParameterValue) VALUES(@N,@V);", new SqlParameter("@N", SqlDbType.VarChar, 100) { Value = name }, new SqlParameter("@V", SqlDbType.NVarChar, 2000) { Value = value.ToString("yyyy-MM-ddTHH:mm:ss", CultureInfo.InvariantCulture) }); }
+        private void SetMailRequestStatus(string table, int id, string status) { if (table != "dbo.envoi_mail" && table != "dbo.T_Changement_coordonnees_client_via_le_WEB_envoi_emails") throw new ArgumentException("Invalid table"); ExecuteNonQuery(sql_creation_compte, "UPDATE " + table + " SET top_traite=@S,date_trt=GETDATE() WHERE id=@ID;", new SqlParameter("@S", SqlDbType.Char, 1) { Value = status }, new SqlParameter("@ID", SqlDbType.Int) { Value = id }); }
+        private void UpdateOpeningStatus(int dossierId, int status) { ExecuteNonQuery(sql_creation_compte, "UPDATE dbo.T_Statut SET idStatut=@S WHERE idDossier=@ID;", new SqlParameter("@S", SqlDbType.Int) { Value = status }, new SqlParameter("@ID", SqlDbType.Int) { Value = dossierId }); }
+        private string SafeResourcePath(string file) { string root = Path.GetFullPath(templatesReportsFolder) + Path.DirectorySeparatorChar; string full = Path.GetFullPath(Path.Combine(root, Path.GetFileName(file ?? ""))); if (!full.StartsWith(root, StringComparison.OrdinalIgnoreCase) || !File.Exists(full)) throw new FileNotFoundException("Resource not found", full); return full; }
+        private List<string> ResolveAttachmentPaths(object value) { var list = new List<string>(); if (value == null || value == DBNull.Value) return list; foreach (string n in SplitValues(Convert.ToString(value))) { list.Add(SafeResourcePath(n)); } return list; }
+        private static void ValidateNoKnownUnresolvedMarkers(string html, string template) { Match m = Regex.Match(html ?? "", @"\[(NOM|PRENOM|CODE_CLIENT|NOM_CLIENT|RCS|BANQUE|AGENCE|IBAN|BIC|MOTIF|DATE_DEMANDE|MOTIF_REFUS|NUM_DEMANDE|GESTIONNAIRE|NUM_POSTE|MAIL_GESTIONNAIRE)\]", RegexOptions.IgnoreCase); if (m.Success) throw new InvalidDataException("Unresolved marker " + m.Value + " in " + template); }
+        private static DataTable FillDataTable(string cs, string sql, params SqlParameter[] parameters) { var t = new DataTable(); using (var c = new SqlConnection(cs)) using (var cmd = new SqlCommand(sql, c)) using (var da = new SqlDataAdapter(cmd)) { cmd.CommandTimeout = 300; if (parameters != null && parameters.Length > 0) cmd.Parameters.AddRange(parameters); da.Fill(t); } return t; }
+
+        private void SendGraphMailWithAttachments(string sendAs, string to, string cc, string bcc, string subject, string html, List<string> files)
+        {
+            var message = new Message { Subject = subject, Body = new ItemBody { ContentType = BodyType.Html, Content = html }, ToRecipients = BuildRecipients(to), CcRecipients = BuildRecipients(cc), BccRecipients = BuildRecipients(bcc), Attachments = new List<Microsoft.Graph.Models.Attachment>() };
+            if (message.ToRecipients.Count == 0) throw new InvalidOperationException("Invalid recipients for " + subject);
+            foreach (string path in files ?? new List<string>()) { byte[] bytes = File.ReadAllBytes(path); if (bytes.Length > 3 * 1024 * 1024) throw new InvalidDataException("Attachment exceeds 3 MB : " + Path.GetFileName(path)); message.Attachments.Add(new FileAttachment { OdataType = "#microsoft.graph.fileAttachment", Name = Path.GetFileName(path), ContentType = "application/octet-stream", ContentBytes = bytes }); }
+            ExecuteGraphWithRetry(() => { graphService.Users[sendAs].SendMail.PostAsync(new Microsoft.Graph.Users.Item.SendMail.SendMailPostRequestBody { Message = message, SaveToSentItems = true }).GetAwaiter().GetResult(); return true; }, "Send template/report mail : " + subject);
+        }
+
     }
 }

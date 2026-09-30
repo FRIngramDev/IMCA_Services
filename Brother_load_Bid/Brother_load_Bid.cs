@@ -30,7 +30,7 @@ namespace Brother_load_Bid
         private string email_in_case_of_technical_issue_parameter_global = "";
         private string email_in_case_of_technical_issue = "";
         private string email_to = "";
-        private string email_cc = "";    
+        private string email_cc = "";
 
         private string logs_folder = "";
         private string temp_folder = "";
@@ -44,6 +44,7 @@ namespace Brother_load_Bid
         private string sql_connexion_parameter_global = "";
         private string dss_con_openrowset_parameter_global = "";
 
+        private static readonly object logSyncRoot = new object();
         private GraphServiceClient graphService = null;
 
         public Brother_load_Bid()
@@ -148,7 +149,7 @@ namespace Brother_load_Bid
                     sql_connexion = get_IMCA_paramters(sql_con, sql_connexion_parameter_global);
                     dss_con_openrowset = get_IMCA_paramters(sql_con, dss_con_openrowset_parameter_global);
 
-  
+
 
                     if (active.ToUpper().Trim() != "TRUE")
                     {
@@ -167,7 +168,7 @@ namespace Brother_load_Bid
 
                         graphService = Connexion_Microsoft_Graph();
 
-            
+
 
                         ValidateRequiredParameters();
 
@@ -182,7 +183,7 @@ namespace Brother_load_Bid
                         {
                             WriteToFile("   Sharedmailbox_folder_in  : " + sharedmailbox_folder_in);
                             WriteToFile("   Sharedmailbox_folder_out : " + sharedmailbox_folder_out);
-                            WriteToFile("   Temp folder              : " + temp_folder  );
+                            WriteToFile("   Temp folder              : " + temp_folder);
                             WriteToFile("   Extracting the " + number_of_mails + " oldest messages");
                         }
 
@@ -491,7 +492,7 @@ namespace Brother_load_Bid
 
                         downloadedFiles.Add(filePath);
                     }
-                }       
+                }
             }
 
             return downloadedFiles;
@@ -631,25 +632,160 @@ namespace Brother_load_Bid
 
         private void WriteToFile(string message)
         {
-            if (string.IsNullOrWhiteSpace(logs_folder))
+            try
             {
-                logs_folder = AppDomain.CurrentDomain.BaseDirectory;
-            }
+                string targetLogsFolder = logs_folder;
+                if (string.IsNullOrWhiteSpace(targetLogsFolder))
+                    targetLogsFolder = AppDomain.CurrentDomain.BaseDirectory;
 
-            if (!Directory.Exists(logs_folder))
+                Directory.CreateDirectory(targetLogsFolder);
+
+                string logPath = Path.Combine(
+                    targetLogsFolder,
+                    "IMCA_" + global_session_name + "_" +
+                    DateTime.Now.ToString("dd_MM_yyyy") + "_" +
+                    country + "_" + global_application_name + ".txt");
+
+                string line =
+                    DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") +
+                    " - " + (message ?? "") + Environment.NewLine;
+
+                lock (logSyncRoot)
+                {
+                    WriteLogLineWithCrossProcessLock(logPath, line);
+                }
+            }
+            catch (Exception ex)
             {
-                Directory.CreateDirectory(logs_folder);
+                WriteEmergencyLog(
+                    "WriteToFile failure" +
+                    " - Error : " + ex.Message +
+                    " - Original message : " + (message ?? ""));
             }
+        }
 
-            string filePath = Path.Combine(
-                logs_folder,
-                "IMCA_" + global_session_name + "_" + DateTime.Now.ToString("dd_MM_yyyy") + "_" + country + "_" + global_application_name + ".txt"
-            );
+        private static void WriteLogLineWithCrossProcessLock(
+            string logPath,
+            string line)
+        {
+            string mutexName =
+                "Local\\IMCA_BROTHER_LOG_" +
+                GetStableLogNameHash(logPath);
 
-            File.AppendAllText(
-                filePath,
-                DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + " - " + message + Environment.NewLine
-            );
+            using (var mutex =
+                new System.Threading.Mutex(false, mutexName))
+            {
+                bool lockTaken = false;
+                try
+                {
+                    try
+                    {
+                        lockTaken = mutex.WaitOne(TimeSpan.FromSeconds(10));
+                    }
+                    catch (System.Threading.AbandonedMutexException)
+                    {
+                        lockTaken = true;
+                    }
+
+                    if (!lockTaken)
+                        throw new IOException(
+                            "Unable to acquire the log mutex within 10 seconds");
+
+                    const int maxAttempts = 5;
+                    IOException lastWriteException = null;
+
+                    for (int attempt = 1; attempt <= maxAttempts; attempt++)
+                    {
+                        try
+                        {
+                            byte[] content = Encoding.UTF8.GetBytes(line);
+                            using (var stream = new FileStream(
+                                logPath,
+                                FileMode.Append,
+                                FileAccess.Write,
+                                FileShare.ReadWrite))
+                            {
+                                stream.Write(content, 0, content.Length);
+                                stream.Flush();
+                            }
+                            return;
+                        }
+                        catch (IOException ex)
+                        {
+                            lastWriteException = ex;
+                            if (attempt < maxAttempts)
+                                System.Threading.Thread.Sleep(attempt * 100);
+                        }
+                    }
+
+                    throw new IOException(
+                        "Unable to write the log file after " +
+                        maxAttempts + " attempts : " + logPath,
+                        lastWriteException);
+                }
+                finally
+                {
+                    if (lockTaken)
+                    {
+                        try { mutex.ReleaseMutex(); }
+                        catch (ApplicationException) { }
+                    }
+                }
+            }
+        }
+
+        private void WriteEmergencyLog(string message)
+        {
+            try
+            {
+                string emergencyFolder =
+                    string.IsNullOrWhiteSpace(temp_folder)
+                        ? AppDomain.CurrentDomain.BaseDirectory
+                        : temp_folder;
+
+                Directory.CreateDirectory(emergencyFolder);
+
+                string emergencyFile = Path.Combine(
+                    emergencyFolder,
+                    "IMCA_LOG_FAILURE_" + global_application_name +
+                    "_ACTION_ID_" +
+                    System.Diagnostics.Process.GetCurrentProcess().Id +
+                    "_" + DateTime.Now.ToString("dd_MM_yyyy") + ".txt");
+
+                string line =
+                    DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff") +
+                    " - " + (message ?? "") + Environment.NewLine;
+
+                byte[] content = Encoding.UTF8.GetBytes(line);
+                using (var stream = new FileStream(
+                    emergencyFile,
+                    FileMode.Append,
+                    FileAccess.Write,
+                    FileShare.ReadWrite))
+                {
+                    stream.Write(content, 0, content.Length);
+                    stream.Flush();
+                }
+            }
+            catch
+            {
+                // Last-resort protection: logging must never stop processing.
+            }
+        }
+
+        private static string GetStableLogNameHash(string value)
+        {
+            unchecked
+            {
+                uint hash = 2166136261;
+                foreach (char character in
+                    (value ?? "").ToUpperInvariant())
+                {
+                    hash ^= character;
+                    hash *= 16777619;
+                }
+                return hash.ToString("X8", CultureInfo.InvariantCulture);
+            }
         }
 
         private string CleanFileName(string fileName)
@@ -679,8 +815,8 @@ namespace Brother_load_Bid
                 try
                 {
                     if (Path.GetFileName(file).ToLower().StartsWith(prefixfile.ToLower()))
-                    { 
-                    File.Delete(file);
+                    {
+                        File.Delete(file);
                     }
 
                 }
@@ -1314,7 +1450,7 @@ namespace Brother_load_Bid
 
             using (SqlCommand cmd = new SqlCommand(insertSql, con))
             {
-                cmd.CommandTimeout = 300 ;
+                cmd.CommandTimeout = 300;
                 cmd.Parameters.AddWithValue("@numCotaVendor", numCotaVendor);
                 cmd.Parameters.AddWithValue("@version", Convert.ToInt32(numVersion));
                 cmd.Parameters.AddWithValue("@eu", nomEu ?? "");
@@ -1738,7 +1874,7 @@ namespace Brother_load_Bid
                     cmd.ExecuteNonQuery();
                 }
             }
-             catch (Exception ex)
+            catch (Exception ex)
             {
                 SendSqlTechnicalIssueMail("ExecuteScalar", sql, ex);
                 throw;
@@ -1915,7 +2051,7 @@ namespace Brother_load_Bid
         {
             this.logs_folder = logs_folder ?? "";
         }
-        
+
         public void settemp_folder(string temp_folder)
         {
             this.temp_folder = temp_folder ?? "";

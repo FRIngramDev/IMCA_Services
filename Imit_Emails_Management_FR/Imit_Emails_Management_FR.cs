@@ -501,7 +501,7 @@ ORDER BY m.raffraichissement_min, m.id_mailboxe;";
             if (!int.TryParse(number_Of_Mails, out top) || top <= 0) top = 100;
             if (IsCurrentCountryImitMailbox() && top > 20) top = 20;
             DateTime date = mailboxFilterDate > new DateTime(1900, 1, 1) ? mailboxFilterDate : ParseStartDate();
-            return graphService.Users[mailboxAddress].MailFolders[folderId].Messages.GetAsync(config =>
+            return ExecuteGraphWithRetry(() => graphService.Users[mailboxAddress].MailFolders[folderId].Messages.GetAsync(config =>
             {
                 AddImmutableIdHeader(config.Headers);
                 config.QueryParameters.Top = top;
@@ -514,12 +514,12 @@ ORDER BY m.raffraichissement_min, m.id_mailboxe;";
                 {
                     "singleValueExtendedProperties($filter=id eq '" + EscapeODataString(processedPropertyId) + "')"
                 };
-            }).GetAwaiter().GetResult();
+            }).GetAwaiter().GetResult(), "List messages for " + mailboxAddress);
         }
 
         private Message GetCompleteMessage(string messageId)
         {
-            return graphService.Users[mailboxAddress].Messages[messageId].GetAsync(config =>
+            return ExecuteGraphWithRetry(() => graphService.Users[mailboxAddress].Messages[messageId].GetAsync(config =>
             {
                 config.Headers.Add(
                     "Prefer",
@@ -530,15 +530,15 @@ ORDER BY m.raffraichissement_min, m.id_mailboxe;";
                     "id", "subject", "body", "bodyPreview", "from", "sender", "toRecipients", "ccRecipients",
                     "receivedDateTime", "createdDateTime", "conversationId", "internetMessageId", "hasAttachments", "webLink"
                 };
-            }).GetAwaiter().GetResult();
+            }).GetAwaiter().GetResult(), "Get complete message");
         }
 
         private byte[] GetMimeContent(string messageId)
         {
-            using (Stream input = graphService.Users[mailboxAddress].Messages[messageId].Content.GetAsync(config =>
+            using (Stream input = ExecuteGraphWithRetry(() => graphService.Users[mailboxAddress].Messages[messageId].Content.GetAsync(config =>
             {
                 AddImmutableIdHeader(config.Headers);
-            }).GetAwaiter().GetResult())
+            }).GetAwaiter().GetResult(), "Get MIME content"))
             using (var output = new MemoryStream())
             {
                 input.CopyTo(output);
@@ -1761,18 +1761,18 @@ WHERE CountryCode=@COUNTRY AND ReportMonth=@MONTH;";
         {
             if (string.IsNullOrWhiteSpace(destinationFolder)) destinationFolder = tempFolder;
             Directory.CreateDirectory(destinationFolder);
-            AttachmentCollectionResponse response = graphService.Users[mailboxAddress].Messages[messageId].Attachments.GetAsync(config =>
+            AttachmentCollectionResponse response = ExecuteGraphWithRetry(() => graphService.Users[mailboxAddress].Messages[messageId].Attachments.GetAsync(config =>
             {
                 AddImmutableIdHeader(config.Headers);
-            }).GetAwaiter().GetResult();
+            }).GetAwaiter().GetResult(), "List attachments for message");
             foreach (Microsoft.Graph.Models.Attachment item in response?.Value ?? new List<Microsoft.Graph.Models.Attachment>())
             {
                 if (!(item is FileAttachment file) || !(file.Name ?? "").StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) continue;
                 if (file.ContentBytes == null && !string.IsNullOrWhiteSpace(file.Id))
-                    file = graphService.Users[mailboxAddress].Messages[messageId].Attachments[file.Id].GetAsync(config =>
+                    file = ExecuteGraphWithRetry(() => graphService.Users[mailboxAddress].Messages[messageId].Attachments[file.Id].GetAsync(config =>
                     {
                         AddImmutableIdHeader(config.Headers);
-                    }).GetAwaiter().GetResult() as FileAttachment;
+                    }).GetAwaiter().GetResult() as FileAttachment, "Download attachment " + (file.Name ?? file.Id));
                 if (file?.ContentBytes == null) throw new InvalidOperationException("Attachment content is empty : " + item.Name);
                 string path = Path.Combine(destinationFolder, CleanFileName(file.Name));
                 File.WriteAllBytes(path, file.ContentBytes);
@@ -1890,6 +1890,35 @@ WHERE CountryCode=@COUNTRY AND ReportMonth=@MONTH;";
             return null;
         }
 
+        private T ExecuteGraphWithRetry<T>(Func<T> action, string operation)
+        {
+            const int maximumAttempts = 3;
+            Exception lastException = null;
+            for (int attempt = 1; attempt <= maximumAttempts; attempt++)
+            {
+                try
+                {
+                    return action();
+                }
+                catch (Exception ex) when (IsTransientGraphError(ex))
+                {
+                    lastException = ex;
+                    if (attempt >= maximumAttempts) break;
+                    int delayMilliseconds = attempt * 5000;
+                    WriteLog(
+                        "       Temporary Graph error during " + operation +
+                        ". Application attempt " + attempt + "/" + maximumAttempts +
+                        ". Retry in " + delayMilliseconds + " ms. Error : " +
+                        GetInnermostExceptionMessage(ex));
+                    System.Threading.Thread.Sleep(delayMilliseconds);
+                }
+            }
+            throw new InvalidOperationException(
+                "Graph operation failed after " + maximumAttempts +
+                " application attempt(s) : " + operation + " - " +
+                GetInnermostExceptionMessage(lastException),
+                lastException);
+        }
         private T ExecuteGraphFolderCallWithRetry<T>(Func<T> action, string operation)
         {
             const int maximumAttempts = 3;
@@ -1900,11 +1929,11 @@ WHERE CountryCode=@COUNTRY AND ReportMonth=@MONTH;";
                 {
                     return action();
                 }
-                catch (Exception ex) when (IsTransientGraphFolderError(ex))
+                catch (Exception ex) when (IsTransientGraphError(ex))
                 {
                     lastException = ex;
                     if (attempt >= maximumAttempts) break;
-                    int delayMilliseconds = attempt * 2000;
+                    int delayMilliseconds = attempt * 5000;
                     WriteLog("       Temporary Graph folder error during " + operation +
                         ". Attempt " + attempt + "/" + maximumAttempts +
                         ". Retry in " + delayMilliseconds + " ms : " + GetInnermostExceptionMessage(ex));
@@ -1916,25 +1945,36 @@ WHERE CountryCode=@COUNTRY AND ReportMonth=@MONTH;";
                 " - " + GetInnermostExceptionMessage(lastException), lastException);
         }
 
-        private static bool IsTransientGraphFolderError(Exception exception)
+        private static bool IsTransientGraphError(Exception exception)
         {
             Exception current = exception;
             while (current != null)
             {
-                if (current is HttpRequestException || current is TimeoutException ||
-                    current is System.Threading.Tasks.TaskCanceledException) return true;
-
-                string message = current.Message ?? "";
-                if (message.IndexOf("12002", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                    message.IndexOf("timed out", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                    message.IndexOf("operation was canceled", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                    message.IndexOf("An error occurred while sending the request", StringComparison.OrdinalIgnoreCase) >= 0)
+                if (current is HttpRequestException ||
+                    current is TimeoutException ||
+                    current is System.Threading.Tasks.TaskCanceledException)
+                    return true;
+                if (current is ApiException apiException &&
+                    (apiException.ResponseStatusCode == 429 ||
+                     apiException.ResponseStatusCode == 503 ||
+                     apiException.ResponseStatusCode == 504))
+                    return true;
+                string text = current.Message ?? "";
+                if (text.IndexOf("Too many retries performed", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    text.IndexOf("More than 3 retries encountered", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    text.IndexOf("TooManyRequests", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    text.IndexOf("ApplicationThrottled", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    text.IndexOf("temporarily unavailable", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    text.IndexOf("service unavailable", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    text.IndexOf("12002", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    text.IndexOf("timed out", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    text.IndexOf("operation was canceled", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    text.IndexOf("An error occurred while sending the request", StringComparison.OrdinalIgnoreCase) >= 0)
                     return true;
                 current = current.InnerException;
             }
             return false;
         }
-
         private static string GetInnermostExceptionMessage(Exception exception)
         {
             if (exception == null) return "";
@@ -1998,6 +2038,18 @@ WHERE CountryCode=@COUNTRY AND ReportMonth=@MONTH;";
                         "       Temporary Graph change-key conflict. " +
                         "Attempt " + attempt + "/" + maximumAttempts +
                         ". Retry in " + delayMilliseconds + " ms.");
+                    System.Threading.Thread.Sleep(delayMilliseconds);
+                }
+                catch (Exception ex) when (IsTransientGraphError(ex))
+                {
+                    lastException = ex;
+                    if (attempt >= maximumAttempts) break;
+                    int delayMilliseconds = attempt * 5000;
+                    WriteLog(
+                        "       Temporary Graph error while adding IMCAProcessed. " +
+                        "Application attempt " + attempt + "/" + maximumAttempts +
+                        ". Retry in " + delayMilliseconds + " ms. Error : " +
+                        GetInnermostExceptionMessage(ex));
                     System.Threading.Thread.Sleep(delayMilliseconds);
                 }
                 catch (Exception ex) when (IsGraphObjectNotFound(ex))
@@ -2103,19 +2155,27 @@ WHERE CountryCode=@COUNTRY AND ReportMonth=@MONTH;";
 
         private void MarkAsRead(string messageId)
         {
-            graphService.Users[mailboxAddress].Messages[messageId].PatchAsync(
-                new Message { IsRead = true },
-                config => AddImmutableIdHeader(config.Headers))
-                .GetAwaiter().GetResult();
+            ExecuteGraphWithRetry(() =>
+            {
+                graphService.Users[mailboxAddress].Messages[messageId].PatchAsync(
+                    new Message { IsRead = true },
+                    config => AddImmutableIdHeader(config.Headers))
+                    .GetAwaiter().GetResult();
+                return true;
+            }, "Mark message as read");
         }
 
         private void MoveMessage(string messageId, string destinationId)
         {
             var body = new Microsoft.Graph.Users.Item.Messages.Item.Move.MovePostRequestBody { DestinationId = destinationId };
-            graphService.Users[mailboxAddress].Messages[messageId].Move.PostAsync(
-                body,
-                config => AddImmutableIdHeader(config.Headers))
-                .GetAwaiter().GetResult();
+            ExecuteGraphWithRetry(() =>
+            {
+                graphService.Users[mailboxAddress].Messages[messageId].Move.PostAsync(
+                    body,
+                    config => AddImmutableIdHeader(config.Headers))
+                    .GetAwaiter().GetResult();
+                return true;
+            }, "Move message");
         }
 
         private int InsertComment(int issueId, string comment, string commentName, int emailDatabaseId, string messageWebLink = "")
