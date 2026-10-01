@@ -15,6 +15,7 @@ using System.Net.Http;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Xml;
+using Microsoft.Graph.Models.ODataErrors;
 namespace CREDIT_EMAILS_MANAGEMENT_FR
 {
     public class CREDIT_EMAILS_MANAGEMENT_FR
@@ -25,7 +26,9 @@ namespace CREDIT_EMAILS_MANAGEMENT_FR
         private const string credit_card_mailbox_name = "Cartes Bleues";
         private const string score_fraud_mailbox_name = "Surveillance ScoreFraud";
         private const string opening_account_mailbox_name = "Ouverture Comptes";
-        private const string automatic_mail_archive_folder_name = "archives mails automatiques";
+        private const string credit_review_mailbox_name = "Credit Review";
+        private const string recovery_reports_mailbox_name = "Rapports Recouvrement";
+        private const string credit_reports_mailbox_name = "Rapports Crédit";
         private const string opening_processed_property_id = "String {8BF48C6E-2C72-46F0-965D-919A7C2E54A9} Name IMCAOpeningProcessed";
         private const int retry_delay_hours = 2;
         private string country = "", name = "", active = "", debug = "", start_date_scan = "", number_Of_Mails = "10";
@@ -361,6 +364,66 @@ namespace CREDIT_EMAILS_MANAGEMENT_FR
             allowedSenders = SplitValues(b.SenderAllowed).ToHashSet(StringComparer.OrdinalIgnoreCase);
         }
 
+        private void UpdateMailboxRefreshInformation(
+            int currentMailboxId,
+            DateTime? latestProcessedMessageDate)
+        {
+            const string sql = @"
+UPDATE dbo.T_SharedMailboxes
+SET date_dernier_raf = GETDATE(),
+    dt_heure_filtre = CASE
+        WHEN @LATEST_MESSAGE_DATE IS NULL THEN dt_heure_filtre
+        WHEN dt_heure_filtre IS NULL THEN @LATEST_MESSAGE_DATE
+        WHEN @LATEST_MESSAGE_DATE > dt_heure_filtre THEN @LATEST_MESSAGE_DATE
+        ELSE dt_heure_filtre
+    END
+WHERE id_mailboxe = @MAILBOX_ID;";
+
+            using (var connection = new SqlConnection(sql_connexion))
+            using (var command = new SqlCommand(sql, connection))
+            {
+                command.CommandTimeout = 300;
+                command.Parameters.Add(
+                    "@MAILBOX_ID",
+                    SqlDbType.Int).Value = currentMailboxId;
+                command.Parameters.Add(
+                    "@LATEST_MESSAGE_DATE",
+                    SqlDbType.DateTime).Value =
+                    latestProcessedMessageDate.HasValue
+                        ? (object)latestProcessedMessageDate.Value
+                        : DBNull.Value;
+
+                connection.Open();
+                int affectedRows = command.ExecuteNonQuery();
+
+                if (affectedRows == 0)
+                {
+                    throw new InvalidOperationException(
+                        "Mailbox refresh information could not be updated. " +
+                        "Mailbox ID : " + currentMailboxId);
+                }
+            }
+
+            lastRefresh = DateTime.Now;
+
+            if (latestProcessedMessageDate.HasValue &&
+                latestProcessedMessageDate.Value > mailboxFilterDate)
+            {
+                mailboxFilterDate = latestProcessedMessageDate.Value;
+            }
+
+            if (IsTrue(debug))
+            {
+                WriteLog(
+                    "       Mailbox refresh information updated" +
+                    " - Mailbox ID : " + currentMailboxId +
+                    " - Last refresh : " +
+                    lastRefresh.ToString("dd/MM/yyyy HH:mm:ss") +
+                    " - Filter date : " +
+                    mailboxFilterDate.ToString("dd/MM/yyyy HH:mm:ss"));
+            }
+        }
+
         private DateTime? ReadCurrentMailbox()
         {
             ValidateMailboxConfiguration();
@@ -376,14 +439,27 @@ namespace CREDIT_EMAILS_MANAGEMENT_FR
                     opening_account_mailbox_name,
                     StringComparison.OrdinalIgnoreCase))
             {
-                DateTime? latestOpeningMessage =
-                    ReadOpeningAccountMailbox();
-
-                UploadOpeningMailsToDatabase();
-
-                return latestOpeningMessage;
+                return ReadOpeningAccountMailbox();
             }
 
+            if (mailboxName.Equals(
+                    credit_review_mailbox_name,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                return ReadCreditReviewMailbox();
+            }
+            if (mailboxName.Equals(
+                    recovery_reports_mailbox_name,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                return ReadRecoveryReportsMailbox();
+            }
+            if (mailboxName.Equals(
+                    credit_reports_mailbox_name,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                return ReadCreditReportsMailbox();
+            }
             if (!mailboxName.Equals(
                     credit_card_mailbox_name,
                     StringComparison.OrdinalIgnoreCase))
@@ -480,125 +556,769 @@ namespace CREDIT_EMAILS_MANAGEMENT_FR
             return latest;
         }
 
-        private DateTime? ReadOpeningAccountMailbox()
+        private DateTime? ReadCreditReviewMailbox()
         {
-            if (string.IsNullOrWhiteSpace(sql_creation_compte)) throw new InvalidOperationException("sql_creation_compte is empty");
-            MailFolder inbox = GetRequiredFolder(inputFolderName);
-            MailFolder archive = GetOrCreateOpeningFolder(inbox.Id, automatic_mail_archive_folder_name);
-            List<Message> messages = GetOpeningAccountMessages(inbox.Id);
-            DateTime? latestTagged = null;
-            int moved = 0, ignored = 0, alreadyProcessed = 0, errors = 0;
+            MailFolder input = GetRequiredFolder(inputFolderName);
+            MailFolder recoveryFolder = GetRequiredFolder(outputFolderName);
+            List<Message> messages = GetCandidateMessages(input.Id);
+            DateTime? latest = null;
+            int recoveryImported = 0;
+            int cardImported = 0;
+            int ignored = 0;
+            int alreadyProcessed = 0;
+            int errors = 0;
+
+            WriteLog(
+                "       Credit Review email(s) found for processing : " +
+                messages.Count);
+
             foreach (Message summary in messages)
             {
+                DateTime received =
+                    summary.ReceivedDateTime?.LocalDateTime ?? DateTime.Now;
+                if (!latest.HasValue || received > latest.Value)
+                    latest = received;
+
+                try
+                {
+                    if (IsMessageAlreadyProcessed(summary) ||
+                        IsProcessingStateSuccessful(summary.Id))
+                    {
+                        alreadyProcessed++;
+                        continue;
+                    }
+
+                    Message email = GetCompleteMessage(summary.Id);
+                    string subject = (email.Subject ?? "").Trim();
+                    WriteLog("       Credit Review subject : " + subject);
+
+                    if (IsRecoveryCreditReviewSubject(subject))
+                    {
+                        int historyId = ResolveRecoveryHistoryId(email);
+                        if (historyId <= 0)
+                        {
+                            throw new InvalidOperationException(
+                                "No pending recovery history found for subject : " +
+                                subject);
+                        }
+
+                        byte[] mime = GetMimeContent(email.Id);
+                        SaveRecoveryHistoryMail(historyId, email, mime);
+                        TryMarkMessageAsProcessed(email.Id);
+                        MoveMessage(email.Id, recoveryFolder.Id, "Credit Review recovery");
+                        UpsertProcessingState(
+                            email,
+                            "S",
+                            null,
+                            "Recovery EML inserted for history " + historyId);
+                        recoveryImported++;
+                        continue;
+                    }
+
+                    if (IsCreditCardHistorySubject(subject))
+                    {
+                        int historyId = GetCreditCardHistoryId(subject);
+                        if (historyId <= 0)
+                        {
+                            throw new InvalidOperationException(
+                                "No pending credit card history found for subject : " +
+                                subject);
+                        }
+
+                        byte[] mime = GetMimeContent(email.Id);
+                        SaveCreditCardHistoryMail(historyId, email, mime);
+                        TryMarkMessageAsProcessed(email.Id);
+                        PermanentlyDeleteGenericMessage(
+                            email.Id,
+                            "Credit Review card history");
+                        UpsertProcessingState(
+                            email,
+                            "S",
+                            null,
+                            "Credit card EML inserted for history " + historyId);
+                        cardImported++;
+                        continue;
+                    }
+
+                    UpsertProcessingState(
+                        email,
+                        "I",
+                        null,
+                        "Subject outside Credit Review rules");
+                    ignored++;
+                }
+                catch (Exception ex)
+                {
+                    errors++;
+                    UpsertProcessingState(summary, "E", null, ex.Message);
+                    WriteLog(
+                        "       Credit Review email processing error" +
+                        " - Subject : " + (summary.Subject ?? "<no subject>") +
+                        " - Error : " + ex.Message);
+                    SendTechnicalAlert(
+                        nameof(ReadCreditReviewMailbox),
+                        mailboxAddress + " - Mail : " +
+                        (summary.Subject ?? "<no subject>") + " - " + ex.Message,
+                        "CREDIT REVIEW EMAIL PROCESSING");
+                }
+            }
+
+            WriteLog(
+                "       Credit Review processing summary" +
+                " - Found : " + messages.Count +
+                " - Recovery imported : " + recoveryImported +
+                " - Card imported : " + cardImported +
+                " - Ignored : " + ignored +
+                " - Already processed : " + alreadyProcessed +
+                " - Errors : " + errors);
+            return latest;
+        }
+
+        private DateTime? ReadRecoveryReportsMailbox()
+        {
+            return ReadStoredReportMailbox(false);
+        }
+
+        private DateTime? ReadCreditReportsMailbox()
+        {
+            return ReadStoredReportMailbox(true);
+        }
+
+        private DateTime? ReadStoredReportMailbox(bool creditReport)
+        {
+            MailFolder input = GetRequiredFolder(inputFolderName);
+            List<Message> messages = GetCandidateMessages(input.Id);
+            DateTime? latest = null;
+            int inserted = 0;
+            int requestUpdates = 0;
+            int ignored = 0;
+            int alreadyProcessed = 0;
+            int errors = 0;
+
+            WriteLog(
+                "       " + (creditReport ? "Credit" : "Recovery") +
+                " report email(s) found for processing : " + messages.Count);
+
+            foreach (Message summary in messages)
+            {
+                DateTime received =
+                    summary.ReceivedDateTime?.LocalDateTime ?? DateTime.Now;
+                if (!latest.HasValue || received > latest.Value)
+                    latest = received;
+
+                try
+                {
+                    if (IsMessageAlreadyProcessed(summary) ||
+                        IsProcessingStateSuccessful(summary.Id))
+                    {
+                        alreadyProcessed++;
+                        continue;
+                    }
+
+                    Message email = GetCompleteMessage(summary.Id);
+                    string subject = (email.Subject ?? "").Trim();
+                    if (string.IsNullOrWhiteSpace(subject))
+                    {
+                        UpsertProcessingState(
+                            email,
+                            "I",
+                            null,
+                            "Message subject is empty");
+                        ignored++;
+                        continue;
+                    }
+
+                    byte[] mime = GetMimeContent(email.Id);
+                    if (!creditReport &&
+                        TryExtractCustomerChangeRequestId(subject, out int requestId))
+                    {
+                        UpdateCustomerChangeSentMail(requestId, mime);
+                        requestUpdates++;
+                        WriteLog(
+                            "       Recovery report linked to customer change request" +
+                            " - Request : " + requestId +
+                            " - Subject : " + subject);
+                    }
+                    else
+                    {
+                        InsertReceivedReportMail(creditReport, email, mime);
+                        inserted++;
+                        WriteLog(
+                            "       " + (creditReport ? "Credit" : "Recovery") +
+                            " report inserted in database" +
+                            " - Subject : " + subject);
+                    }
+
+                    TryMarkMessageAsProcessed(email.Id);
+                    PermanentlyDeleteGenericMessage(
+                        email.Id,
+                        creditReport ? "Credit report" : "Recovery report");
+                    UpsertProcessingState(
+                        email,
+                        "S",
+                        null,
+                        creditReport
+                            ? "Credit report EML inserted"
+                            : "Recovery report EML processed");
+                }
+                catch (Exception ex)
+                {
+                    errors++;
+                    UpsertProcessingState(summary, "E", null, ex.Message);
+                    WriteLog(
+                        "       Report email processing error" +
+                        " - Subject : " + (summary.Subject ?? "<no subject>") +
+                        " - Error : " + ex.Message);
+                    SendTechnicalAlert(
+                        creditReport
+                            ? nameof(ReadCreditReportsMailbox)
+                            : nameof(ReadRecoveryReportsMailbox),
+                        mailboxAddress + " - Mail : " +
+                        (summary.Subject ?? "<no subject>") + " - " + ex.Message,
+                        creditReport
+                            ? "CREDIT REPORT EMAIL PROCESSING"
+                            : "RECOVERY REPORT EMAIL PROCESSING");
+                }
+            }
+
+            WriteLog(
+                "       " + (creditReport ? "Credit" : "Recovery") +
+                " report processing summary" +
+                " - Found : " + messages.Count +
+                " - Inserted : " + inserted +
+                " - Customer request updates : " + requestUpdates +
+                " - Ignored : " + ignored +
+                " - Already processed : " + alreadyProcessed +
+                " - Errors : " + errors);
+            return latest;
+        }
+
+        private static bool IsRecoveryCreditReviewSubject(string subject)
+        {
+            string value = subject ?? "";
+            return value.IndexOf("Etat de Compte", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   value.StartsWith("RED ALERT -", StringComparison.OrdinalIgnoreCase) ||
+                   value.IndexOf("Vos virements Ingram Micro", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   value.StartsWith("Arrêté de compte Ingram micro", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool IsCreditCardHistorySubject(string subject)
+        {
+            string value = subject ?? "";
+            return value.IndexOf("Solde débiteur au compte", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   value.IndexOf("Plus d'encours et factures échues", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   value.IndexOf("Attente complément réglement", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   value.IndexOf("Lettrage Trésorie", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   value.IndexOf("Déblocage Ventes", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   value.IndexOf("Multi BL (11/21)", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        private int ResolveRecoveryHistoryId(Message email)
+        {
+            string subject = (email.Subject ?? "").Trim();
+            if (subject.StartsWith("RED ALERT -", StringComparison.OrdinalIgnoreCase))
+            {
+                string customer = Left(
+                    subject.Substring("RED ALERT -".Length).Trim(),
+                    8);
+                return GetRecoveryHistoryId(customer, true, false);
+            }
+
+            if (subject.IndexOf(
+                    "Vos virements Ingram Micro",
+                    StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                return GetRecoveryHistoryId(Left(subject, 8), false, true);
+            }
+
+            string customerNumber = GetCustomerNumberFromAttachments(email.Id);
+            return GetRecoveryHistoryId(customerNumber, false, false);
+        }
+
+        private string GetCustomerNumberFromAttachments(string messageId)
+        {
+            AttachmentCollectionResponse response = ExecuteGraphWithRetry(
+                () => graphService.Users[mailboxAddress]
+                    .Messages[messageId]
+                    .Attachments
+                    .GetAsync(config =>
+                    {
+                        AddImmutableHeader(config.Headers);
+                        config.QueryParameters.Top = 999;
+                    })
+                    .GetAwaiter()
+                    .GetResult(),
+                "Read Credit Review attachments");
+
+            string fallback = "";
+            foreach (Microsoft.Graph.Models.Attachment attachment
+                in response?.Value ?? new List<Microsoft.Graph.Models.Attachment>())
+            {
+                string name = Path.GetFileNameWithoutExtension(
+                    attachment?.Name ?? "").Trim();
+                if (string.IsNullOrWhiteSpace(name))
+                    continue;
+                fallback = name;
+                const string prefix = "Detail_Compte_";
+                if (name.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                    return name.Substring(prefix.Length).Trim();
+            }
+            return fallback;
+        }
+
+        private int GetRecoveryHistoryId(
+            string customerNumber,
+            bool isRedAlert,
+            bool isAutomatch)
+        {
+            if (string.IsNullOrWhiteSpace(customerNumber))
+                return 0;
+
+            string statusClause;
+            if (isRedAlert)
+                statusClause = "= 10";
+            else if (isAutomatch)
+                statusClause = "= 55";
+            else
+                statusClause = "IN (20,30,40,90)";
+
+            string sql =
+                "SELECT TOP (1) id_histo " +
+                "FROM dbo.T_Credit_Recouvrement_HISTO " +
+                "WHERE fichier IS NULL " +
+                "AND id_statut " + statusClause + " " +
+                "AND br_cust_nbr=@CUSTOMER;";
+
+            string result = ExecuteScalarString(
+                sql_connexion,
+                sql,
+                new SqlParameter("@CUSTOMER", SqlDbType.VarChar, 50)
+                {
+                    Value = customerNumber.Trim()
+                });
+            return int.TryParse(result, out int id) ? id : 0;
+        }
+
+        private int GetCreditCardHistoryId(string subject)
+        {
+            string result = ExecuteScalarString(
+                sql_gestion_cdes,
+                @"SELECT TOP (1) id_histo
+                  FROM dbo.T_deblocage_carte_bleue_histo_mail
+                  WHERE fichier IS NULL
+                    AND sujet_email=@SUBJECT
+                  ORDER BY id_histo DESC;",
+                new SqlParameter("@SUBJECT", SqlDbType.NVarChar, 1000)
+                {
+                    Value = subject ?? ""
+                });
+            return int.TryParse(result, out int id) ? id : 0;
+        }
+
+        private void SaveRecoveryHistoryMail(
+            int historyId,
+            Message email,
+            byte[] mime)
+        {
+            ExecuteStoredMailProcedure(
+                sql_connexion,
+                "dbo.USP_ADD_FIC_RECOUVREMENT",
+                historyId,
+                email,
+                mime);
+        }
+
+        private void SaveCreditCardHistoryMail(
+            int historyId,
+            Message email,
+            byte[] mime)
+        {
+            ExecuteStoredMailProcedure(
+                sql_gestion_cdes,
+                "dbo.USP_ADD_FIC_deblocage_carte_bleue_histo_mail",
+                historyId,
+                email,
+                mime);
+        }
+
+        private static void ExecuteStoredMailProcedure(
+            string connectionString,
+            string procedure,
+            int historyId,
+            Message email,
+            byte[] mime)
+        {
+            if (mime == null || mime.Length == 0)
+                throw new InvalidDataException("MIME content is empty");
+
+            string received =
+                (email.ReceivedDateTime?.LocalDateTime ?? DateTime.Now)
+                .ToString("yyyyMMdd_HHmmss", CultureInfo.InvariantCulture);
+            string fileName = "EMAIL_" + received;
+
+            using (var connection = new SqlConnection(connectionString))
+            using (var command = new SqlCommand(procedure, connection))
+            {
+                command.CommandType = CommandType.StoredProcedure;
+                command.CommandTimeout = 300;
+                command.Parameters.Add("@id_histo", SqlDbType.NVarChar, 50)
+                    .Value = historyId.ToString(CultureInfo.InvariantCulture);
+                command.Parameters.Add("@nom_fic", SqlDbType.NVarChar, 500)
+                    .Value = fileName;
+                command.Parameters.Add("@document", SqlDbType.Image).Value = mime;
+                command.Parameters.Add("@extension", SqlDbType.NVarChar, 20)
+                    .Value = "eml";
+                connection.Open();
+                command.ExecuteNonQuery();
+            }
+        }
+
+        private void InsertReceivedReportMail(
+            bool creditReport,
+            Message email,
+            byte[] mime)
+        {
+            if (mime == null || mime.Length == 0)
+                throw new InvalidDataException("MIME content is empty");
+
+            string table = creditReport
+                ? "dbo.T_Credit_Recouvrement_MAIL_RAPPORTS_CREDIT_RECUS"
+                : "dbo.T_Credit_Recouvrement_MAIL_RECOUVREMENT_RECUS";
+            DateTime received =
+                email.ReceivedDateTime?.LocalDateTime ?? DateTime.Now;
+            string fileName = "EMAIL_" + received.ToString(
+                "yyyyMMdd_HHmmss",
+                CultureInfo.InvariantCulture);
+
+            ExecuteNonQuery(
+                sql_connexion,
+                "INSERT INTO " + table +
+                "([date],objet,nom_fichier,extension,fichier) " +
+                "VALUES(@DATE,@SUBJECT,@NAME,'eml',@FILE);",
+                new SqlParameter("@DATE", SqlDbType.DateTime)
+                {
+                    Value = received
+                },
+                new SqlParameter("@SUBJECT", SqlDbType.NVarChar, -1)
+                {
+                    Value = email.Subject ?? ""
+                },
+                new SqlParameter("@NAME", SqlDbType.NVarChar, 500)
+                {
+                    Value = fileName
+                },
+                new SqlParameter("@FILE", SqlDbType.Image)
+                {
+                    Value = mime
+                });
+        }
+
+        private static bool TryExtractCustomerChangeRequestId(
+            string subject,
+            out int requestId)
+        {
+            requestId = 0;
+            Match match = Regex.Match(
+                subject ?? "",
+                @"^(?:Acceptation|Refus) de votre demande n°\s*(\d+)",
+                RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+            return match.Success &&
+                   int.TryParse(
+                       match.Groups[1].Value,
+                       NumberStyles.None,
+                       CultureInfo.InvariantCulture,
+                       out requestId);
+        }
+
+        private void UpdateCustomerChangeSentMail(int requestId, byte[] mime)
+        {
+            if (mime == null || mime.Length == 0)
+                throw new InvalidDataException("MIME content is empty");
+
+            int affected;
+            using (var connection = new SqlConnection(sql_creation_compte))
+            using (var command = new SqlCommand(
+                @"UPDATE dbo.T_Changement_coordonnees_client_via_le_WEB
+                  SET mail_envoye_au_client=@MAIL
+                  WHERE id_demande=@ID;",
+                connection))
+            {
+                command.CommandTimeout = 300;
+                command.Parameters.Add("@MAIL", SqlDbType.Image).Value = mime;
+                command.Parameters.Add("@ID", SqlDbType.Int).Value = requestId;
+                connection.Open();
+                affected = command.ExecuteNonQuery();
+            }
+
+            if (affected == 0)
+            {
+                throw new InvalidOperationException(
+                    "Customer change request not found : " + requestId);
+            }
+        }
+
+        private bool IsProcessingStateSuccessful(string graphMessageId)
+        {
+            string count = ExecuteScalarString(
+                sql_connexion,
+                @"SELECT COUNT(*)
+                  FROM dbo.T_CreditMailProcessing
+                  WHERE MailboxId=@MAILBOX
+                    AND GraphMessageId=@MESSAGE
+                    AND ProcessingStatus='S';",
+                new SqlParameter("@MAILBOX", SqlDbType.Int)
+                {
+                    Value = mailboxId
+                },
+                new SqlParameter("@MESSAGE", SqlDbType.NVarChar, 500)
+                {
+                    Value = graphMessageId ?? ""
+                });
+            return int.TryParse(count, out int value) && value > 0;
+        }
+
+        private void MoveMessage(
+            string messageId,
+            string destinationFolderId,
+            string operation)
+        {
+            ExecuteGraphWithRetry(() =>
+            {
+                graphService.Users[mailboxAddress]
+                    .Messages[messageId]
+                    .Move
+                    .PostAsync(
+                        new Microsoft.Graph.Users.Item.Messages.Item.Move.MovePostRequestBody
+                        {
+                            DestinationId = destinationFolderId
+                        },
+                        config => AddImmutableHeader(config.Headers))
+                    .GetAwaiter()
+                    .GetResult();
+                return true;
+            }, "Move " + operation + " message");
+        }
+
+        private void PermanentlyDeleteGenericMessage(
+            string messageId,
+            string operation)
+        {
+            ExecuteGraphWithRetry(() =>
+            {
+                graphService.Users[mailboxAddress]
+                    .Messages[messageId]
+                    .PermanentDelete
+                    .PostAsync(config => AddImmutableHeader(config.Headers))
+                    .GetAwaiter()
+                    .GetResult();
+                return true;
+            }, "Permanently delete " + operation + " message");
+        }
+
+        private DateTime? ReadOpeningAccountMailbox()
+        {
+            if (string.IsNullOrWhiteSpace(sql_creation_compte))
+            {
+                throw new InvalidOperationException(
+                    "sql_creation_compte is empty");
+            }
+
+            MailFolder inbox = GetRequiredFolder(inputFolderName);
+            List<Message> messages = GetOpeningAccountMessages(inbox.Id);
+            DateTime? latestHandled = null;
+            int imported = 0;
+            int ignored = 0;
+            int alreadyProcessed = 0;
+            int cleanupErrors = 0;
+            int errors = 0;
+
+            foreach (Message summary in messages)
+            {
+                DateTime received =
+                    summary.ReceivedDateTime?.LocalDateTime ?? DateTime.Now;
+
                 try
                 {
                     if (IsOpeningMessageAlreadyProcessed(summary))
                     {
-                        DateTime alreadyProcessedReceivedDate =
-                            summary.ReceivedDateTime?.LocalDateTime ??
-                            DateTime.Now;
-
-                        if (!latestTagged.HasValue ||
-                            alreadyProcessedReceivedDate > latestTagged.Value)
+                        // Le métier a déjà abouti. Si le message est encore dans
+                        // Inbox, seule sa suppression est rejouée, sans nouvel
+                        // insert SQL.
+                        try
                         {
-                            latestTagged = alreadyProcessedReceivedDate;
+                            PermanentlyDeleteOpeningMessage(summary.Id);
+                            UpsertProcessingState(
+                                summary,
+                                "S",
+                                null,
+                                "Opening account email already imported; mailbox cleanup completed");
+                            WriteLog(
+                                "       Opening account email already imported " +
+                                "and now permanently deleted : " +
+                                (summary.Subject ?? "<no subject>"));
+                        }
+                        catch (Exception cleanupException)
+                        {
+                            cleanupErrors++;
+                            UpsertProcessingState(
+                                summary,
+                                "E",
+                                null,
+                                "Database import completed but mailbox cleanup failed : " +
+                                GetInnermostExceptionMessage(cleanupException));
+                            WriteLog(
+                                "       Opening account cleanup retry failed" +
+                                " - Subject : " +
+                                (summary.Subject ?? "<no subject>") +
+                                " - Error : " + cleanupException);
                         }
 
+                        if (!latestHandled.HasValue || received > latestHandled.Value)
+                            latestHandled = received;
                         alreadyProcessed++;
-                        WriteLog(
-                            "       Opening account email already tagged : " +
-                            (summary.Subject ?? "<no subject>"));
                         continue;
                     }
+
                     Message email = GetOpeningAccountMessage(summary.Id);
                     string sender = GetSender(email).Trim();
                     string subject = (email.Subject ?? "").Trim();
-                    string dossierId = "";
+                    string dossierIdText = "";
                     bool matched = false;
-                    if (sender.Equals("ouverture@ingrammicro.fr", StringComparison.OrdinalIgnoreCase) && subject.Equals("ouverture de compte client ingram micro", StringComparison.OrdinalIgnoreCase))
-                    { matched = true; dossierId = GetOpeningDossierIdFromPdfAttachment(email.Id); }
-                    else if (sender.Equals("analystes.credit@ingrammicro.fr", StringComparison.OrdinalIgnoreCase))
-                    { matched = true; dossierId = GetOpeningDossierIdFromCustomerNumber(subject); }
 
-                    DateTime received = email.ReceivedDateTime?.LocalDateTime ?? summary.ReceivedDateTime?.LocalDateTime ?? DateTime.Now;
+                    if (sender.Equals(
+                            "ouverture@ingrammicro.fr",
+                            StringComparison.OrdinalIgnoreCase) &&
+                        subject.Equals(
+                            "ouverture de compte client ingram micro",
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        matched = true;
+                        dossierIdText =
+                            GetOpeningDossierIdFromPdfAttachment(email.Id);
+                    }
+                    else if (sender.Equals(
+                                 "analystes.credit@ingrammicro.fr",
+                                 StringComparison.OrdinalIgnoreCase))
+                    {
+                        matched = true;
+                        dossierIdText =
+                            GetOpeningDossierIdFromCustomerNumber(subject);
+                    }
+
+                    received =
+                        email.ReceivedDateTime?.LocalDateTime ??
+                        summary.ReceivedDateTime?.LocalDateTime ??
+                        DateTime.Now;
+
                     if (!matched)
                     {
                         TryMarkOpeningMessageAsProcessed(email.Id, false);
-
                         UpsertProcessingState(
                             email,
                             "S",
                             null,
                             "Opening account email outside robot criteria - tagged and left unread");
-
-                        if (!latestTagged.HasValue || received > latestTagged.Value)
-                            latestTagged = received;
-
+                        if (!latestHandled.HasValue || received > latestHandled.Value)
+                            latestHandled = received;
                         ignored++;
                         WriteLog(
                             "       Opening account email tagged, left unread " +
                             "and in Inbox : " + subject);
                         continue;
                     }
-                    if (string.IsNullOrWhiteSpace(dossierId))
+
+                    if (!int.TryParse(
+                            dossierIdText,
+                            NumberStyles.None,
+                            CultureInfo.InvariantCulture,
+                            out int dossierId) ||
+                        dossierId <= 0)
                     {
-                        // Le message correspond à une règle métier du robot.
-                        // L'absence de dossier est donc une anomalie technique :
-                        // aucun tag, aucune lecture et aucun déplacement. Le mail
-                        // sera repris au prochain passage après correction.
                         throw new InvalidOperationException(
-                            "Opening account business email matched but no " +
+                            "Opening account business email matched but no valid " +
                             "dossier ID could be resolved. Sender : " +
                             sender + " - Subject : " + subject);
                     }
-                    MailFolder dossier = GetOrCreateOpeningFolder(archive.Id, dossierId);
-                    MoveOpeningMessage(email.Id, dossier.Id);
-                    TryMarkOpeningMessageAsProcessed(email.Id, true);
 
+                    // Nouveau flux direct : le MIME est lu dans Inbox, importé
+                    // immédiatement en base, puis le message est supprimé.
+                    byte[] mime = GetMimeContent(email.Id);
+                    InsertOpeningMailInDatabase(dossierId, email, mime);
+                    UpdateOpeningUploadStatus(dossierId);
+                    TryMarkOpeningMessageAsProcessed(email.Id, true);
                     UpsertProcessingState(
                         email,
                         "S",
                         null,
-                        "Opening account email processed and archived in dossier " +
+                        "Opening account email imported directly from Inbox for dossier " +
                         dossierId);
 
-                    if (!latestTagged.HasValue || received > latestTagged.Value)
-                        latestTagged = received;
-                    moved++;
+                    try
+                    {
+                        PermanentlyDeleteOpeningMessage(email.Id);
+                    }
+                    catch (Exception cleanupException)
+                    {
+                        // L'import SQL est terminé. Le statut E permet de
+                        // recharger le message par son GraphMessageId et de
+                        // rejouer uniquement la suppression au prochain passage.
+                        cleanupErrors++;
+                        UpsertProcessingState(
+                            email,
+                            "E",
+                            null,
+                            "Database import completed but mailbox cleanup failed : " +
+                            GetInnermostExceptionMessage(cleanupException));
+                        WriteLog(
+                            "       Opening account imported but mailbox cleanup failed" +
+                            " - Dossier : " + dossierId +
+                            " - Error : " + cleanupException);
+                        SendTechnicalAlert(
+                            nameof(ReadOpeningAccountMailbox),
+                            mailboxAddress +
+                            " - Dossier : " + dossierId +
+                            " - Database import completed but message deletion failed - " +
+                            cleanupException,
+                            "OPENING ACCOUNT MAILBOX CLEANUP");
+                    }
+
+                    if (!latestHandled.HasValue || received > latestHandled.Value)
+                        latestHandled = received;
+                    imported++;
                     WriteLog(
-                        "       Opening account email tagged and moved to " +
-                        automatic_mail_archive_folder_name +
-                        "\\" + dossierId + " : " + (email.Subject ?? "<no subject>"));
+                        "       Opening account email imported directly from Inbox" +
+                        " - Dossier : " + dossierId +
+                        " - Message deletion requested" +
+                        " - Subject : " +
+                        (email.Subject ?? "<no subject>"));
                 }
                 catch (Exception ex)
                 {
                     errors++;
-
-                    UpsertProcessingState(
-                        summary,
-                        "E",
-                        null,
-                        ex.Message);
-
+                    UpsertProcessingState(summary, "E", null, ex.ToString());
                     WriteLog(
-                        "       Opening account email error stored in " +
-                        "T_CreditMailProcessing : " + ex.Message);
-
+                        "       Opening account email processing error" +
+                        " - Subject : " +
+                        (summary.Subject ?? "<no subject>") +
+                        " - Error : " + ex);
                     SendTechnicalAlert(
                         nameof(ReadOpeningAccountMailbox),
                         mailboxAddress + " - Mail : " +
-                        (summary.Subject ?? "<no subject>") + " - " +
-                        ex.Message,
+                        (summary.Subject ?? "<no subject>") + " - " + ex,
                         "OPENING ACCOUNT EMAIL PROCESSING");
-
-                    // L'erreur est mémorisée avec le GraphMessageId. Le traitement
-                    // des messages suivants continue et le mail en erreur sera
-                    // rechargé explicitement au prochain passage.
                     continue;
                 }
             }
-            WriteLog("       Opening account summary - Candidates : " + messages.Count + " - Moved : " + moved + " - Ignored tagged unread : " + ignored + " - Already processed : " + alreadyProcessed + " - Errors : " + errors);
-            return latestTagged;
+
+            WriteLog(
+                "       Opening account summary" +
+                " - Candidates : " + messages.Count +
+                " - Imported directly from Inbox : " + imported +
+                " - Ignored tagged unread : " + ignored +
+                " - Already imported cleanup : " + alreadyProcessed +
+                " - Cleanup errors : " + cleanupErrors +
+                " - Processing errors : " + errors);
+            return latestHandled;
         }
 
         private List<Message> GetOpeningAccountMessages(string folderId)
@@ -789,7 +1509,28 @@ WHERE MailboxId = @MAILBOX_ID
 
         private Message GetOpeningAccountMessage(string id)
         {
-            return ExecuteGraphWithRetry(() => graphService.Users[mailboxAddress].Messages[id].GetAsync(q => { AddImmutableHeader(q.Headers); q.QueryParameters.Select = new[] { "id", "subject", "receivedDateTime", "from", "sender", "hasAttachments", "internetMessageId" }; }).GetAwaiter().GetResult(), "Get opening account message");
+            return ExecuteGraphWithRetry(
+                () => graphService.Users[mailboxAddress]
+                    .Messages[id]
+                    .GetAsync(q =>
+                    {
+                        AddImmutableHeader(q.Headers);
+                        q.QueryParameters.Select = new[]
+                        {
+                            "id",
+                            "subject",
+                            "receivedDateTime",
+                            "createdDateTime",
+                            "from",
+                            "sender",
+                            "toRecipients",
+                            "hasAttachments",
+                            "internetMessageId"
+                        };
+                    })
+                    .GetAwaiter()
+                    .GetResult(),
+                "Get opening account message");
         }
 
         private static bool IsOpeningMessageAlreadyProcessed(Message m)
@@ -802,10 +1543,6 @@ WHERE MailboxId = @MAILBOX_ID
             ExecuteGraphWithRetry(() => { graphService.Users[mailboxAddress].Messages[id].PatchAsync(new Message { IsRead = markAsRead ? (bool?)true : null, SingleValueExtendedProperties = new List<SingleValueLegacyExtendedProperty> { new SingleValueLegacyExtendedProperty { Id = opening_processed_property_id, Value = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ", CultureInfo.InvariantCulture) } } }, q => AddImmutableHeader(q.Headers)).GetAwaiter().GetResult(); return true; }, "Tag opening account message");
         }
 
-        private void MoveOpeningMessage(string id, string destinationId)
-        {
-            ExecuteGraphWithRetry(() => { graphService.Users[mailboxAddress].Messages[id].Move.PostAsync(new Microsoft.Graph.Users.Item.Messages.Item.Move.MovePostRequestBody { DestinationId = destinationId }, q => AddImmutableHeader(q.Headers)).GetAwaiter().GetResult(); return true; }, "Move opening account message");
-        }
 
         private string GetOpeningDossierIdFromPdfAttachment(string id)
         {
@@ -821,226 +1558,11 @@ WHERE MailboxId = @MAILBOX_ID
             return ExecuteScalarString(sql_creation_compte, "SELECT TOP (1) CAST(id AS varchar(20)) FROM dbo.T_customer WHERE ImpCustNbr=@C ORDER BY id DESC;", new SqlParameter("@C", SqlDbType.VarChar, 50) { Value = subject.Substring(2, 6) });
         }
 
-        private MailFolder GetOrCreateOpeningFolder(string parentId, string name)
-        {
-            MailFolder f = FindOpeningFolder(parentId, name); if (f != null) return f;
-            return ExecuteGraphWithRetry(() => graphService.Users[mailboxAddress].MailFolders[parentId].ChildFolders.PostAsync(new MailFolder { DisplayName = name, IsHidden = false }).GetAwaiter().GetResult(), "Create opening folder " + name);
-        }
 
-        private MailFolder FindOpeningFolder(string parentId, string name)
-        {
-            MailFolderCollectionResponse r = ExecuteGraphWithRetry(() => graphService.Users[mailboxAddress].MailFolders[parentId].ChildFolders.GetAsync(q => { q.QueryParameters.Top = 999; q.QueryParameters.Filter = "displayName eq '" + EscapeODataString(name) + "'"; }).GetAwaiter().GetResult(), "Find opening folder " + name);
-            return r?.Value?.FirstOrDefault(x => string.Equals(x.DisplayName, name, StringComparison.OrdinalIgnoreCase));
-        }
 
-        private void UploadOpeningMailsToDatabase()
-        {
-            if (string.IsNullOrWhiteSpace(sql_creation_compte))
-            {
-                throw new InvalidOperationException(
-                    "sql_creation_compte is empty");
-            }
 
-            MailFolder inbox = GetRequiredFolder(inputFolderName);
-            MailFolder automaticArchive = FindOpeningFolder(
-                inbox.Id,
-                automatic_mail_archive_folder_name);
 
-            if (automaticArchive == null)
-            {
-                if (IsTrue(debug))
-                {
-                    WriteLog(
-                        "       Opening account upload skipped: folder " +
-                        automatic_mail_archive_folder_name +
-                        " was not found");
-                }
 
-                return;
-            }
-
-            List<MailFolder> dossierFolders =
-                GetOpeningDossierFolders(automaticArchive.Id);
-
-            WriteLog(
-                "       Opening account dossier folder(s) found for database upload : " +
-                dossierFolders.Count);
-
-            int importedMessages = 0;
-            int deletedFolders = 0;
-            int errors = 0;
-
-            foreach (MailFolder dossierFolder in dossierFolders)
-            {
-                string dossierName =
-                    (dossierFolder.DisplayName ?? "").Trim();
-
-                if (!int.TryParse(
-                        dossierName,
-                        NumberStyles.None,
-                        CultureInfo.InvariantCulture,
-                        out int dossierId))
-                {
-                    if (IsTrue(debug))
-                    {
-                        WriteLog(
-                            "       Opening account upload ignored non-numeric " +
-                            "folder : " + dossierName);
-                    }
-
-                    continue;
-                }
-
-                try
-                {
-                    List<Message> archivedMessages =
-                        GetOpeningArchivedMessages(dossierFolder.Id);
-
-                    WriteLog(
-                        "       Opening account mail(s) found for database upload" +
-                        " - Dossier : " + dossierId +
-                        " - Found : " + archivedMessages.Count);
-
-                    foreach (Message summary in archivedMessages)
-                    {
-                        Message email =
-                            GetOpeningArchivedMessage(summary.Id);
-
-                        byte[] mime = GetMimeContent(email.Id);
-
-                        InsertOpeningMailInDatabase(
-                            dossierId,
-                            email,
-                            mime);
-
-                        PermanentlyDeleteOpeningMessage(email.Id);
-                        importedMessages++;
-
-                        WriteLog(
-                            "       Opening account mail imported in database" +
-                        " - Dossier : " + dossierId + " - Message permanently deleted from mailbox" +
-                        " : " + (email.Subject ?? "<no subject>"));
-                    }
-
-                    // Comme l'ancien upload_mail_en_bdd_general, le dossier
-                    // numérique est supprimé après l'import de tous ses mails.
-                    PermanentlyDeleteOpeningFolder(dossierFolder.Id);
-                    UpdateOpeningUploadStatus(dossierId);
-                    deletedFolders++;
-
-                    WriteLog(
-                        "       Opening account dossier folder permanently deleted" +
-                        " - Dossier : " + dossierId);
-                }
-                catch (Exception ex)
-                {
-                    errors++;
-
-                    WriteLog(
-                        "       Opening account database upload error" +
-                        " - Dossier : " + dossierId +
-                        " - Error : " + ex.Message);
-
-                    SendTechnicalAlert(
-                        nameof(UploadOpeningMailsToDatabase),
-                        mailboxAddress +
-                        " - Dossier : " +
-                        dossierId +
-                        " - " +
-                        ex.Message,
-                        "OPENING ACCOUNT DATABASE UPLOAD");
-                }
-            }
-
-            WriteLog(
-                "       Opening account database upload summary" +
-                " - Dossier folders : " + dossierFolders.Count +
-                " - Imported messages : " + importedMessages +
-                " - Deleted folders : " + deletedFolders +
-                " - Errors : " + errors);
-        }
-
-        private List<MailFolder> GetOpeningDossierFolders(
-            string automaticArchiveFolderId)
-        {
-            MailFolderCollectionResponse response =
-                ExecuteGraphWithRetry(
-                    () => graphService.Users[mailboxAddress]
-                        .MailFolders[automaticArchiveFolderId]
-                        .ChildFolders
-                        .GetAsync(q =>
-                        {
-                            q.QueryParameters.Top = 999;
-                            q.QueryParameters.Select = new[]
-                            {
-                                "id",
-                                "displayName",
-                                "totalItemCount",
-                                "childFolderCount"
-                            };
-                        })
-                        .GetAwaiter()
-                        .GetResult(),
-                    "List opening account dossier folders");
-
-            return response?.Value ?? new List<MailFolder>();
-        }
-
-        private List<Message> GetOpeningArchivedMessages(
-            string folderId)
-        {
-            MessageCollectionResponse response =
-                ExecuteGraphWithRetry(
-                    () => graphService.Users[mailboxAddress]
-                        .MailFolders[folderId]
-                        .Messages
-                        .GetAsync(q =>
-                        {
-                            AddImmutableHeader(q.Headers);
-                            q.QueryParameters.Top = 999;
-                            q.QueryParameters.Orderby =
-                                new[] { "receivedDateTime asc" };
-                            q.QueryParameters.Select = new[]
-                            {
-                                "id",
-                                "subject",
-                                "receivedDateTime",
-                                "internetMessageId"
-                            };
-                        })
-                        .GetAwaiter()
-                        .GetResult(),
-                    "List opening account archived messages");
-
-            return response?.Value ?? new List<Message>();
-        }
-
-        private Message GetOpeningArchivedMessage(string messageId)
-        {
-            return ExecuteGraphWithRetry(
-                () => graphService.Users[mailboxAddress]
-                    .Messages[messageId]
-                    .GetAsync(q =>
-                    {
-                        q.Headers.Add(
-                            "Prefer",
-                            "outlook.body-content-type=\"text\", " +
-                            immutable_id_preference);
-
-                        q.QueryParameters.Select = new[]
-                        {
-                            "id",
-                            "subject",
-                            "receivedDateTime",
-                            "createdDateTime",
-                            "toRecipients",
-                            "internetMessageId"
-                        };
-                    })
-                    .GetAwaiter()
-                    .GetResult(),
-                "Get opening account archived message");
-        }
 
         private void InsertOpeningMailInDatabase(
             int dossierId,
@@ -1148,22 +1670,6 @@ WHERE MailboxId = @MAILBOX_ID
                 "Permanently delete imported opening account message");
         }
 
-        private void PermanentlyDeleteOpeningFolder(string folderId)
-        {
-            ExecuteGraphWithRetry(
-                () =>
-                {
-                    graphService.Users[mailboxAddress]
-                        .MailFolders[folderId]
-                        .PermanentDelete
-                        .PostAsync()
-                        .GetAwaiter()
-                        .GetResult();
-
-                    return true;
-                },
-                "Permanently delete imported opening account folder");
-        }
 
         private void UpdateOpeningUploadStatus(int dossierId)
         {
@@ -1657,6 +2163,18 @@ WHERE MailboxId = @MAILBOX_ID
             int top;
             if (!int.TryParse(number_Of_Mails, out top) || top <= 0) top = 10;
             DateTime date = mailboxFilterDate > new DateTime(1900, 1, 1) ? mailboxFilterDate : ParseStartDate();
+
+            WriteLog(
+            "       Listing Graph messages" +
+            " - Mailbox : " +
+            mailboxAddress +
+            " - Folder : " +
+            inputFolderName +
+            " - Filter date : " +
+            date.ToString("dd/MM/yyyy HH:mm:ss") +
+            " - Top : " +
+            top);
+
             MessageCollectionResponse res = ExecuteGraphWithRetry(() => graphService.Users[mailboxAddress].MailFolders[folderId].Messages.GetAsync(q =>
             {
                 AddImmutableHeader(q.Headers);
@@ -2153,22 +2671,95 @@ WHERE MailboxId = @MAILBOX_ID
 
         private void UpsertMailboxError(Exception ex)
         {
-            WriteLog("   Error reading mailbox " + mailboxAddress + " : " + ex.Message);
-            SendTechnicalAlert(nameof(Read_Email_with_Graph), mailboxAddress + " - " + ex.Message, "MAILBOX PROCESSING");
+            string details =
+                GetDetailedExceptionMessage(ex);
+
+            WriteLog(
+                "   Error reading mailbox" +
+                " - Mailbox : " +
+                mailboxAddress +
+                " - Folder : " +
+                inputFolderName +
+                " - Details : " +
+                details);
+
+            SendTechnicalAlert(
+                nameof(Read_Email_with_Graph),
+                mailboxAddress +
+                " - Folder : " +
+                inputFolderName +
+                " - " +
+                details,
+                "MAILBOX PROCESSING");
         }
 
-        private void UpdateMailboxRefreshInformation(int id, DateTime? latest)
+        private static string GetDetailedExceptionMessage(
+    Exception exception)
         {
-            ExecuteNonQuery(sql_connexion, "UPDATE dbo.T_SharedMailboxes SET date_dernier_raf=GETDATE(),dt_heure_filtre=CASE WHEN @L IS NULL THEN dt_heure_filtre WHEN dt_heure_filtre IS NULL OR @L>dt_heure_filtre THEN @L ELSE dt_heure_filtre END WHERE id_mailboxe=@I;", new SqlParameter("@L", SqlDbType.DateTime)
+            if (exception == null)
             {
-                Value = latest.HasValue ? (object)latest.Value : DBNull.Value
+                return "Unknown error";
             }
-            , new SqlParameter("@I", SqlDbType.Int)
+
+            List<string> details =
+                new List<string>();
+
+            Exception current =
+                exception;
+
+            while (current != null)
             {
-                Value = id
+                details.Add(
+                    "Type=" +
+                    current.GetType().FullName);
+
+                if (!string.IsNullOrWhiteSpace(
+                        current.Message))
+                {
+                    details.Add(
+                        "Message=" +
+                        current.Message);
+                }
+
+                ODataError graphError =
+                    current as ODataError;
+
+                if (graphError != null)
+                {
+                    if (!string.IsNullOrWhiteSpace(
+                            graphError.Error?.Code))
+                    {
+                        details.Add(
+                            "GraphCode=" +
+                            graphError.Error.Code);
+                    }
+
+                    if (!string.IsNullOrWhiteSpace(
+                            graphError.Error?.Message))
+                    {
+                        details.Add(
+                            "GraphMessage=" +
+                            graphError.Error.Message);
+                    }
+                }
+
+                if (current is ApiException apiException)
+                {
+                    details.Add(
+                        "HttpStatus=" +
+                        apiException.ResponseStatusCode);
+                }
+
+                current =
+                    current.InnerException;
             }
-            );
+
+            return string.Join(
+                " | ",
+                details.Distinct(
+                    StringComparer.OrdinalIgnoreCase));
         }
+
 
         private string GetImcaParameter(string c, string p)
         {
@@ -2222,8 +2813,40 @@ WHERE MailboxId = @MAILBOX_ID
 
         private void ValidateMailboxConfiguration()
         {
-            if (mailboxId <= 0 || string.IsNullOrWhiteSpace(mailboxAddress) || string.IsNullOrWhiteSpace(inputFolderName) || string.IsNullOrWhiteSpace(outputFolderName)) throw new InvalidOperationException("Mailbox configuration is incomplete");
-            if (mailboxName.Equals(credit_card_mailbox_name, StringComparison.OrdinalIgnoreCase) && allowedSenders.Count == 0) throw new InvalidOperationException("sender_allowed is empty for the Cartes Bleues mailbox");
+            if (mailboxId <= 0 ||
+                string.IsNullOrWhiteSpace(mailboxAddress) ||
+                string.IsNullOrWhiteSpace(inputFolderName))
+            {
+                throw new InvalidOperationException(
+                    "Mailbox configuration is incomplete");
+            }
+
+            bool outputFolderRequired =
+                mailboxName.Equals(
+                    credit_card_mailbox_name,
+                    StringComparison.OrdinalIgnoreCase) ||
+                mailboxName.Equals(
+                    score_fraud_mailbox_name,
+                    StringComparison.OrdinalIgnoreCase) ||
+                mailboxName.Equals(
+                    credit_review_mailbox_name,
+                    StringComparison.OrdinalIgnoreCase);
+
+            if (outputFolderRequired &&
+                string.IsNullOrWhiteSpace(outputFolderName))
+            {
+                throw new InvalidOperationException(
+                    "folder_out is required for mailbox " + mailboxName);
+            }
+
+            if (mailboxName.Equals(
+                    credit_card_mailbox_name,
+                    StringComparison.OrdinalIgnoreCase) &&
+                allowedSenders.Count == 0)
+            {
+                throw new InvalidOperationException(
+                    "sender_allowed is empty for the Cartes Bleues mailbox");
+            }
         }
 
         private DateTime ParseStartDate()
@@ -2528,7 +3151,10 @@ WHERE MailboxId = @MAILBOX_ID
                     return true;
 
                 if (current is ApiException apiException &&
-                    (apiException.ResponseStatusCode == 429 ||
+                    (apiException.ResponseStatusCode == 408 ||
+                     apiException.ResponseStatusCode == 429 ||
+                     apiException.ResponseStatusCode == 500 ||
+                     apiException.ResponseStatusCode == 502 ||
                      apiException.ResponseStatusCode == 503 ||
                      apiException.ResponseStatusCode == 504))
                     return true;

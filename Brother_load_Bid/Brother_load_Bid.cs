@@ -1,6 +1,8 @@
 ﻿using ClosedXML.Excel;
 using Microsoft.Graph;
 using Microsoft.Graph.Models;
+using Microsoft.Graph.Models.ODataErrors;
+using Microsoft.Kiota.Abstractions;
 using Newtonsoft.Json;
 using System;
 using System.Collections.Generic;
@@ -8,6 +10,7 @@ using System.Data.SqlClient;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Net.Http;
 using System.Text;
 using System.Threading.Tasks;
 
@@ -248,7 +251,7 @@ namespace Brother_load_Bid
                                 }
                                 catch (Exception ex)
                                 {
-                                    WriteToFile("   Error processing email : " + ex.Message + " at " + DateTime.Now.ToString("dd/MM/yyyy HH:mm:ss"));
+                                    WriteToFile("   Error processing email : " + GetDetailedExceptionMessage(ex) + " at " + DateTime.Now.ToString("dd/MM/yyyy HH:mm:ss"));
 
                                     try
                                     {
@@ -296,13 +299,13 @@ namespace Brother_load_Bid
                     }
                     catch (Exception e)
                     {
-                        WriteToFile("   Error get emails : " + e.Message);
+                        WriteToFile("   Error get emails : " + GetDetailedExceptionMessage(e));
                     }
                 }
             }
             catch (Exception ex)
             {
-                WriteToFile("Global error Read_Email_with_Graph : " + ex.Message);
+                WriteToFile("Global error Read_Email_with_Graph : " + GetDetailedExceptionMessage(ex));
             }
             finally
             {
@@ -353,41 +356,195 @@ namespace Brother_load_Bid
             }
         }
 
-        private MessageCollectionResponse GetMessagesToProcess(GraphServiceClient graphService, string folderId)
+        private T ExecuteGraphWithRetry<T>(
+            Func<T> action,
+            string operation)
+        {
+            const int maximumAttempts = 3;
+            Exception lastException = null;
+
+            for (int attempt = 1;
+                 attempt <= maximumAttempts;
+                 attempt++)
+            {
+                try
+                {
+                    return action();
+                }
+                catch (Exception ex) when (IsTransientGraphError(ex))
+                {
+                    lastException = ex;
+                    if (attempt >= maximumAttempts)
+                    {
+                        break;
+                    }
+
+                    int delayMilliseconds = attempt * 5000;
+                    WriteToFile(
+                        "       Temporary Graph error during " +
+                        operation +
+                        ". Application attempt " + attempt + "/" +
+                        maximumAttempts + ". Retry in " +
+                        delayMilliseconds + " ms. Details : " +
+                        GetDetailedExceptionMessage(ex));
+                    System.Threading.Thread.Sleep(delayMilliseconds);
+                }
+            }
+
+            throw new InvalidOperationException(
+                "Graph operation failed after " + maximumAttempts +
+                " application attempt(s) : " + operation + " - " +
+                GetDetailedExceptionMessage(lastException),
+                lastException);
+        }
+
+        private static bool IsTransientGraphError(Exception exception)
+        {
+            Exception current = exception;
+            while (current != null)
+            {
+                if (current is HttpRequestException ||
+                    current is TimeoutException ||
+                    current is TaskCanceledException)
+                {
+                    return true;
+                }
+
+                if (current is ApiException apiException)
+                {
+                    int status = apiException.ResponseStatusCode;
+                    if (status == 408 || status == 429 ||
+                        status == 500 || status == 502 ||
+                        status == 503 || status == 504)
+                    {
+                        return true;
+                    }
+                }
+
+                ODataError oDataError = current as ODataError;
+                string graphCode = oDataError?.Error?.Code ?? "";
+                if (graphCode.Equals("TooManyRequests", StringComparison.OrdinalIgnoreCase) ||
+                    graphCode.Equals("ErrorServerBusy", StringComparison.OrdinalIgnoreCase) ||
+                    graphCode.Equals("ServiceUnavailable", StringComparison.OrdinalIgnoreCase) ||
+                    graphCode.Equals("ApplicationThrottled", StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+
+                string text = current.Message ?? "";
+                if (text.IndexOf("Too many retries performed", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    text.IndexOf("More than 3 retries encountered", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    text.IndexOf("TooManyRequests", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    text.IndexOf("ApplicationThrottled", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    text.IndexOf("temporarily unavailable", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    text.IndexOf("service unavailable", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    text.IndexOf("12002", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    text.IndexOf("timed out", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    text.IndexOf("operation was canceled", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    text.IndexOf("An error occurred while sending the request", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    return true;
+                }
+
+                current = current.InnerException;
+            }
+            return false;
+        }
+
+        private static string GetDetailedExceptionMessage(Exception exception)
+        {
+            if (exception == null)
+            {
+                return "Unknown error";
+            }
+
+            var details = new List<string>();
+            Exception current = exception;
+            while (current != null)
+            {
+                details.Add("Type=" + current.GetType().FullName);
+                if (!string.IsNullOrWhiteSpace(current.Message))
+                {
+                    details.Add("Message=" + current.Message);
+                }
+
+                ODataError oDataError = current as ODataError;
+                if (oDataError != null)
+                {
+                    if (!string.IsNullOrWhiteSpace(oDataError.Error?.Code))
+                    {
+                        details.Add("GraphCode=" + oDataError.Error.Code);
+                    }
+                    if (!string.IsNullOrWhiteSpace(oDataError.Error?.Message))
+                    {
+                        details.Add("GraphMessage=" + oDataError.Error.Message);
+                    }
+                }
+
+                if (current is ApiException apiException)
+                {
+                    details.Add("HttpStatus=" + apiException.ResponseStatusCode);
+                }
+
+                current = current.InnerException;
+            }
+
+            return string.Join(
+                " | ",
+                details.Where(value => !string.IsNullOrWhiteSpace(value))
+                    .Distinct(StringComparer.OrdinalIgnoreCase));
+        }
+
+        private MessageCollectionResponse GetMessagesToProcess(
+            GraphServiceClient graphService,
+            string folderId)
         {
             int topEmails = 10;
-
-            if (!int.TryParse(number_of_mails, out topEmails))
+            if (!int.TryParse(number_of_mails, out topEmails) ||
+                topEmails <= 0)
             {
                 topEmails = 10;
             }
 
-            return graphService.Users[sharedmailbox_name]
-                .MailFolders[folderId]
-                .Messages
-                .GetAsync(config =>
-                {
-                    config.QueryParameters.Top = topEmails;
-                    config.QueryParameters.Orderby = new string[] { "receivedDateTime asc" };
-                    config.QueryParameters.Select = new string[]
-                    {
-                        "id",
-                        "subject",
-                        "from",
-                        "hasAttachments",
-                        "receivedDateTime",
-                        "isRead"
-                    };
+            string filter = BuildMessageFilter();
 
-                    string filter = BuildMessageFilter();
+            WriteToFile(
+                "       Listing Graph messages" +
+                " - Mailbox : " + sharedmailbox_name +
+                " - Folder : " + sharedmailbox_folder_in +
+                " - Filter : " +
+                (string.IsNullOrWhiteSpace(filter) ? "<none>" : filter) +
+                " - Top : " + topEmails);
 
-                    if (!string.IsNullOrWhiteSpace(filter))
+            return ExecuteGraphWithRetry(
+                () => graphService.Users[sharedmailbox_name]
+                    .MailFolders[folderId]
+                    .Messages
+                    .GetAsync(config =>
                     {
-                        config.QueryParameters.Filter = filter;
-                    }
-                })
-                .GetAwaiter()
-                .GetResult();
+                        config.QueryParameters.Top = topEmails;
+                        config.QueryParameters.Orderby = new string[]
+                        {
+                            "receivedDateTime asc"
+                        };
+                        config.QueryParameters.Select = new string[]
+                        {
+                            "id",
+                            "subject",
+                            "from",
+                            "hasAttachments",
+                            "receivedDateTime",
+                            "isRead"
+                        };
+
+                        if (!string.IsNullOrWhiteSpace(filter))
+                        {
+                            config.QueryParameters.Filter = filter;
+                        }
+                    })
+                    .GetAwaiter()
+                    .GetResult(),
+                "List messages for " + sharedmailbox_name);
         }
 
         private string BuildMessageFilter()

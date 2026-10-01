@@ -1,5 +1,7 @@
 ﻿using Microsoft.Graph;
 using Microsoft.Graph.Models;
+using Microsoft.Graph.Models.ODataErrors;
+using Microsoft.Kiota.Abstractions;
 using Newtonsoft.Json;
 using System;
 using System.Collections.Generic;
@@ -284,14 +286,14 @@ namespace TRACT_SYNDICAL_FR
                                 WriteToFile(
                                     "   Error reading mailbox " +
                                     sharedmailbox_name + " : " +
-                                    mailboxException.Message);
+                                    GetDetailedExceptionMessage(mailboxException));
 
                                 mailboxErrors.Add(
                                     new Exception(
                                         "Mailbox " +
                                         sharedmailbox_name +
                                         " : " +
-                                        mailboxException.Message,
+                                        GetDetailedExceptionMessage(mailboxException),
                                         mailboxException));
 
                                 if (!(mailboxException is
@@ -301,7 +303,7 @@ namespace TRACT_SYNDICAL_FR
                                         nameof(Read_Email_with_Graph),
                                         "",
                                         sharedmailbox_name + " - " +
-                                        mailboxException.Message,
+                                        GetDetailedExceptionMessage(mailboxException),
                                         "MAILBOX PROCESSING");
                                 }
                             }
@@ -309,23 +311,25 @@ namespace TRACT_SYNDICAL_FR
 
                         if (mailboxErrors.Count > 0)
                         {
-                            throw new AggregateException(
+                            WriteToFile(
+                                "Country processing completed with " +
                                 mailboxErrors.Count +
-                                " shared mailbox(es) could not be processed.",
-                                mailboxErrors);
+                                " mailbox technical error(s). " +
+                                "Errors were logged and alerted without stopping the IMCA action.");
                         }
                     }
                     catch (Exception e)
                     {
-                        WriteToFile("   Error get emails : " + e.Message);
-                        throw;
+                        WriteToFile(
+                            "   Error get emails : " +
+                            GetDetailedExceptionMessage(e));
                     }
                 }
             }
             catch (Exception ex)
             {
                 WriteToFile(
-                    "Global error Read_Email_with_Graph : " + ex.Message);
+                    "Global error Read_Email_with_Graph : " + GetDetailedExceptionMessage(ex));
                 throw;
             }
             finally
@@ -757,7 +761,7 @@ namespace TRACT_SYNDICAL_FR
                         catch (Exception ex)
                         {
                             WriteToFile(
-                                "       Error processing email : " + ex.Message +
+                                "       Error processing email : " + GetDetailedExceptionMessage(ex) +
                                 " at " +
                                 DateTime.Now.ToString("dd/MM/yyyy HH:mm:ss"));
 
@@ -789,7 +793,7 @@ namespace TRACT_SYNDICAL_FR
                             {
                                 WriteToFile(
                                     "       Error moving email to Erreur folder : " +
-                                    moveException.Message);
+                                    GetDetailedExceptionMessage(moveException));
                             }
                         }
                     }
@@ -825,23 +829,25 @@ namespace TRACT_SYNDICAL_FR
             string mailbox,
             string messageId)
         {
-            return graphService.Users[mailbox]
-                .Messages[messageId]
-                .GetAsync(config =>
-                {
-                    config.QueryParameters.Select = new string[]
+            return ExecuteGraphWithRetry(
+                () => graphService.Users[mailbox]
+                    .Messages[messageId]
+                    .GetAsync(config =>
                     {
-                        "id",
-                        "subject",
-                        "body",
-                        "from",
-                        "sender",
-                        "hasAttachments",
-                        "receivedDateTime"
-                    };
-                })
-                .GetAwaiter()
-                .GetResult();
+                        config.QueryParameters.Select = new string[]
+                        {
+                            "id",
+                            "subject",
+                            "body",
+                            "from",
+                            "sender",
+                            "hasAttachments",
+                            "receivedDateTime"
+                        };
+                    })
+                    .GetAwaiter()
+                    .GetResult(),
+                "Read complete tract message");
         }
 
         private void ProcessTractEmail(
@@ -982,11 +988,13 @@ namespace TRACT_SYNDICAL_FR
                     BccRecipients = bccRecipients
                 };
 
-                draft = graphService.Users[mailboxe_reponse]
-                    .Messages
-                    .PostAsync(newMessage)
-                    .GetAwaiter()
-                    .GetResult();
+                draft = ExecuteGraphWithRetry(
+                    () => graphService.Users[mailboxe_reponse]
+                        .Messages
+                        .PostAsync(newMessage)
+                        .GetAwaiter()
+                        .GetResult(),
+                    "Create tract draft");
 
                 if (draft == null ||
                     string.IsNullOrWhiteSpace(draft.Id))
@@ -1014,12 +1022,18 @@ namespace TRACT_SYNDICAL_FR
                     }
                 }
 
-                graphService.Users[mailboxe_reponse]
-                    .Messages[draft.Id]
-                    .Send
-                    .PostAsync()
-                    .GetAwaiter()
-                    .GetResult();
+                ExecuteGraphWithRetry(
+                    () =>
+                    {
+                        graphService.Users[mailboxe_reponse]
+                            .Messages[draft.Id]
+                            .Send
+                            .PostAsync()
+                            .GetAwaiter()
+                            .GetResult();
+                        return true;
+                    },
+                    "Send tract draft");
             }
             catch
             {
@@ -1028,11 +1042,17 @@ namespace TRACT_SYNDICAL_FR
                 {
                     try
                     {
-                        graphService.Users[mailboxe_reponse]
-                            .Messages[draft.Id]
-                            .DeleteAsync()
-                            .GetAwaiter()
-                            .GetResult();
+                        ExecuteGraphWithRetry(
+                            () =>
+                            {
+                                graphService.Users[mailboxe_reponse]
+                                    .Messages[draft.Id]
+                                    .DeleteAsync()
+                                    .GetAwaiter()
+                                    .GetResult();
+                                return true;
+                            },
+                            "Delete failed tract draft");
                     }
                     catch
                     {
@@ -1058,12 +1078,18 @@ namespace TRACT_SYNDICAL_FR
                 ContentBytes = attachment.ContentBytes
             };
 
-            graphService.Users[mailboxe_reponse]
-                .Messages[draftId]
-                .Attachments
-                .PostAsync(fileAttachment)
-                .GetAwaiter()
-                .GetResult();
+            ExecuteGraphWithRetry(
+                () =>
+                {
+                    graphService.Users[mailboxe_reponse]
+                        .Messages[draftId]
+                        .Attachments
+                        .PostAsync(fileAttachment)
+                        .GetAwaiter()
+                        .GetResult();
+                    return true;
+                },
+                "Add small tract attachment");
         }
 
         private void AddLargeAttachmentToDraft(
@@ -1094,14 +1120,15 @@ namespace TRACT_SYNDICAL_FR
                     AttachmentItem = attachmentItem
                 };
 
-            UploadSession uploadSession =
-                graphService.Users[mailboxe_reponse]
+            UploadSession uploadSession = ExecuteGraphWithRetry(
+                () => graphService.Users[mailboxe_reponse]
                     .Messages[draftId]
                     .Attachments
                     .CreateUploadSession
                     .PostAsync(requestBody)
                     .GetAwaiter()
-                    .GetResult();
+                    .GetResult(),
+                "Create tract attachment upload session");
 
             if (uploadSession == null ||
                 string.IsNullOrWhiteSpace(uploadSession.UploadUrl))
@@ -1187,13 +1214,14 @@ namespace TRACT_SYNDICAL_FR
             List<TractAttachment> result =
                 new List<TractAttachment>();
 
-            AttachmentCollectionResponse attachments =
-                graphService.Users[mailbox]
+            AttachmentCollectionResponse attachments = ExecuteGraphWithRetry(
+                () => graphService.Users[mailbox]
                     .Messages[messageId]
                     .Attachments
                     .GetAsync()
                     .GetAwaiter()
-                    .GetResult();
+                    .GetResult(),
+                "Read tract attachments");
 
             if (attachments == null ||
                 attachments.Value == null)
@@ -1216,13 +1244,14 @@ namespace TRACT_SYNDICAL_FR
                 if (fileAttachment.ContentBytes == null &&
                     !string.IsNullOrWhiteSpace(fileAttachment.Id))
                 {
-                    fileAttachment =
-                        graphService.Users[mailbox]
+                    fileAttachment = ExecuteGraphWithRetry(
+                        () => graphService.Users[mailbox]
                             .Messages[messageId]
                             .Attachments[fileAttachment.Id]
                             .GetAsync()
                             .GetAwaiter()
-                            .GetResult() as FileAttachment;
+                            .GetResult() as FileAttachment,
+                        "Read complete tract attachment");
                 }
 
                 if (fileAttachment == null ||
@@ -1560,11 +1589,17 @@ namespace TRACT_SYNDICAL_FR
                 "Sending email with Graph from : " +
                 senderMailbox);
 
-            graphService.Users[senderMailbox]
-                .SendMail
-                .PostAsync(requestBody)
-                .GetAwaiter()
-                .GetResult();
+            ExecuteGraphWithRetry(
+                () =>
+                {
+                    graphService.Users[senderMailbox]
+                        .SendMail
+                        .PostAsync(requestBody)
+                        .GetAwaiter()
+                        .GetResult();
+                    return true;
+                },
+                "Send tract technical email : " + subject);
         }
 
         private List<Recipient> BuildRecipients(string emails)
@@ -1605,16 +1640,17 @@ namespace TRACT_SYNDICAL_FR
             string mailbox,
             string messageId)
         {
-            Message messageUpdate = new Message
-            {
-                IsRead = true
-            };
-
-            graphService.Users[mailbox]
-                .Messages[messageId]
-                .PatchAsync(messageUpdate)
-                .GetAwaiter()
-                .GetResult();
+            ExecuteGraphWithRetry(
+                () =>
+                {
+                    graphService.Users[mailbox]
+                        .Messages[messageId]
+                        .PatchAsync(new Message { IsRead = true })
+                        .GetAwaiter()
+                        .GetResult();
+                    return true;
+                },
+                "Mark tract message as read");
         }
 
         private void MoveEmail(
@@ -1630,52 +1666,68 @@ namespace TRACT_SYNDICAL_FR
                     DestinationId = destinationFolderId
                 };
 
-            graphService.Users[mailbox]
-                .Messages[messageId]
-                .Move
-                .PostAsync(requestBody)
-                .GetAwaiter()
-                .GetResult();
+            ExecuteGraphWithRetry(
+                () =>
+                {
+                    graphService.Users[mailbox]
+                        .Messages[messageId]
+                        .Move
+                        .PostAsync(requestBody)
+                        .GetAwaiter()
+                        .GetResult();
+                    return true;
+                },
+                "Move tract message");
         }
 
         private MessageCollectionResponse GetMessagesToProcess(
             GraphServiceClient graphService,
             string folderId)
         {
-            int topEmails = 10;
+            int topEmails;
 
-            if (!int.TryParse(number_of_mails, out topEmails))
+            if (!int.TryParse(number_of_mails, out topEmails) || topEmails <= 0)
             {
                 topEmails = 10;
             }
 
-            return graphService.Users[sharedmailbox_name]
-                .MailFolders[folderId]
-                .Messages
-                .GetAsync(config =>
-                {
-                    config.QueryParameters.Top = topEmails;
-                    config.QueryParameters.Orderby =
-                        new string[] { "receivedDateTime asc" };
-                    config.QueryParameters.Select = new string[]
-                    {
-                        "id",
-                        "subject",
-                        "from",
-                        "hasAttachments",
-                        "receivedDateTime",
-                        "isRead"
-                    };
+            string filter = BuildMessageFilter();
 
-                    string filter = BuildMessageFilter();
+            WriteToFile(
+                "   Listing Graph messages" +
+                " - Mailbox : " + sharedmailbox_name +
+                " - Folder : " + sharedmailbox_folder_in +
+                " - Filter : " +
+                (string.IsNullOrWhiteSpace(filter) ? "<none>" : filter) +
+                " - Top : " + topEmails);
 
-                    if (!string.IsNullOrWhiteSpace(filter))
+            return ExecuteGraphWithRetry(
+                () => graphService.Users[sharedmailbox_name]
+                    .MailFolders[folderId]
+                    .Messages
+                    .GetAsync(config =>
                     {
-                        config.QueryParameters.Filter = filter;
-                    }
-                })
-                .GetAwaiter()
-                .GetResult();
+                        config.QueryParameters.Top = topEmails;
+                        config.QueryParameters.Orderby =
+                            new string[] { "receivedDateTime asc" };
+                        config.QueryParameters.Select = new string[]
+                        {
+                            "id",
+                            "subject",
+                            "from",
+                            "hasAttachments",
+                            "receivedDateTime",
+                            "isRead"
+                        };
+
+                        if (!string.IsNullOrWhiteSpace(filter))
+                        {
+                            config.QueryParameters.Filter = filter;
+                        }
+                    })
+                    .GetAwaiter()
+                    .GetResult(),
+                "List tract messages");
         }
 
         private string BuildMessageFilter()
@@ -1713,17 +1765,17 @@ namespace TRACT_SYNDICAL_FR
             return "";
         }
 
-        private MailFolder GetInputFolder(
-            GraphServiceClient graphService)
+        private MailFolder GetInputFolder(GraphServiceClient graphService)
         {
-            if (sharedmailbox_folder_in.ToUpper().Trim() ==
-                "INBOX")
+            if (sharedmailbox_folder_in.ToUpperInvariant().Trim() == "INBOX")
             {
-                return graphService.Users[sharedmailbox_name]
-                    .MailFolders["inbox"]
-                    .GetAsync()
-                    .GetAwaiter()
-                    .GetResult();
+                return ExecuteGraphWithRetry(
+                    () => graphService.Users[sharedmailbox_name]
+                        .MailFolders["inbox"]
+                        .GetAsync()
+                        .GetAwaiter()
+                        .GetResult(),
+                    "Read tract Inbox folder");
             }
 
             return GetChildFolderByName(
@@ -1737,11 +1789,10 @@ namespace TRACT_SYNDICAL_FR
             string mailbox,
             string folderName)
         {
-            string safeFolderName =
-                EscapeODataString(folderName);
+            string safeFolderName = EscapeODataString(folderName);
 
-            MailFolderCollectionResponse folders =
-                graphService.Users[mailbox]
+            MailFolderCollectionResponse folders = ExecuteGraphWithRetry(
+                () => graphService.Users[mailbox]
                     .MailFolders["inbox"]
                     .ChildFolders
                     .GetAsync(config =>
@@ -1750,17 +1801,159 @@ namespace TRACT_SYNDICAL_FR
                             $"displayName eq '{safeFolderName}'";
                     })
                     .GetAwaiter()
-                    .GetResult();
+                    .GetResult(),
+                "Find tract folder " + folderName);
 
             if (folders == null ||
                 folders.Value == null ||
                 folders.Value.Count == 0)
             {
-                throw new Exception(
-                    "Folder not found : " + folderName);
+                throw new DirectoryNotFoundException(
+                    "Folder not found under Inbox : " + folderName);
             }
 
             return folders.Value.First();
+        }
+
+        private T ExecuteGraphWithRetry<T>(
+            Func<T> action,
+            string operation)
+        {
+            const int maxAttempts = 3;
+            Exception lastException = null;
+
+            for (int attempt = 1; attempt <= maxAttempts; attempt++)
+            {
+                try
+                {
+                    return action();
+                }
+                catch (Exception ex) when (IsTransientGraphError(ex))
+                {
+                    lastException = ex;
+
+                    if (attempt >= maxAttempts)
+                    {
+                        break;
+                    }
+
+                    int delayMilliseconds = attempt * 5000;
+
+                    WriteToFile(
+                        "   Temporary Graph error during " + operation +
+                        " - Attempt : " + attempt + "/" + maxAttempts +
+                        " - Retry in : " + delayMilliseconds + " ms" +
+                        " - Details : " + GetDetailedExceptionMessage(ex));
+
+                    System.Threading.Thread.Sleep(delayMilliseconds);
+                }
+            }
+
+            throw new InvalidOperationException(
+                "Graph operation failed after " + maxAttempts +
+                " application attempt(s) : " + operation +
+                " - " + GetDetailedExceptionMessage(lastException),
+                lastException);
+        }
+
+        private static bool IsTransientGraphError(Exception exception)
+        {
+            Exception current = exception;
+
+            while (current != null)
+            {
+                if (current is HttpRequestException ||
+                    current is TimeoutException ||
+                    current is System.Threading.Tasks.TaskCanceledException)
+                {
+                    return true;
+                }
+
+                if (current is ApiException apiException)
+                {
+                    int status = apiException.ResponseStatusCode;
+
+                    if (status == 408 || status == 429 || status == 500 ||
+                        status == 502 || status == 503 || status == 504)
+                    {
+                        return true;
+                    }
+                }
+
+                ODataError graphError = current as ODataError;
+                string graphCode = graphError?.Error?.Code ?? "";
+
+                if (graphCode.Equals("TooManyRequests", StringComparison.OrdinalIgnoreCase) ||
+                    graphCode.Equals("ErrorServerBusy", StringComparison.OrdinalIgnoreCase) ||
+                    graphCode.Equals("ServiceUnavailable", StringComparison.OrdinalIgnoreCase) ||
+                    graphCode.Equals("ApplicationThrottled", StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+
+                string message = current.Message ?? "";
+
+                if (message.IndexOf("Too many retries performed", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    message.IndexOf("More than 3 retries encountered", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    message.IndexOf("temporarily unavailable", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    message.IndexOf("service unavailable", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    message.IndexOf("timed out", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    message.IndexOf("An error occurred while sending the request", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    return true;
+                }
+
+                current = current.InnerException;
+            }
+
+            return false;
+        }
+
+        private static string GetDetailedExceptionMessage(Exception exception)
+        {
+            if (exception == null)
+            {
+                return "Unknown error";
+            }
+
+            List<string> details = new List<string>();
+            Exception current = exception;
+
+            while (current != null)
+            {
+                details.Add("Type=" + current.GetType().FullName);
+
+                if (!string.IsNullOrWhiteSpace(current.Message))
+                {
+                    details.Add("Message=" + current.Message);
+                }
+
+                ODataError graphError = current as ODataError;
+
+                if (graphError != null)
+                {
+                    if (!string.IsNullOrWhiteSpace(graphError.Error?.Code))
+                    {
+                        details.Add("GraphCode=" + graphError.Error.Code);
+                    }
+
+                    if (!string.IsNullOrWhiteSpace(graphError.Error?.Message))
+                    {
+                        details.Add("GraphMessage=" + graphError.Error.Message);
+                    }
+                }
+
+                if (current is ApiException apiException)
+                {
+                    details.Add("HttpStatus=" + apiException.ResponseStatusCode);
+                }
+
+                current = current.InnerException;
+            }
+
+            return string.Join(
+                " | ",
+                details.Distinct(StringComparer.OrdinalIgnoreCase));
         }
 
         private void ValidateRequiredCountryParameters(Country p)

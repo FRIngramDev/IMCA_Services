@@ -1,5 +1,7 @@
 ﻿using Microsoft.Graph;
 using Microsoft.Graph.Models;
+using Microsoft.Graph.Models.ODataErrors;
+using Microsoft.Kiota.Abstractions;
 using MimeKit;
 using Newtonsoft.Json;
 using System;
@@ -10,6 +12,7 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Net;
+using System.Net.Http;
 using System.Text;
 
 namespace APPLE_EMAILS_MANAGEMENT_FR
@@ -257,24 +260,29 @@ namespace APPLE_EMAILS_MANAGEMENT_FR
                             }
                             catch (Exception mailboxException)
                             {
+                                string errorDetails =
+                                    GetDetailedExceptionMessage(
+                                        mailboxException);
                                 WriteToFile(
-                                    "   Error reading mailbox " +
-                                    sharedmailbox_name + " : " +
-                                    mailboxException.Message);
-
+                                    "   Error reading mailbox" +
+                                    " - Mailbox : " + sharedmailbox_name +
+                                    " - Folder : " + sharedmailbox_folder_in +
+                                    " - Details : " + errorDetails);
                                 mailboxErrors.Add(
                                     new Exception(
                                         "Mailbox " + sharedmailbox_name +
-                                        " : " + mailboxException.Message,
+                                        " - Folder " + sharedmailbox_folder_in +
+                                        " : " + errorDetails,
                                         mailboxException));
-
                                 if (!(mailboxException is
                                     TechnicalAlertAlreadySentException))
                                 {
                                     SendTechnicalIssueMail(
                                         nameof(Read_Email_with_Graph),
-                                        sharedmailbox_name + " - " +
-                                        mailboxException.Message,
+                                        sharedmailbox_name +
+                                        " - Folder : " +
+                                        sharedmailbox_folder_in +
+                                        " - " + errorDetails,
                                         "MAILBOX PROCESSING");
                                 }
                             }
@@ -291,16 +299,24 @@ namespace APPLE_EMAILS_MANAGEMENT_FR
 
                         if (mailboxErrors.Count > 0)
                         {
-                            throw new AggregateException(
+                            WriteToFile(
+                                "   Country processing completed with " +
                                 mailboxErrors.Count +
-                                " APPLE_EMAILS processing error(s).",
-                                mailboxErrors);
+                                " technical error(s). Errors were logged and " +
+                                "alerted without stopping the IMCA action.");
+                        }
+                        else
+                        {
+                            WriteToFile(
+                                "   Country processing completed : " +
+                                country.ToUpperInvariant());
                         }
                     }
                     catch (Exception ex)
                     {
                         WriteToFile(
-                            "   Error get emails : " + ex.Message);
+                            "   Error get emails : " +
+                            GetDetailedExceptionMessage(ex));
                         throw;
                     }
                 }
@@ -309,7 +325,7 @@ namespace APPLE_EMAILS_MANAGEMENT_FR
             {
                 WriteToFile(
                     "Global error Read_Email_with_Graph : " +
-                    ex.Message);
+                    GetDetailedExceptionMessage(ex));
                 throw;
             }
             finally
@@ -1118,18 +1134,142 @@ WHERE id_mailboxe=@ID;";
             }
         }
 
+        private T ExecuteGraphWithRetry<T>(
+            Func<T> action,
+            string operation)
+        {
+            const int maximumAttempts = 3;
+            Exception lastException = null;
+            for (int attempt = 1; attempt <= maximumAttempts; attempt++)
+            {
+                try
+                {
+                    return action();
+                }
+                catch (Exception ex) when (IsTransientGraphError(ex))
+                {
+                    lastException = ex;
+                    if (attempt >= maximumAttempts)
+                        break;
+                    int delayMilliseconds = attempt * 5000;
+                    WriteToFile(
+                        "       Temporary Graph error during " + operation +
+                        ". Application attempt " + attempt + "/" +
+                        maximumAttempts + ". Retry in " +
+                        delayMilliseconds + " ms. Error : " +
+                        GetDetailedExceptionMessage(ex));
+                    System.Threading.Thread.Sleep(delayMilliseconds);
+                }
+            }
+            throw new InvalidOperationException(
+                "Graph operation failed after " + maximumAttempts +
+                " application attempt(s) : " + operation + " - " +
+                GetDetailedExceptionMessage(lastException),
+                lastException);
+        }
+
+        private static bool IsTransientGraphError(Exception exception)
+        {
+            Exception current = exception;
+            while (current != null)
+            {
+                if (current is HttpRequestException ||
+                    current is TimeoutException ||
+                    current is System.Threading.Tasks.TaskCanceledException)
+                    return true;
+
+                if (current is ApiException apiException)
+                {
+                    int status = apiException.ResponseStatusCode;
+                    if (status == 408 || status == 429 ||
+                        status == 500 || status == 502 ||
+                        status == 503 || status == 504)
+                        return true;
+                }
+
+                ODataError oDataError = current as ODataError;
+                string graphCode = oDataError?.Error?.Code ?? "";
+                if (graphCode.Equals("TooManyRequests", StringComparison.OrdinalIgnoreCase) ||
+                    graphCode.Equals("ErrorServerBusy", StringComparison.OrdinalIgnoreCase) ||
+                    graphCode.Equals("ServiceUnavailable", StringComparison.OrdinalIgnoreCase) ||
+                    graphCode.Equals("ApplicationThrottled", StringComparison.OrdinalIgnoreCase))
+                    return true;
+
+                string text = current.Message ?? "";
+                if (text.IndexOf("Too many retries performed", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    text.IndexOf("More than 3 retries encountered", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    text.IndexOf("TooManyRequests", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    text.IndexOf("ApplicationThrottled", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    text.IndexOf("temporarily unavailable", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    text.IndexOf("service unavailable", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    text.IndexOf("12002", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    text.IndexOf("timed out", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    text.IndexOf("operation was canceled", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    text.IndexOf("An error occurred while sending the request", StringComparison.OrdinalIgnoreCase) >= 0)
+                    return true;
+
+                current = current.InnerException;
+            }
+            return false;
+        }
+
+        private static string GetDetailedExceptionMessage(Exception exception)
+        {
+            if (exception == null)
+                return "Unknown error";
+
+            var details = new List<string>();
+            Exception current = exception;
+            while (current != null)
+            {
+                details.Add("Type=" + current.GetType().FullName);
+                if (!string.IsNullOrWhiteSpace(current.Message))
+                    details.Add("Message=" + current.Message);
+
+                ODataError oDataError = current as ODataError;
+                if (oDataError != null)
+                {
+                    if (!string.IsNullOrWhiteSpace(oDataError.Error?.Code))
+                        details.Add("GraphCode=" + oDataError.Error.Code);
+                    if (!string.IsNullOrWhiteSpace(oDataError.Error?.Message))
+                        details.Add("GraphMessage=" + oDataError.Error.Message);
+                }
+
+                if (current is ApiException apiException)
+                    details.Add("HttpStatus=" + apiException.ResponseStatusCode);
+
+                current = current.InnerException;
+            }
+
+            return string.Join(
+                " | ",
+                details.Where(value => !string.IsNullOrWhiteSpace(value))
+                    .Distinct(StringComparer.OrdinalIgnoreCase));
+        }
+
         private MessageCollectionResponse GetMessagesToProcess(string folderId)
         {
             int top;
             if (!int.TryParse(number_of_mails, out top) || top <= 0) top = 100;
             DateTime filter = dt_heure_filtre > new DateTime(1900, 1, 1) ? dt_heure_filtre : ParseStartDate();
-            return graphService.Users[sharedmailbox_name].MailFolders[folderId].Messages.GetAsync(c =>
-            {
-                c.QueryParameters.Top = top;
-                c.QueryParameters.Orderby = new[] { "receivedDateTime asc" };
-                c.QueryParameters.Filter = "receivedDateTime gt " + filter.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture);
-                c.QueryParameters.Select = new[] { "id", "subject", "receivedDateTime", "createdDateTime", "hasAttachments" };
-            }).GetAwaiter().GetResult();
+            WriteToFile(
+                "       Listing Graph messages" +
+                " - Mailbox : " + sharedmailbox_name +
+                " - Folder : " + sharedmailbox_folder_in +
+                " - Filter date : " +
+                filter.ToString("dd/MM/yyyy HH:mm:ss") +
+                " - Top : " + top);
+            return ExecuteGraphWithRetry(
+                () => graphService.Users[sharedmailbox_name]
+                    .MailFolders[folderId]
+                    .Messages.GetAsync(c =>
+                    {
+                        c.QueryParameters.Top = top;
+                        c.QueryParameters.Orderby = new[] { "receivedDateTime asc" };
+                        c.QueryParameters.Filter = "receivedDateTime gt " + filter.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture);
+                        c.QueryParameters.Select = new[] { "id", "subject", "receivedDateTime", "createdDateTime", "hasAttachments" };
+                    }).GetAwaiter().GetResult(),
+                "List messages for " + sharedmailbox_name);
         }
 
         private Message GetCompleteMessage(string id)

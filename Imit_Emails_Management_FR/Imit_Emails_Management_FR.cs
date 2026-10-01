@@ -2,6 +2,7 @@
 using ExcelDataReader;
 using Microsoft.Graph;
 using Microsoft.Graph.Models;
+using Microsoft.Graph.Models.ODataErrors;
 using Microsoft.Kiota.Abstractions;
 using MimeKit;
 using Newtonsoft.Json;
@@ -207,10 +208,28 @@ namespace IMIT_EMAILS_MANAGEMENT_FR
                             }
                             catch (Exception ex)
                             {
-                                WriteLog("   Error reading mailbox " + mailboxAddress + " : " + ex.Message);
-                                countryErrors.Add(new Exception("Mailbox " + mailboxAddress + " : " + ex.Message, ex));
+                                string errorDetails =
+                                    GetDetailedExceptionMessage(ex);
+                                WriteLog(
+                                    "   Error reading mailbox" +
+                                    " - Mailbox : " + mailboxAddress +
+                                    " - Folder : " + GetCurrentInputFolderName() +
+                                    " - Details : " + errorDetails);
+                                countryErrors.Add(
+                                    new Exception(
+                                        "Mailbox " + mailboxAddress +
+                                        " - Folder " + GetCurrentInputFolderName() +
+                                        " : " + errorDetails,
+                                        ex));
                                 if (!(ex is TechnicalAlertAlreadySentException))
-                                    SendTechnicalAlert(nameof(Read_Email_with_Graph), mailboxAddress + " - " + ex.Message, "MAILBOX PROCESSING");
+                                {
+                                    SendTechnicalAlert(
+                                        nameof(Read_Email_with_Graph),
+                                        mailboxAddress +
+                                        " - Folder : " + GetCurrentInputFolderName() +
+                                        " - " + errorDetails,
+                                        "MAILBOX PROCESSING");
+                                }
                             }
                         }
 
@@ -231,7 +250,19 @@ namespace IMIT_EMAILS_MANAGEMENT_FR
                         }
 
                         if (countryErrors.Count > 0)
-                            throw new AggregateException(countryErrors.Count + " IMIT email processing error(s).", countryErrors);
+                        {
+                            WriteLog(
+                                "   Country processing completed with " +
+                                countryErrors.Count +
+                                " technical error(s). Errors were logged and " +
+                                "alerted without stopping the IMCA action.");
+                        }
+                        else
+                        {
+                            WriteLog(
+                                "   Country processing completed : " +
+                                country.ToUpperInvariant());
+                        }
                     }
                     finally
                     {
@@ -241,7 +272,9 @@ namespace IMIT_EMAILS_MANAGEMENT_FR
             }
             catch (Exception ex)
             {
-                WriteLog("Global error Read_Email_with_Graph : " + ex.Message);
+                WriteLog(
+                    "Global error Read_Email_with_Graph : " +
+                    GetDetailedExceptionMessage(ex));
                 throw;
             }
             finally
@@ -501,6 +534,14 @@ ORDER BY m.raffraichissement_min, m.id_mailboxe;";
             if (!int.TryParse(number_Of_Mails, out top) || top <= 0) top = 100;
             if (IsCurrentCountryImitMailbox() && top > 20) top = 20;
             DateTime date = mailboxFilterDate > new DateTime(1900, 1, 1) ? mailboxFilterDate : ParseStartDate();
+            WriteLog(
+                "       Listing Graph messages" +
+                " - Mailbox : " + mailboxAddress +
+                " - Folder : " + GetCurrentInputFolderName() +
+                " - Folder ID : " + folderId +
+                " - Filter date : " +
+                date.ToString("dd/MM/yyyy HH:mm:ss") +
+                " - Top : " + top);
             return ExecuteGraphWithRetry(() => graphService.Users[mailboxAddress].MailFolders[folderId].Messages.GetAsync(config =>
             {
                 AddImmutableIdHeader(config.Headers);
@@ -1954,11 +1995,35 @@ WHERE CountryCode=@COUNTRY AND ReportMonth=@MONTH;";
                     current is TimeoutException ||
                     current is System.Threading.Tasks.TaskCanceledException)
                     return true;
-                if (current is ApiException apiException &&
-                    (apiException.ResponseStatusCode == 429 ||
-                     apiException.ResponseStatusCode == 503 ||
-                     apiException.ResponseStatusCode == 504))
+
+                if (current is ApiException apiException)
+                {
+                    int status = apiException.ResponseStatusCode;
+                    if (status == 408 ||
+                        status == 429 ||
+                        status == 500 ||
+                        status == 502 ||
+                        status == 503 ||
+                        status == 504)
+                        return true;
+                }
+
+                ODataError oDataError = current as ODataError;
+                string graphCode = oDataError?.Error?.Code ?? "";
+                if (graphCode.Equals(
+                        "TooManyRequests",
+                        StringComparison.OrdinalIgnoreCase) ||
+                    graphCode.Equals(
+                        "ErrorServerBusy",
+                        StringComparison.OrdinalIgnoreCase) ||
+                    graphCode.Equals(
+                        "ServiceUnavailable",
+                        StringComparison.OrdinalIgnoreCase) ||
+                    graphCode.Equals(
+                        "ApplicationThrottled",
+                        StringComparison.OrdinalIgnoreCase))
                     return true;
+
                 string text = current.Message ?? "";
                 if (text.IndexOf("Too many retries performed", StringComparison.OrdinalIgnoreCase) >= 0 ||
                     text.IndexOf("More than 3 retries encountered", StringComparison.OrdinalIgnoreCase) >= 0 ||
@@ -1971,16 +2036,73 @@ WHERE CountryCode=@COUNTRY AND ReportMonth=@MONTH;";
                     text.IndexOf("operation was canceled", StringComparison.OrdinalIgnoreCase) >= 0 ||
                     text.IndexOf("An error occurred while sending the request", StringComparison.OrdinalIgnoreCase) >= 0)
                     return true;
+
                 current = current.InnerException;
             }
             return false;
         }
+        private static string GetDetailedExceptionMessage(Exception exception)
+        {
+            if (exception == null)
+                return "Unknown error";
+
+            var details = new List<string>();
+            Exception current = exception;
+            while (current != null)
+            {
+                details.Add(
+                    "Type=" + current.GetType().FullName);
+
+                if (!string.IsNullOrWhiteSpace(current.Message))
+                    details.Add("Message=" + current.Message);
+
+                ODataError oDataError = current as ODataError;
+                if (oDataError != null)
+                {
+                    if (!string.IsNullOrWhiteSpace(oDataError.Error?.Code))
+                        details.Add("GraphCode=" + oDataError.Error.Code);
+                    if (!string.IsNullOrWhiteSpace(oDataError.Error?.Message))
+                        details.Add("GraphMessage=" + oDataError.Error.Message);
+                }
+
+                if (current is ApiException apiException)
+                    details.Add("HttpStatus=" + apiException.ResponseStatusCode);
+
+                current = current.InnerException;
+            }
+
+            return string.Join(
+                " | ",
+                details.Where(value =>
+                        !string.IsNullOrWhiteSpace(value))
+                    .Distinct(StringComparer.OrdinalIgnoreCase));
+        }
+
+        private string GetCurrentInputFolderName()
+        {
+            return IsSpanishErmaMailbox()
+                ? "Notificaciones eRMA"
+                : sharedmailbox_folder_in;
+        }
+
         private static string GetInnermostExceptionMessage(Exception exception)
         {
             if (exception == null) return "";
             Exception current = exception;
-            while (current.InnerException != null) current = current.InnerException;
-            return current.Message ?? "";
+            while (current.InnerException != null)
+                current = current.InnerException;
+
+            string message = current.Message ?? "";
+            if (!string.IsNullOrWhiteSpace(message))
+                return message;
+
+            ODataError oDataError = current as ODataError;
+            if (!string.IsNullOrWhiteSpace(oDataError?.Error?.Message))
+                return oDataError.Error.Message;
+            if (!string.IsNullOrWhiteSpace(oDataError?.Error?.Code))
+                return oDataError.Error.Code;
+
+            return current.GetType().FullName;
         }
 
         private bool TryMarkMessageAsProcessed(
