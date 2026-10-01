@@ -46,7 +46,7 @@ namespace CREDIT_EMAILS_MANAGEMENT_FR
         private string uri_webservice = "";
         private HashSet<string> credit_managers_contentieux_list = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private string logsFolder = "", tempFolder = "", sessionName = "";
-        private string maquettes_rapports_pj_credit = "", fr_ouverture_graph_send_as = "", fr_credit_administration_graph_send_as = "";
+        private string maquettes_rapports_pj_credit = "", fr_ouverture_graph_send_as = "", fr_credit_administration_graph_send_as = "", fr_credit_review_graph_send_as = "";
         private string email_rapport_compteur = "", email_rapport_stat_ouverture = "", admin_ventes = "";
         private string templatesReportsFolder = "";
         private static readonly object logSyncRoot = new object();
@@ -96,6 +96,7 @@ namespace CREDIT_EMAILS_MANAGEMENT_FR
             public string maquettes_rapports_pj_credit { get; set; } = "";
             public string fr_ouverture_graph_send_as { get; set; } = "";
             public string fr_credit_administration_graph_send_as { get; set; } = "";
+            public string fr_credit_review_graph_send_as { get; set; } = "";
             public string email_rapport_compteur { get; set; } = "";
             public string email_rapport_stat_ouverture { get; set; } = "";
             public string admin_ventes { get; set; } = "";
@@ -313,6 +314,7 @@ namespace CREDIT_EMAILS_MANAGEMENT_FR
             maquettes_rapports_pj_credit = i.maquettes_rapports_pj_credit ?? "";
             fr_ouverture_graph_send_as = i.fr_ouverture_graph_send_as ?? "";
             fr_credit_administration_graph_send_as = i.fr_credit_administration_graph_send_as ?? "";
+            fr_credit_review_graph_send_as = i.fr_credit_review_graph_send_as ?? "";
             email_rapport_compteur = i.email_rapport_compteur ?? "";
             email_rapport_stat_ouverture = i.email_rapport_stat_ouverture ?? "";
             admin_ventes = i.admin_ventes ?? "";
@@ -3232,6 +3234,755 @@ WHERE MailboxId = @MAILBOX_ID
             return string.IsNullOrWhiteSpace(l) ? AppDomain.CurrentDomain.BaseDirectory : Path.GetDirectoryName(l);
         }
 
+        public void Credit_Review_Mails(
+            string sql_con,
+            string logs,
+            string tmp_folder,
+            string session_name)
+        {
+            const string scheduleParameter =
+                "date_derniere_recherche_credit_review";
+
+            string root = GetServicePath();
+            logsFolder = Path.Combine(root, logs ?? "");
+            tempFolder = Path.Combine(root, tmp_folder ?? "");
+            sessionName = session_name ?? "";
+            Directory.CreateDirectory(logsFolder);
+            Directory.CreateDirectory(tempFolder);
+
+            JsonFile configuration =
+                JsonConvert.DeserializeObject<JsonFile>(
+                    GetImcaParameter(
+                        sql_con,
+                        global_application_name) ?? "");
+
+            if (configuration?.countries == null ||
+                configuration.countries.Count == 0)
+            {
+                throw new InvalidOperationException(
+                    global_application_name +
+                    " parameters are empty or invalid");
+            }
+
+            foreach (Country item in configuration.countries)
+            {
+                ApplyCountryConfiguration(item, sql_con);
+
+                if (!IsTrue(active))
+                    continue;
+
+                try
+                {
+                    ValidateCreditReviewMailConfiguration();
+
+                    DateTime lastSuccessfulExecution =
+                        GetCreditReviewScheduleDate(scheduleParameter);
+
+                    WriteLog(
+                        "   Credit Review daily schedule" +
+                        " - Last successful execution : " +
+                        lastSuccessfulExecution.ToString(
+                            "dd/MM/yyyy HH:mm:ss") +
+                        " - Current date : " +
+                        DateTime.Now.ToString("dd/MM/yyyy HH:mm:ss"));
+
+                    if (lastSuccessfulExecution.Date >= DateTime.Today)
+                    {
+                        WriteLog(
+                            "   Credit Review daily processing already " +
+                            "completed today");
+                        continue;
+                    }
+
+                    graphService = ConnectGraph();
+
+                    InitializeCreditReviewReminderDates();
+                    CreateCreditReviewMailRequests();
+                    SendPendingCreditReviewClientMails();
+                    SendPendingCreditReviewImperativeMails();
+
+                    DateTime completedAt = DateTime.Now;
+                    SetCreditReviewScheduleDate(
+                        scheduleParameter,
+                        completedAt);
+
+                    WriteLog(
+                        "   Credit Review daily processing completed" +
+                        " - Successful execution : " +
+                        completedAt.ToString("dd/MM/yyyy HH:mm:ss"));
+                }
+                catch (Exception ex)
+                {
+                    string details = GetDetailedExceptionMessage(ex);
+
+                    WriteLog(
+                        "   Credit Review daily processing error" +
+                        " - Schedule parameter not updated" +
+                        " - Details : " + details);
+
+                    SendTechnicalAlert(
+                        nameof(Credit_Review_Mails),
+                        details,
+                        "CREDIT REVIEW DAILY PROCESSING");
+                }
+                finally
+                {
+                    graphService = null;
+                }
+            }
+        }
+
+        private sealed class CreditReviewReminderRow
+        {
+            public int DossierId { get; set; }
+            public string ProcessingType { get; set; } = "";
+            public DateTime RequestDate { get; set; }
+            public DateTime ReminderJ7 { get; set; }
+            public DateTime ReminderJ14 { get; set; }
+            public DateTime ReminderJ21 { get; set; }
+            public bool SentInitial { get; set; }
+            public bool SentJ7 { get; set; }
+            public bool SentJ14 { get; set; }
+            public bool SentJ21 { get; set; }
+        }
+
+        private void ValidateCreditReviewMailConfiguration()
+        {
+            if (string.IsNullOrWhiteSpace(sql_connexion))
+                throw new InvalidOperationException(
+                    "sql_connexion is empty for Credit Review");
+
+            if (string.IsNullOrWhiteSpace(sql_creation_compte))
+                throw new InvalidOperationException(
+                    "sql_creation_compte is empty for Credit Review schedule");
+
+            if (string.IsNullOrWhiteSpace(templatesReportsFolder) ||
+                !Directory.Exists(templatesReportsFolder))
+                throw new DirectoryNotFoundException(
+                    "Credit Review templates folder not found : " +
+                    templatesReportsFolder);
+
+            if (string.IsNullOrWhiteSpace(fr_credit_review_graph_send_as))
+                throw new InvalidOperationException(
+                    "fr_credit_review_graph_send_as is empty for Credit Review");
+        }
+
+        private DateTime GetCreditReviewScheduleDate(
+            string parameterName)
+        {
+            string value = ExecuteScalarString(
+                sql_creation_compte,
+                @"SELECT ISNULL(ParameterValue, '')
+                  FROM dbo.T_STATS_OUVERTURE_COMPTEUR_PARAMETERS
+                  WHERE ParameterName=@NAME;",
+                new SqlParameter("@NAME", SqlDbType.VarChar, 100)
+                {
+                    Value = parameterName
+                });
+
+            if (string.IsNullOrWhiteSpace(value))
+                return new DateTime(1900, 1, 1);
+
+            if (DateTime.TryParseExact(
+                    value,
+                    "yyyy-MM-ddTHH:mm:ss",
+                    CultureInfo.InvariantCulture,
+                    DateTimeStyles.AssumeLocal,
+                    out DateTime exact))
+                return exact;
+
+            if (DateTime.TryParse(
+                    value,
+                    CultureInfo.InvariantCulture,
+                    DateTimeStyles.AssumeLocal,
+                    out DateTime parsed))
+                return parsed;
+
+            throw new InvalidDataException(
+                "Invalid Credit Review schedule parameter" +
+                " - Parameter : " + parameterName +
+                " - Value : " + value);
+        }
+
+        private void SetCreditReviewScheduleDate(
+            string parameterName,
+            DateTime executionDate)
+        {
+            ExecuteNonQuery(
+                sql_creation_compte,
+                @"MERGE dbo.T_STATS_OUVERTURE_COMPTEUR_PARAMETERS AS target
+                  USING (SELECT @NAME AS ParameterName) AS source
+                     ON source.ParameterName=target.ParameterName
+                  WHEN MATCHED THEN
+                      UPDATE SET ParameterValue=@VALUE,
+                                 UpdatedAtUtc=SYSUTCDATETIME()
+                  WHEN NOT MATCHED THEN
+                      INSERT(ParameterName,ParameterValue,UpdatedAtUtc)
+                      VALUES(@NAME,@VALUE,SYSUTCDATETIME());",
+                new SqlParameter("@NAME", SqlDbType.VarChar, 100)
+                {
+                    Value = parameterName
+                },
+                new SqlParameter("@VALUE", SqlDbType.NVarChar, 2000)
+                {
+                    Value = executionDate.ToString(
+                        "yyyy-MM-ddTHH:mm:ss",
+                        CultureInfo.InvariantCulture)
+                });
+        }
+
+        private void InitializeCreditReviewReminderDates()
+        {
+            const string sql = @"
+UPDATE affectation
+SET date_dde_bilan=GETDATE(),
+    dt_relance_j7=DATEADD(day,7,GETDATE()),
+    dt_relance_j14=DATEADD(day,14,GETDATE()),
+    dt_relance_j21=DATEADD(day,21,GETDATE())
+FROM dbo.T_Credit_Review_AFFECTATION AS affectation
+INNER JOIN dbo.T_Credit_Review_ORT AS ort
+    ON affectation.id_indice_ort=ort.indice_ORT
+INNER JOIN dbo.T_Credit_Review_CONTACT_FICHE AS contact
+    ON contact.code_client=ort.branche_nbr+ort.customer_nbr
+INNER JOIN dbo.T_Credit_Review_CONTACT_FONCTION AS fonction
+    ON fonction.id=contact.id_fonction
+WHERE affectation.top_relance=1
+  AND contact.top_relance=1
+  AND fonction.is_recouvrement=0
+  AND affectation.date_dde_bilan IS NULL
+  AND affectation.traitement IS NOT NULL;";
+
+            ExecuteNonQuery(sql_connexion, sql);
+        }
+
+        private void CreateCreditReviewMailRequests()
+        {
+            const string sql = @"
+SELECT DISTINCT
+       affectation.id_indice_ort,
+       affectation.traitement,
+       affectation.date_dde_bilan,
+       affectation.dt_relance_j7,
+       affectation.dt_relance_j14,
+       affectation.dt_relance_j21,
+       ISNULL(affectation.top_relance_j,0) AS top_relance_j,
+       ISNULL(affectation.top_relance_j7,0) AS top_relance_j7,
+       ISNULL(affectation.top_relance_j14,0) AS top_relance_j14,
+       ISNULL(affectation.top_relance_j21,0) AS top_relance_j21
+FROM dbo.T_Credit_Review_AFFECTATION AS affectation
+INNER JOIN dbo.T_Credit_Review_ORT AS ort
+    ON affectation.id_indice_ort=ort.indice_ORT
+INNER JOIN dbo.T_Credit_Review_CONTACT_FICHE AS contact
+    ON contact.code_client=ort.branche_nbr+ort.customer_nbr
+INNER JOIN dbo.T_Credit_Review_CONTACT_FONCTION AS fonction
+    ON fonction.id=contact.id_fonction
+WHERE affectation.top_relance=1
+  AND contact.top_relance=1
+  AND fonction.is_recouvrement=0
+  AND affectation.date_dde_bilan IS NOT NULL
+  AND affectation.traitement IS NOT NULL
+ORDER BY affectation.id_indice_ort;";
+
+            DataTable rows = FillDataTable(sql_connexion, sql);
+            int created = 0;
+
+            foreach (DataRow row in rows.Rows)
+            {
+                var reminder = new CreditReviewReminderRow
+                {
+                    DossierId = Convert.ToInt32(row["id_indice_ort"]),
+                    ProcessingType =
+                        Convert.ToString(row["traitement"]).Trim(),
+                    RequestDate = Convert.ToDateTime(row["date_dde_bilan"]),
+                    ReminderJ7 = Convert.ToDateTime(row["dt_relance_j7"]),
+                    ReminderJ14 = Convert.ToDateTime(row["dt_relance_j14"]),
+                    ReminderJ21 = Convert.ToDateTime(row["dt_relance_j21"]),
+                    SentInitial = Convert.ToBoolean(row["top_relance_j"]),
+                    SentJ7 = Convert.ToBoolean(row["top_relance_j7"]),
+                    SentJ14 = Convert.ToBoolean(row["top_relance_j14"]),
+                    SentJ21 = Convert.ToBoolean(row["top_relance_j21"])
+                };
+
+                string templateName = "";
+                string recipients = "";
+                string updateSql = "";
+
+                if (reminder.ReminderJ21 <= DateTime.Now &&
+                    !reminder.SentJ21)
+                {
+                    templateName = "traitement_imperatif";
+                    recipients = GetCreditReviewAnalystRecipients(
+                        reminder.DossierId);
+                    updateSql = @"
+UPDATE dbo.T_Credit_Review_AFFECTATION
+SET top_relance=0,
+    top_relance_j21=1,
+    top_relance_j14=1,
+    top_relance_j7=1,
+    top_relance_j=1
+WHERE id_indice_ort=@DOSSIER;";
+                }
+                else if (reminder.ReminderJ14 <= DateTime.Now &&
+                         !reminder.SentJ14)
+                {
+                    templateName = GetCreditReviewReminderTemplate(
+                        reminder.ProcessingType,
+                        false);
+                    recipients = GetCreditReviewCustomerRecipients(
+                        reminder.DossierId);
+                    updateSql = @"
+UPDATE dbo.T_Credit_Review_AFFECTATION
+SET top_relance_j14=1,
+    top_relance_j7=1,
+    top_relance_j=1
+WHERE id_indice_ort=@DOSSIER;";
+                }
+                else if (reminder.ReminderJ7 <= DateTime.Now &&
+                         !reminder.SentJ7)
+                {
+                    templateName = GetCreditReviewReminderTemplate(
+                        reminder.ProcessingType,
+                        false);
+                    recipients = GetCreditReviewCustomerRecipients(
+                        reminder.DossierId);
+                    updateSql = @"
+UPDATE dbo.T_Credit_Review_AFFECTATION
+SET top_relance_j7=1,
+    top_relance_j=1
+WHERE id_indice_ort=@DOSSIER;";
+                }
+                else if (reminder.RequestDate <= DateTime.Now &&
+                         !reminder.SentInitial)
+                {
+                    templateName = GetCreditReviewReminderTemplate(
+                        reminder.ProcessingType,
+                        true);
+                    recipients = GetCreditReviewCustomerRecipients(
+                        reminder.DossierId);
+                    updateSql = @"
+UPDATE dbo.T_Credit_Review_AFFECTATION
+SET top_relance_j=1
+WHERE id_indice_ort=@DOSSIER;";
+                }
+
+                if (string.IsNullOrWhiteSpace(templateName))
+                    continue;
+
+                if (BuildRecipients(recipients).Count == 0)
+                {
+                    throw new InvalidOperationException(
+                        "No valid Credit Review recipient" +
+                        " - Dossier : " + reminder.DossierId +
+                        " - Template : " + templateName);
+                }
+
+                using (var connection = new SqlConnection(sql_connexion))
+                {
+                    connection.Open();
+                    using (SqlTransaction transaction =
+                        connection.BeginTransaction())
+                    {
+                        try
+                        {
+                            using (var insert = new SqlCommand(@"
+IF NOT EXISTS
+(
+    SELECT 1
+    FROM dbo.T_Credit_Review_ENVOI_MAIL
+    WHERE id_dossier=@DOSSIER
+      AND nom_mail=@TEMPLATE
+      AND top_traite IN ('N','A','O')
+      AND CONVERT(date,date_demande)=CONVERT(date,GETDATE())
+)
+INSERT INTO dbo.T_Credit_Review_ENVOI_MAIL
+(
+    id_dossier,
+    nom_mail,
+    email_destinataire,
+    date_demande,
+    top_traite
+)
+VALUES
+(
+    @DOSSIER,
+    @TEMPLATE,
+    @RECIPIENTS,
+    GETDATE(),
+    'N'
+);", connection, transaction))
+                            {
+                                insert.Parameters.Add(
+                                    "@DOSSIER",
+                                    SqlDbType.Int).Value =
+                                    reminder.DossierId;
+                                insert.Parameters.Add(
+                                    "@TEMPLATE",
+                                    SqlDbType.VarChar,
+                                    100).Value = templateName;
+                                insert.Parameters.Add(
+                                    "@RECIPIENTS",
+                                    SqlDbType.NVarChar,
+                                    -1).Value = recipients;
+                                insert.ExecuteNonQuery();
+                            }
+
+                            using (var update = new SqlCommand(
+                                updateSql,
+                                connection,
+                                transaction))
+                            {
+                                update.Parameters.Add(
+                                    "@DOSSIER",
+                                    SqlDbType.Int).Value =
+                                    reminder.DossierId;
+                                update.ExecuteNonQuery();
+                            }
+
+                            transaction.Commit();
+                            created++;
+                        }
+                        catch
+                        {
+                            transaction.Rollback();
+                            throw;
+                        }
+                    }
+                }
+            }
+
+            WriteLog(
+                "       Credit Review request generation completed" +
+                " - Candidate(s) : " + rows.Rows.Count +
+                " - Request(s) created or confirmed : " + created);
+        }
+
+        private static string GetCreditReviewReminderTemplate(
+            string processingType,
+            bool initialRequest)
+        {
+            if (string.Equals(
+                    processingType,
+                    "Situation",
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                return initialRequest
+                    ? "demande_bilan_intermediaire"
+                    : "relance_intermediaire";
+            }
+
+            if (string.Equals(
+                    processingType,
+                    "Bilan",
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                return initialRequest
+                    ? "demande_bilan"
+                    : "relance";
+            }
+
+            return "";
+        }
+
+        private string GetCreditReviewCustomerRecipients(int dossierId)
+        {
+            DataTable table = FillDataTable(
+                sql_connexion,
+                @"SELECT DISTINCT contact.email
+                  FROM dbo.T_Credit_Review_CONTACT_FICHE AS contact
+                  INNER JOIN dbo.T_Credit_Review_ORT AS ort
+                      ON contact.code_client=ort.branche_nbr+ort.customer_nbr
+                  INNER JOIN dbo.T_Credit_Review_CONTACT_FONCTION AS fonction
+                      ON fonction.id=contact.id_fonction
+                  WHERE ort.indice_ort=@DOSSIER
+                    AND contact.top_relance=1
+                    AND fonction.is_recouvrement=0
+                    AND NULLIF(LTRIM(RTRIM(contact.email)),'') IS NOT NULL;",
+                new SqlParameter("@DOSSIER", SqlDbType.Int)
+                {
+                    Value = dossierId
+                });
+
+            return string.Join(
+                ";",
+                table.AsEnumerable()
+                    .Select(row => Convert.ToString(row["email"]).Trim())
+                    .Where(IsEmail)
+                    .Distinct(StringComparer.OrdinalIgnoreCase));
+        }
+
+        private string GetCreditReviewAnalystRecipients(int dossierId)
+        {
+            DataTable table = FillDataTable(
+                sql_connexion,
+                @"SELECT DISTINCT analyste.email
+                  FROM dbo.T_Credit_Review_ANALYSTE AS analyste
+                  INNER JOIN dbo.T_Credit_Review_AFFECTATION AS affectation
+                      ON analyste.id=affectation.id_analyste
+                  WHERE affectation.id_indice_ort=@DOSSIER
+                    AND NULLIF(LTRIM(RTRIM(analyste.email)),'') IS NOT NULL;",
+                new SqlParameter("@DOSSIER", SqlDbType.Int)
+                {
+                    Value = dossierId
+                });
+
+            return string.Join(
+                ";",
+                table.AsEnumerable()
+                    .Select(row => Convert.ToString(row["email"]).Trim())
+                    .Where(IsEmail)
+                    .Distinct(StringComparer.OrdinalIgnoreCase));
+        }
+
+        private void SendPendingCreditReviewClientMails()
+        {
+            DataTable queue = FillDataTable(
+                sql_connexion,
+                @"SELECT sending.id,
+                         sending.id_dossier,
+                         sending.nom_mail,
+                         sending.email_destinataire,
+                         sending.top_traite,
+                         sending.date_demande,
+                         link.[sujet email] AS subject,
+                         link.nom_fic_html
+                  FROM dbo.T_Credit_Review_ENVOI_MAIL AS sending
+                  INNER JOIN dbo.T_Credit_Review_LIEN_EMAIL AS link
+                      ON link.nom_email_court=sending.nom_mail
+                  WHERE sending.top_traite IN ('N','A')
+                    AND sending.nom_mail<>'traitement_imperatif'
+                  ORDER BY sending.id;");
+
+            int sent = 0;
+            int errors = 0;
+
+            foreach (DataRow row in queue.Rows)
+            {
+                int queueId = Convert.ToInt32(row["id"]);
+                int dossierId = Convert.ToInt32(row["id_dossier"]);
+                string templateName =
+                    Convert.ToString(row["nom_mail"]).Trim();
+                string recipients =
+                    Convert.ToString(row["email_destinataire"]).Trim();
+                string queueStatus =
+                    Convert.ToString(row["top_traite"]).Trim();
+                DateTime requestDate =
+                    row["date_demande"] == DBNull.Value
+                        ? DateTime.Today
+                        : Convert.ToDateTime(row["date_demande"]);
+
+                try
+                {
+                    string templatePath = SafeResourcePath(
+                        Convert.ToString(row["nom_fic_html"]));
+                    string html = File.ReadAllText(
+                        templatePath,
+                        Encoding.UTF8);
+
+                    DataTable dossier = FillDataTable(
+                        sql_connexion,
+                        @"SELECT TOP(1)
+                                 customer_nbr AS code_client,
+                                 ISNULL(nom_client,'') AS nom_client,
+                                 ISNULL(date_mois,'') AS date_mois
+                          FROM dbo.T_Credit_Review_ORT
+                          WHERE indice_ORT=@DOSSIER;",
+                        new SqlParameter("@DOSSIER", SqlDbType.Int)
+                        {
+                            Value = dossierId
+                        });
+
+                    if (dossier.Rows.Count == 0)
+                        throw new InvalidOperationException(
+                            "Credit Review dossier not found : " + dossierId);
+
+                    string customerCode =
+                        Convert.ToString(dossier.Rows[0]["code_client"]).Trim();
+                    string customerName =
+                        Convert.ToString(dossier.Rows[0]["nom_client"]).Trim();
+                    string subject =
+                        Convert.ToString(row["subject"])
+                            .Replace("[CODE_CLIENT]", customerCode)
+                            .Replace("[NOM_CLIENT]", customerName);
+
+                    html = html.Replace(
+                        "[CODE_CLIENT]",
+                        customerCode);
+
+                    string creditReviewPeriod =
+                        Convert.ToString(
+                            dossier.Rows[0]["date_mois"]).Trim();
+
+                    if (queueStatus.Equals(
+                            "A",
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        ArchiveExistingCreditReviewSentMail(
+                            fr_credit_review_graph_send_as,
+                            recipients,
+                            subject,
+                            creditReviewPeriod,
+                            requestDate);
+                    }
+                    else
+                    {
+                        SendCreditReviewMailAndArchive(
+                            queueId,
+                            fr_credit_review_graph_send_as,
+                            recipients,
+                            subject,
+                            html,
+                            creditReviewPeriod);
+                    }
+
+                    SetCreditReviewQueueStatus(queueId, "O");
+                    sent++;
+
+                    WriteLog(
+                        "       Credit Review client email sent" +
+                        " - Queue ID : " + queueId +
+                        " - Dossier : " + dossierId +
+                        " - Template : " + templateName +
+                        " - Recipient(s) : " + recipients);
+                }
+                catch (Exception ex)
+                {
+                    errors++;
+
+                    string currentStatus =
+                        GetCreditReviewQueueStatus(queueId);
+
+                    if (!currentStatus.Equals(
+                            "A",
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        SetCreditReviewQueueStatus(queueId, "E");
+                    }
+
+                    WriteLog(
+                        "       Credit Review client email error" +
+                        " - Current status : " + currentStatus +
+                        " - Queue ID : " + queueId +
+                        " - Dossier : " + dossierId +
+                        " - Error : " +
+                        GetDetailedExceptionMessage(ex));
+                }
+            }
+
+            WriteLog(
+                "       Credit Review client queue summary" +
+                " - Found : " + queue.Rows.Count +
+                " - Sent : " + sent +
+                " - Errors : " + errors);
+
+            if (errors > 0)
+                throw new InvalidOperationException(
+                    errors +
+                    " Credit Review client email(s) could not be sent");
+        }
+
+        private void SendPendingCreditReviewImperativeMails()
+        {
+            DataTable analysts = FillDataTable(
+                sql_connexion,
+                @"SELECT DISTINCT email_destinataire
+                  FROM dbo.T_Credit_Review_ENVOI_MAIL
+                  WHERE top_traite='N'
+                    AND nom_mail='traitement_imperatif'
+                    AND NULLIF(LTRIM(RTRIM(email_destinataire)),'') IS NOT NULL
+                  ORDER BY email_destinataire;");
+
+            int sent = 0;
+
+            foreach (DataRow analystRow in analysts.Rows)
+            {
+                string recipient =
+                    Convert.ToString(
+                        analystRow["email_destinataire"]).Trim();
+
+                DataTable dossiers = FillDataTable(
+                    sql_connexion,
+                    @"SELECT sending.id,
+                             ort.date_mois,
+                             ort.branche_nbr+ort.customer_nbr AS code_client
+                      FROM dbo.T_Credit_Review_ENVOI_MAIL AS sending
+                      INNER JOIN dbo.T_Credit_Review_ORT AS ort
+                          ON sending.id_dossier=ort.indice_ort
+                      WHERE sending.email_destinataire=@EMAIL
+                        AND sending.top_traite='N'
+                        AND sending.nom_mail='traitement_imperatif'
+                      ORDER BY ort.date_mois,sending.id;",
+                    new SqlParameter("@EMAIL", SqlDbType.NVarChar, -1)
+                    {
+                        Value = recipient
+                    });
+
+                if (dossiers.Rows.Count == 0)
+                    continue;
+
+                var body = new StringBuilder();
+                body.Append(
+                    "Merci de traiter ces dossiers impérativement !" +
+                    "<br/><br/>");
+
+                foreach (DataRow dossier in dossiers.Rows)
+                {
+                    body.Append(WebUtility.HtmlEncode(
+                        Convert.ToString(dossier["date_mois"])));
+                    body.Append(" - ");
+                    body.Append(WebUtility.HtmlEncode(
+                        Convert.ToString(dossier["code_client"])));
+                    body.Append("<br/>");
+                }
+
+                SendGraphMailWithAttachments(
+                    fr_credit_review_graph_send_as,
+                    recipient,
+                    "",
+                    "",
+                    "Credit Review - Traitement Impératif",
+                    body.ToString(),
+                    new List<string>());
+
+                foreach (DataRow dossier in dossiers.Rows)
+                {
+                    SetCreditReviewQueueStatus(
+                        Convert.ToInt32(dossier["id"]),
+                        "O");
+                }
+
+                sent++;
+
+                WriteLog(
+                    "       Credit Review imperative email sent" +
+                    " - Analyst : " + recipient +
+                    " - Dossier(s) : " + dossiers.Rows.Count);
+            }
+
+            WriteLog(
+                "       Credit Review imperative queue summary" +
+                " - Analyst email(s) sent : " + sent);
+        }
+
+        private void SetCreditReviewQueueStatus(
+            int queueId,
+            string status)
+        {
+            ExecuteNonQuery(
+                sql_connexion,
+                @"UPDATE dbo.T_Credit_Review_ENVOI_MAIL
+                  SET top_traite=@STATUS,
+                      date_trt=GETDATE()
+                  WHERE id=@ID;",
+                new SqlParameter("@STATUS", SqlDbType.Char, 1)
+                {
+                    Value = status
+                },
+                new SqlParameter("@ID", SqlDbType.Int)
+                {
+                    Value = queueId
+                });
+        }
+
         public void Maquettes_Et_Rapports(string sql_con, string logs, string tmp_folder, string session_name)
         {
             string root = GetServicePath();
@@ -4247,9 +4998,417 @@ ORDER BY q.id;";
         private static void ValidateNoKnownUnresolvedMarkers(string html, string template) { Match m = Regex.Match(html ?? "", @"\[(NOM|PRENOM|CODE_CLIENT|NOM_CLIENT|RCS|BANQUE|AGENCE|IBAN|BIC|MOTIF|DATE_DEMANDE|MOTIF_REFUS|NUM_DEMANDE|GESTIONNAIRE|NUM_POSTE|MAIL_GESTIONNAIRE)\]", RegexOptions.IgnoreCase); if (m.Success) throw new InvalidDataException("Unresolved marker " + m.Value + " in " + template); }
         private static DataTable FillDataTable(string cs, string sql, params SqlParameter[] parameters) { var t = new DataTable(); using (var c = new SqlConnection(cs)) using (var cmd = new SqlCommand(sql, c)) using (var da = new SqlDataAdapter(cmd)) { cmd.CommandTimeout = 300; if (parameters != null && parameters.Length > 0) cmd.Parameters.AddRange(parameters); da.Fill(t); } return t; }
 
+        private string GetCreditReviewQueueStatus(int queueId)
+        {
+            return ExecuteScalarString(
+                sql_connexion,
+                @"SELECT ISNULL(top_traite,'')
+                  FROM dbo.T_Credit_Review_ENVOI_MAIL
+                  WHERE id=@ID;",
+                new SqlParameter("@ID", SqlDbType.Int)
+                {
+                    Value = queueId
+                });
+        }
+
+        private void ArchiveExistingCreditReviewSentMail(
+            string mailbox,
+            string recipients,
+            string subject,
+            string creditReviewPeriod,
+            DateTime requestDate)
+        {
+            string periodFolderName =
+                string.IsNullOrWhiteSpace(creditReviewPeriod)
+                    ? requestDate.ToString("yyyyMM", CultureInfo.InvariantCulture)
+                    : creditReviewPeriod.Trim();
+
+            MailFolder sentItems = ExecuteGraphWithRetry(
+                () => graphService.Users[mailbox]
+                    .MailFolders["sentitems"]
+                    .GetAsync(config => AddImmutableHeader(config.Headers))
+                    .GetAwaiter()
+                    .GetResult(),
+                "Read Credit Review Sent Items folder for archive retry");
+
+            MailFolder archiveRoot = GetOrCreateCreditReviewFolder(
+                mailbox,
+                sentItems.Id,
+                "Archives_mails");
+
+            MailFolder periodFolder = GetOrCreateCreditReviewFolder(
+                mailbox,
+                archiveRoot.Id,
+                periodFolderName);
+
+            string filter =
+                "subject eq '" + EscapeODataString(subject) + "'" +
+                " and sentDateTime ge " +
+                requestDate.Date.ToUniversalTime().ToString(
+                    "yyyy-MM-ddTHH:mm:ssZ",
+                    CultureInfo.InvariantCulture);
+
+            MessageCollectionResponse response = ExecuteGraphWithRetry(
+                () => graphService.Users[mailbox]
+                    .MailFolders[sentItems.Id]
+                    .Messages
+                    .GetAsync(config =>
+                    {
+                        AddImmutableHeader(config.Headers);
+                        config.QueryParameters.Top = 25;
+                        config.QueryParameters.Filter = filter;
+                        config.QueryParameters.Select = new[]
+                        {
+                            "id",
+                            "subject",
+                            "sentDateTime",
+                            "toRecipients",
+                            "parentFolderId",
+                            "isDraft"
+                        };
+                    })
+                    .GetAwaiter()
+                    .GetResult(),
+                "Find sent Credit Review email for archive retry");
+
+            HashSet<string> expectedRecipients =
+                BuildRecipients(recipients)
+                    .Select(recipient =>
+                        recipient.EmailAddress?.Address ?? "")
+                    .Where(address =>
+                        !string.IsNullOrWhiteSpace(address))
+                    .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+            Message sentMessage =
+                (response?.Value ?? new List<Message>())
+                    .Where(message => message.IsDraft != true)
+                    .OrderByDescending(message => message.SentDateTime)
+                    .FirstOrDefault(message =>
+                    {
+                        HashSet<string> actualRecipients =
+                            (message.ToRecipients ?? new List<Recipient>())
+                                .Select(recipient =>
+                                    recipient.EmailAddress?.Address ?? "")
+                                .Where(address =>
+                                    !string.IsNullOrWhiteSpace(address))
+                                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+                        return expectedRecipients.SetEquals(actualRecipients);
+                    });
+
+            if (sentMessage == null)
+            {
+                throw new InvalidOperationException(
+                    "Sent Credit Review email not found for archive retry" +
+                    " - Subject : " + subject +
+                    " - Recipient(s) : " + recipients +
+                    " - Request date : " +
+                    requestDate.ToString("dd/MM/yyyy HH:mm:ss"));
+            }
+
+            MoveSentCreditReviewMessage(
+                mailbox,
+                sentMessage.Id,
+                periodFolder.Id,
+                subject);
+
+            WriteLog(
+                "       Credit Review archive retry completed" +
+                " - Subject : " + subject +
+                " - Recipient(s) : " + recipients +
+                " - Folder : Archives_mails/" + periodFolderName);
+        }
+
+        private void SendCreditReviewMailAndArchive(
+            int queueId,
+            string sendAs,
+            string recipients,
+            string subject,
+            string html,
+            string creditReviewPeriod)
+        {
+            List<Recipient> toRecipients = BuildRecipients(recipients);
+
+            if (toRecipients.Count == 0)
+            {
+                throw new InvalidOperationException(
+                    "Invalid Credit Review recipients for " + subject);
+            }
+
+            string periodFolderName =
+                string.IsNullOrWhiteSpace(creditReviewPeriod)
+                    ? DateTime.Now.ToString("yyyyMM", CultureInfo.InvariantCulture)
+                    : creditReviewPeriod.Trim();
+
+            MailFolder sentItems = ExecuteGraphWithRetry(
+                () => graphService.Users[sendAs]
+                    .MailFolders["sentitems"]
+                    .GetAsync(config => AddImmutableHeader(config.Headers))
+                    .GetAwaiter()
+                    .GetResult(),
+                "Read Credit Review Sent Items folder");
+
+            MailFolder archiveRoot = GetOrCreateCreditReviewFolder(
+                sendAs,
+                sentItems.Id,
+                "Archives_mails");
+
+            MailFolder periodFolder = GetOrCreateCreditReviewFolder(
+                sendAs,
+                archiveRoot.Id,
+                periodFolderName);
+
+            var draftMessage = new Message
+            {
+                Subject = subject,
+                From = new Recipient
+                {
+                    EmailAddress = new EmailAddress
+                    {
+                        Address = sendAs,
+                        Name = "Ingram Micro - Service Analyse Crédit"
+                    }
+                },
+                Sender = new Recipient
+                {
+                    EmailAddress = new EmailAddress
+                    {
+                        Address = sendAs,
+                        Name = "Ingram Micro - Service Analyse Crédit"
+                    }
+                },
+                Body = new ItemBody
+                {
+                    ContentType = BodyType.Html,
+                    Content = html
+                },
+                ToRecipients = toRecipients
+            };
+
+            Message draft = ExecuteGraphWithRetry(
+                () => graphService.Users[sendAs]
+                    .Messages
+                    .PostAsync(
+                        draftMessage,
+                        config => AddImmutableHeader(config.Headers))
+                    .GetAwaiter()
+                    .GetResult(),
+                "Create Credit Review draft : " + subject);
+
+            if (draft == null || string.IsNullOrWhiteSpace(draft.Id))
+            {
+                throw new InvalidOperationException(
+                    "Credit Review draft creation returned no message ID");
+            }
+
+            ExecuteGraphWithRetry(
+                () =>
+                {
+                    graphService.Users[sendAs]
+                        .Messages[draft.Id]
+                        .Send
+                        .PostAsync(config => AddImmutableHeader(config.Headers))
+                        .GetAwaiter()
+                        .GetResult();
+                    return true;
+                },
+                "Send Credit Review draft : " + subject);
+
+            // L'envoi est accepté par Graph. Le statut A interdit tout
+            // nouvel envoi si l'archivage échoue ensuite.
+            SetCreditReviewQueueStatus(queueId, "A");
+
+            MoveSentCreditReviewMessage(
+                sendAs,
+                draft.Id,
+                periodFolder.Id,
+                subject);
+        }
+
+        private MailFolder GetOrCreateCreditReviewFolder(
+            string mailbox,
+            string parentFolderId,
+            string folderName)
+        {
+            string safeFolderName = EscapeODataString(folderName);
+
+            MailFolderCollectionResponse response = ExecuteGraphWithRetry(
+                () => graphService.Users[mailbox]
+                    .MailFolders[parentFolderId]
+                    .ChildFolders
+                    .GetAsync(config =>
+                    {
+                        AddImmutableHeader(config.Headers);
+                        config.QueryParameters.Top = 100;
+                        config.QueryParameters.Filter =
+                            "displayName eq '" + safeFolderName + "'";
+                    })
+                    .GetAwaiter()
+                    .GetResult(),
+                "Find Credit Review folder " + folderName);
+
+            MailFolder existingFolder = response?.Value?.FirstOrDefault(
+                folder => string.Equals(
+                    folder.DisplayName,
+                    folderName,
+                    StringComparison.OrdinalIgnoreCase));
+
+            if (existingFolder != null)
+            {
+                return existingFolder;
+            }
+
+            try
+            {
+                return ExecuteGraphWithRetry(
+                    () => graphService.Users[mailbox]
+                        .MailFolders[parentFolderId]
+                        .ChildFolders
+                        .PostAsync(
+                            new MailFolder { DisplayName = folderName },
+                            config => AddImmutableHeader(config.Headers))
+                        .GetAwaiter()
+                        .GetResult(),
+                    "Create Credit Review folder " + folderName);
+            }
+            catch (Exception)
+            {
+                // Une autre exécution peut avoir créé le dossier entre la
+                // recherche et la création. Une seconde lecture tranche.
+                response = ExecuteGraphWithRetry(
+                    () => graphService.Users[mailbox]
+                        .MailFolders[parentFolderId]
+                        .ChildFolders
+                        .GetAsync(config =>
+                        {
+                            AddImmutableHeader(config.Headers);
+                            config.QueryParameters.Top = 100;
+                            config.QueryParameters.Filter =
+                                "displayName eq '" + safeFolderName + "'";
+                        })
+                        .GetAwaiter()
+                        .GetResult(),
+                    "Reload Credit Review folder " + folderName);
+
+                existingFolder = response?.Value?.FirstOrDefault(
+                    folder => string.Equals(
+                        folder.DisplayName,
+                        folderName,
+                        StringComparison.OrdinalIgnoreCase));
+
+                if (existingFolder != null)
+                {
+                    return existingFolder;
+                }
+
+                throw;
+            }
+        }
+
+        private void MoveSentCreditReviewMessage(
+            string mailbox,
+            string immutableMessageId,
+            string destinationFolderId,
+            string subject)
+        {
+            Exception lastException = null;
+
+            for (int attempt = 1; attempt <= 10; attempt++)
+            {
+                try
+                {
+                    Message sentMessage = graphService.Users[mailbox]
+                        .Messages[immutableMessageId]
+                        .GetAsync(config =>
+                        {
+                            AddImmutableHeader(config.Headers);
+                            config.QueryParameters.Select = new[]
+                            {
+                                "id",
+                                "parentFolderId",
+                                "subject",
+                                "isDraft"
+                            };
+                        })
+                        .GetAwaiter()
+                        .GetResult();
+
+                    if (sentMessage != null &&
+                        sentMessage.IsDraft != true)
+                    {
+                        if (string.Equals(
+                                sentMessage.ParentFolderId,
+                                destinationFolderId,
+                                StringComparison.Ordinal))
+                        {
+                            return;
+                        }
+
+                        var requestBody =
+                            new Microsoft.Graph.Users.Item.Messages.Item.Move
+                                .MovePostRequestBody
+                            {
+                                DestinationId = destinationFolderId
+                            };
+
+                        graphService.Users[mailbox]
+                            .Messages[immutableMessageId]
+                            .Move
+                            .PostAsync(
+                                requestBody,
+                                config => AddImmutableHeader(config.Headers))
+                            .GetAwaiter()
+                            .GetResult();
+
+                        WriteLog(
+                            "       Credit Review sent email archived" +
+                            " - Folder ID : " + destinationFolderId +
+                            " - Subject : " + subject);
+                        return;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    lastException = ex;
+
+                    if (!IsGraphObjectNotFound(ex) &&
+                        !IsTransientGraphError(ex))
+                    {
+                        throw;
+                    }
+                }
+
+                System.Threading.Thread.Sleep(attempt * 500);
+            }
+
+            throw new InvalidOperationException(
+                "The Credit Review email was sent but its Sent Items copy " +
+                "could not be archived" +
+                " - Subject : " + subject +
+                " - Details : " +
+                GetDetailedExceptionMessage(lastException),
+                lastException);
+        }
+
         private void SendGraphMailWithAttachments(string sendAs, string to, string cc, string bcc, string subject, string html, List<string> files)
         {
-            var message = new Message { Subject = subject, Body = new ItemBody { ContentType = BodyType.Html, Content = html }, ToRecipients = BuildRecipients(to), CcRecipients = BuildRecipients(cc), BccRecipients = BuildRecipients(bcc), Attachments = new List<Microsoft.Graph.Models.Attachment>() };
+            bool isCreditReviewSender = string.Equals(
+                sendAs,
+                fr_credit_review_graph_send_as,
+                StringComparison.OrdinalIgnoreCase);
+
+            var sender = isCreditReviewSender
+                ? new Recipient
+                {
+                    EmailAddress = new EmailAddress
+                    {
+                        Address = sendAs,
+                        Name = "Ingram Micro - Service Analyse Crédit"
+                    }
+                }
+                : null;
+
+            var message = new Message { Subject = subject, From = sender, Sender = sender, Body = new ItemBody { ContentType = BodyType.Html, Content = html }, ToRecipients = BuildRecipients(to), CcRecipients = BuildRecipients(cc), BccRecipients = BuildRecipients(bcc), Attachments = new List<Microsoft.Graph.Models.Attachment>() };
             if (message.ToRecipients.Count == 0) throw new InvalidOperationException("Invalid recipients for " + subject);
             foreach (string path in files ?? new List<string>()) { byte[] bytes = File.ReadAllBytes(path); if (bytes.Length > 3 * 1024 * 1024) throw new InvalidDataException("Attachment exceeds 3 MB : " + Path.GetFileName(path)); message.Attachments.Add(new FileAttachment { OdataType = "#microsoft.graph.fileAttachment", Name = Path.GetFileName(path), ContentType = "application/octet-stream", ContentBytes = bytes }); }
             ExecuteGraphWithRetry(() => { graphService.Users[sendAs].SendMail.PostAsync(new Microsoft.Graph.Users.Item.SendMail.SendMailPostRequestBody { Message = message, SaveToSentItems = true }).GetAwaiter().GetResult(); return true; }, "Send template/report mail : " + subject);
