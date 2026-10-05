@@ -538,7 +538,6 @@ ORDER BY m.raffraichissement_min, m.id_mailboxe;";
                 "       Listing Graph messages" +
                 " - Mailbox : " + mailboxAddress +
                 " - Folder : " + GetCurrentInputFolderName() +
-                " - Folder ID : " + folderId +
                 " - Filter date : " +
                 date.ToString("dd/MM/yyyy HH:mm:ss") +
                 " - Top : " + top);

@@ -1141,7 +1141,8 @@ WHERE id_mailboxe = @MAILBOX_ID;";
 
                 try
                 {
-                    if (IsOpeningMessageAlreadyProcessed(summary))
+                    if (IsOpeningMessageAlreadyProcessed(summary) ||
+                        IsProcessingStateSuccessful(summary.Id))
                     {
                         // Le métier a déjà abouti. Si le message est encore dans
                         // Inbox, seule sa suppression est rejouée, sans nouvel
@@ -1247,7 +1248,10 @@ WHERE id_mailboxe = @MAILBOX_ID;";
                     byte[] mime = GetMimeContent(email.Id);
                     InsertOpeningMailInDatabase(dossierId, email, mime);
                     UpdateOpeningUploadStatus(dossierId);
-                    TryMarkOpeningMessageAsProcessed(email.Id, true);
+
+                    // Le succès métier est enregistré immédiatement après
+                    // l'import SQL. Un échec Graph ultérieur ne peut donc pas
+                    // provoquer un second import du même message.
                     UpsertProcessingState(
                         email,
                         "S",
@@ -1257,30 +1261,26 @@ WHERE id_mailboxe = @MAILBOX_ID;";
 
                     try
                     {
+                        TryMarkOpeningMessageAsProcessed(email.Id, true);
                         PermanentlyDeleteOpeningMessage(email.Id);
                     }
                     catch (Exception cleanupException)
                     {
-                        // L'import SQL est terminé. Le statut E permet de
-                        // recharger le message par son GraphMessageId et de
-                        // rejouer uniquement la suppression au prochain passage.
+                        // L'import SQL reste en statut S. Au prochain passage,
+                        // IsProcessingStateSuccessful déclenchera uniquement
+                        // le nettoyage de la boîte, sans nouvel import métier.
                         cleanupErrors++;
-                        UpsertProcessingState(
-                            email,
-                            "E",
-                            null,
-                            "Database import completed but mailbox cleanup failed : " +
-                            GetInnermostExceptionMessage(cleanupException));
                         WriteLog(
                             "       Opening account imported but mailbox cleanup failed" +
                             " - Dossier : " + dossierId +
+                            " - Processing state kept as S" +
                             " - Error : " + cleanupException);
                         SendTechnicalAlert(
                             nameof(ReadOpeningAccountMailbox),
                             mailboxAddress +
                             " - Dossier : " + dossierId +
-                            " - Database import completed but message deletion failed - " +
-                            cleanupException,
+                            " - Database import completed but Graph tagging or " +
+                            "message deletion failed - " + cleanupException,
                             "OPENING ACCOUNT MAILBOX CLEANUP");
                     }
 
@@ -1540,9 +1540,74 @@ WHERE MailboxId = @MAILBOX_ID
             return m?.SingleValueExtendedProperties?.Any(x => string.Equals(x.Id, opening_processed_property_id, StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(x.Value)) == true;
         }
 
-        private void TryMarkOpeningMessageAsProcessed(string id, bool markAsRead)
+        private void TryMarkOpeningMessageAsProcessed(
+            string id,
+            bool markAsRead)
         {
-            ExecuteGraphWithRetry(() => { graphService.Users[mailboxAddress].Messages[id].PatchAsync(new Message { IsRead = markAsRead ? (bool?)true : null, SingleValueExtendedProperties = new List<SingleValueLegacyExtendedProperty> { new SingleValueLegacyExtendedProperty { Id = opening_processed_property_id, Value = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ", CultureInfo.InvariantCulture) } } }, q => AddImmutableHeader(q.Headers)).GetAwaiter().GetResult(); return true; }, "Tag opening account message");
+            Exception lastException = null;
+
+            for (int attempt = 1; attempt <= 3; attempt++)
+            {
+                try
+                {
+                    var update = new Message
+                    {
+                        IsRead = markAsRead
+                            ? (bool?)true
+                            : null,
+
+                        SingleValueExtendedProperties =
+                            new List<SingleValueLegacyExtendedProperty>
+                            {
+                        new SingleValueLegacyExtendedProperty
+                        {
+                            Id = opening_processed_property_id,
+                            Value = DateTime.UtcNow.ToString(
+                                "yyyy-MM-ddTHH:mm:ss.fffZ",
+                                CultureInfo.InvariantCulture)
+                        }
+                            }
+                    };
+
+                    graphService.Users[mailboxAddress]
+                        .Messages[id]
+                        .PatchAsync(
+                            update,
+                            configuration =>
+                                AddImmutableHeader(
+                                    configuration.Headers))
+                        .GetAwaiter()
+                        .GetResult();
+
+                    return;
+                }
+                catch (Exception ex)
+                    when (IsChangeKeyConflict(ex))
+                {
+                    lastException = ex;
+
+                    if (attempt >= 3)
+                    {
+                        break;
+                    }
+
+                    WriteLog(
+                        "       Opening account change key conflict" +
+                        " - Message ID : " + id +
+                        " - Attempt : " + attempt + "/3");
+
+                    System.Threading.Thread.Sleep(
+                        attempt * 500);
+                }
+            }
+
+            throw new InvalidOperationException(
+                "Unable to mark opening account message " +
+                "after change key retries" +
+                " - Message ID : " + id +
+                " - Error : " +
+                GetInnermostExceptionMessage(lastException),
+                lastException);
         }
 
 
@@ -3278,19 +3343,35 @@ WHERE MailboxId = @MAILBOX_ID
                     DateTime lastSuccessfulExecution =
                         GetCreditReviewScheduleDate(scheduleParameter);
 
+                    DateTime currentDateTime = DateTime.Now;
+
+                    DateTime nextExecutionTime = currentDateTime.Date
+                        .Add(lastSuccessfulExecution.TimeOfDay);
+
                     WriteLog(
                         "   Credit Review daily schedule" +
                         " - Last successful execution : " +
-                        lastSuccessfulExecution.ToString(
-                            "dd/MM/yyyy HH:mm:ss") +
+                        lastSuccessfulExecution.ToString("dd/MM/yyyy HH:mm:ss") +
                         " - Current date : " +
-                        DateTime.Now.ToString("dd/MM/yyyy HH:mm:ss"));
+                        currentDateTime.ToString("dd/MM/yyyy HH:mm:ss") +
+                        " - Next execution time : " +
+                        nextExecutionTime.ToString("dd/MM/yyyy HH:mm:ss"));
 
-                    if (lastSuccessfulExecution.Date >= DateTime.Today)
+                    if (lastSuccessfulExecution.Date >= currentDateTime.Date)
                     {
                         WriteLog(
-                            "   Credit Review daily processing already " +
-                            "completed today");
+                            "   Credit Review daily processing already completed today");
+
+                        continue;
+                    }
+
+                    if (currentDateTime < nextExecutionTime)
+                    {
+                        WriteLog(
+                            "   Credit Review daily processing not yet allowed." +
+                            " Next execution time : " +
+                            nextExecutionTime.ToString("dd/MM/yyyy HH:mm:ss"));
+
                         continue;
                     }
 
@@ -4160,6 +4241,22 @@ ORDER BY e.id;";
 
                     html = ApplyCommonTemplateValues(html, data, dossierId);
 
+                    if (mailName.Equals(
+                            "rgpd",
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        int divisionCount;
+                        html = ApplyRgpdDivisionRows(
+                            html,
+                            dossierId,
+                            out divisionCount);
+
+                        WriteLog(
+                            "       RGPD divisions inserted" +
+                            " - Dossier : " + dossierId +
+                            " - Division(s) : " + divisionCount);
+                    }
+
                     if (mailName.StartsWith(
                             "incomplet_",
                             StringComparison.OrdinalIgnoreCase) ||
@@ -4308,6 +4405,93 @@ WHERE c.id=@ID;";
             return (html ?? "").Replace("[NOM]", d.LastName).Replace("[PRENOM]", d.FirstName).Replace("[CODE_CLIENT]", d.CustomerCode)
                 .Replace("[NOM_CLIENT]", d.CustomerName).Replace("[RCS]", d.Rcs).Replace("[BANQUE]", d.Bank).Replace("[AGENCE]", d.Agency)
                 .Replace("[IBAN]", d.Iban).Replace("[BIC]", d.Bic).Replace("[NUM_DEMANDE]", dossierId.ToString(CultureInfo.InvariantCulture));
+        }
+
+        private string ApplyRgpdDivisionRows(
+            string html,
+            int dossierId,
+            out int divisionCount)
+        {
+            List<string> divisions = GetRgpdDivisions(dossierId);
+            divisionCount = divisions.Count;
+
+            if (divisions.Count == 0)
+            {
+                throw new InvalidOperationException(
+                    "No active RGPD subscription division found" +
+                    " - Dossier : " + dossierId);
+            }
+
+            string sourceHtml = html ?? "";
+
+            Match rowMatch = Regex.Match(
+                sourceHtml,
+                "<tr\\b[^>]*\\bid\\s*=\\s*['\"]ligne_tab['\"][^>]*>.*?</tr>",
+                RegexOptions.IgnoreCase | RegexOptions.Singleline |
+                RegexOptions.CultureInvariant);
+
+            if (!rowMatch.Success)
+            {
+                throw new InvalidDataException(
+                    "The RGPD template does not contain the historical " +
+                    "table row id=\"ligne_tab\"" +
+                    " - Dossier : " + dossierId);
+            }
+
+            if (rowMatch.Value.IndexOf(
+                    "[DIVISION]",
+                    StringComparison.OrdinalIgnoreCase) < 0)
+            {
+                throw new InvalidDataException(
+                    "The RGPD template row id=\"ligne_tab\" does not " +
+                    "contain [DIVISION]" +
+                    " - Dossier : " + dossierId);
+            }
+
+            var generatedRows = new StringBuilder();
+
+            foreach (string division in divisions)
+            {
+                generatedRows.Append(
+                    Regex.Replace(
+                        rowMatch.Value,
+                        "\\[DIVISION\\]",
+                        WebUtility.HtmlEncode(division),
+                        RegexOptions.IgnoreCase |
+                        RegexOptions.CultureInvariant));
+            }
+
+            return sourceHtml.Substring(0, rowMatch.Index) +
+                generatedRows +
+                sourceHtml.Substring(rowMatch.Index + rowMatch.Length);
+        }
+
+        private List<string> GetRgpdDivisions(int dossierId)
+        {
+            DataTable divisions = FillDataTable(
+                sql_creation_compte,
+                @"SELECT DISTINCT
+                         LTRIM(RTRIM(category.lib_cat)) AS lib_cat
+                  FROM dbo.T_customer_choix_abonnement AS subscription
+                  INNER JOIN dbo.T_liste_categorie_MKT AS category
+                      ON category.id_cat = subscription.id_cat
+                  WHERE subscription.id = @DOSSIER_ID
+                    AND NULLIF(LTRIM(RTRIM(category.lib_cat)), '') IS NOT NULL
+                  ORDER BY LTRIM(RTRIM(category.lib_cat));",
+                new SqlParameter(
+                    "@DOSSIER_ID",
+                    SqlDbType.Int)
+                {
+                    Value = dossierId
+                });
+
+            return divisions.AsEnumerable()
+                .Select(row =>
+                    Convert.ToString(row["lib_cat"]).Trim())
+                .Where(value =>
+                    !string.IsNullOrWhiteSpace(value))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
         }
 
         private string ApplyDocumentBlocks(string html, int dossierId)
@@ -4995,7 +5179,7 @@ ORDER BY q.id;";
         private void UpdateOpeningStatus(int dossierId, int status) { ExecuteNonQuery(sql_creation_compte, "UPDATE dbo.T_Statut SET idStatut=@S WHERE idDossier=@ID;", new SqlParameter("@S", SqlDbType.Int) { Value = status }, new SqlParameter("@ID", SqlDbType.Int) { Value = dossierId }); }
         private string SafeResourcePath(string file) { string root = Path.GetFullPath(templatesReportsFolder) + Path.DirectorySeparatorChar; string full = Path.GetFullPath(Path.Combine(root, Path.GetFileName(file ?? ""))); if (!full.StartsWith(root, StringComparison.OrdinalIgnoreCase) || !File.Exists(full)) throw new FileNotFoundException("Resource not found", full); return full; }
         private List<string> ResolveAttachmentPaths(object value) { var list = new List<string>(); if (value == null || value == DBNull.Value) return list; foreach (string n in SplitValues(Convert.ToString(value))) { list.Add(SafeResourcePath(n)); } return list; }
-        private static void ValidateNoKnownUnresolvedMarkers(string html, string template) { Match m = Regex.Match(html ?? "", @"\[(NOM|PRENOM|CODE_CLIENT|NOM_CLIENT|RCS|BANQUE|AGENCE|IBAN|BIC|MOTIF|DATE_DEMANDE|MOTIF_REFUS|NUM_DEMANDE|GESTIONNAIRE|NUM_POSTE|MAIL_GESTIONNAIRE)\]", RegexOptions.IgnoreCase); if (m.Success) throw new InvalidDataException("Unresolved marker " + m.Value + " in " + template); }
+        private static void ValidateNoKnownUnresolvedMarkers(string html, string template) { Match m = Regex.Match(html ?? "", @"\[(NOM|PRENOM|CODE_CLIENT|NOM_CLIENT|RCS|BANQUE|AGENCE|IBAN|BIC|MOTIF|DATE_DEMANDE|MOTIF_REFUS|NUM_DEMANDE|DIVISION|GESTIONNAIRE|NUM_POSTE|MAIL_GESTIONNAIRE)\]", RegexOptions.IgnoreCase); if (m.Success) throw new InvalidDataException("Unresolved marker " + m.Value + " in " + template); }
         private static DataTable FillDataTable(string cs, string sql, params SqlParameter[] parameters) { var t = new DataTable(); using (var c = new SqlConnection(cs)) using (var cmd = new SqlCommand(sql, c)) using (var da = new SqlDataAdapter(cmd)) { cmd.CommandTimeout = 300; if (parameters != null && parameters.Length > 0) cmd.Parameters.AddRange(parameters); da.Fill(t); } return t; }
 
         private string GetCreditReviewQueueStatus(int queueId)

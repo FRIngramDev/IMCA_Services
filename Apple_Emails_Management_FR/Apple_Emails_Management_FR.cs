@@ -99,6 +99,8 @@ namespace APPLE_EMAILS_MANAGEMENT_FR
             public string Sujet { get; set; } = "";
             public string Body { get; set; } = "";
             public string AffecteA { get; set; } = "";
+            public string EnvoyerA { get; set; } = "";
+            public string StatutEnvoi { get; set; } = "";
             public byte[] Fichier { get; set; }
         }
 
@@ -726,155 +728,99 @@ WHERE EwsID COLLATE Latin1_General_CS_AS = @EWSID AND id_mailboxe = @ID;";
 
         public void Transfert_de_mail_communications_APPLE()
         {
-            WriteToFile(
-                "   Starting Apple communication processing");
-
-            SharedMailboxConfiguration appleMailbox =
-                GetAppleMailbox();
-
+            WriteToFile("   Starting Apple communication processing");
+            SharedMailboxConfiguration appleMailbox = GetAppleMailbox();
             if (appleMailbox == null)
             {
-                WriteToFile(
-                    "   No active mailbox with typologie APPLE found");
+                WriteToFile("   No active mailbox with typologie APPLE found");
                 return;
             }
-
             SetCurrentMailbox(appleMailbox);
             AppleMailToSend mail = GetNextAppleMailToSend();
-
             if (mail == null)
             {
-                if (IsTrue(debug))
-                {
-                    WriteToFile(
-                        "   No Apple communication to send");
-                }
+                if (IsTrue(debug)) WriteToFile("   No Apple communication to send or resume");
                 return;
             }
-
-            WriteToFile(
-                "   Processing Apple communication ID : " +
-                mail.Id + " - Group : " + mail.AffecteA);
-
+            WriteToFile("   Processing Apple communication ID : " + mail.Id +
+                " - Group : " + mail.AffecteA + " - Initial status : " + mail.StatutEnvoi);
             try
             {
-                UpdateAppleValue(
-                    mail.Id,
-                    "top_a_envoyer",
-                    "P");
-
-                List<string> contacts =
-                    GetAppleContacts(mail.AffecteA);
-
+                UpdateAppleValue(mail.Id, "top_a_envoyer", "P");
+                List<string> contacts = GetAppleContacts(mail.AffecteA);
                 if (contacts.Count == 0)
+                    throw new InvalidOperationException("No Apple contact found for group : " + mail.AffecteA);
+                HashSet<string> alreadySent = SplitAppleRecipients(mail.EnvoyerA);
+                int remaining = contacts.Count(contact => !alreadySent.Contains(contact));
+                WriteToFile("   Apple contacts found : " + contacts.Count +
+                    " - Already confirmed : " + alreadySent.Count + " - Remaining : " + remaining);
+                if (remaining == 0)
                 {
-                    throw new InvalidOperationException(
-                        "No Apple contact found for group : " +
-                        mail.AffecteA);
+                    UpdateAppleValue(mail.Id, "top_a_envoyer", "F");
+                    WriteToFile("   Apple communication ID " + mail.Id +
+                        " already completed according to envoyer_a");
+                    return;
                 }
-
-                WriteToFile(
-                    "   Apple contacts found : " + contacts.Count);
-
-                MimeMessage source =
-                    LoadMimeMessage(mail.Fichier);
-                List<Microsoft.Graph.Models.Attachment> attachments =
-                    BuildGraphAttachments(source);
-                string sentTo = "";
-
+                MimeMessage source = LoadMimeMessage(mail.Fichier);
+                List<Microsoft.Graph.Models.Attachment> attachments = BuildGraphAttachments(source);
                 foreach (string contact in contacts)
                 {
-                    Message message = new Message
+                    if (alreadySent.Contains(contact))
                     {
-                        Subject =
-                            !string.IsNullOrWhiteSpace(source.Subject)
-                                ? source.Subject
-                                : mail.Sujet,
-
-                        Body =
-                            BuildAppleBody(source, mail),
-
-                        From =
-                            BuildAppleSenderRecipient(),
-
-                        ToRecipients =
-                            BuildRecipients(contact),
-
-                        ReplyTo =
-                            new List<Recipient>
-                            {
-                BuildAppleSenderRecipient()
-                            },
-
-                        Attachments =
-                            CloneAttachments(attachments)
-                    };
-
-                    var request =
-                        new Microsoft.Graph.Users.Item.SendMail
-                            .SendMailPostRequestBody
+                        if (IsTrue(debug)) WriteToFile(
+                            "       Apple communication already sent, skipped : " + contact);
+                        continue;
+                    }
+                    WriteToFile("       Starting Apple communication send" +
+                        " - Apple mail ID : " + mail.Id + " - Recipient : " + contact);
+                    ExecuteGraphWithRetry(() =>
+                    {
+                        Message attemptMessage = new Message
                         {
-                            Message = message,
+                            Subject = !string.IsNullOrWhiteSpace(source.Subject) ? source.Subject : mail.Sujet,
+                            Body = BuildAppleBody(source, mail),
+                            From = BuildAppleSenderRecipient(),
+                            ToRecipients = BuildRecipients(contact),
+                            ReplyTo = new List<Recipient> { BuildAppleSenderRecipient() },
+                            Attachments = CloneAttachments(attachments)
+                        };
+                        var attemptRequest = new Microsoft.Graph.Users.Item.SendMail.SendMailPostRequestBody
+                        {
+                            Message = attemptMessage,
                             SaveToSentItems = true
                         };
-
-                    graphService
-                        .Users[
-                            fr_graph_send_as
-                        ]
-                        .SendMail
-                        .PostAsync(request)
-                        .GetAwaiter()
-                        .GetResult();
-
-                    sentTo =
-                        string.IsNullOrWhiteSpace(sentTo)
-                            ? contact
-                            : sentTo + ";" + contact;
-
-                    UpdateAppleValue(
-                        mail.Id,
-                        "envoyer_a",
-                        sentTo);
-
-                    WriteToFile(
-                        "       Apple communication sent to : " +
-                        contact);
+                        graphService.Users[fr_graph_send_as].SendMail.PostAsync(attemptRequest)
+                            .GetAwaiter().GetResult();
+                        return true;
+                    }, "Send Apple communication - Apple mail ID : " + mail.Id +
+                        " - Recipient : " + contact);
+                    alreadySent.Add(contact);
+                    UpdateAppleValue(mail.Id, "envoyer_a", string.Join(";",
+                        alreadySent.OrderBy(address => address, StringComparer.OrdinalIgnoreCase)));
+                    WriteToFile("       Apple communication sent to : " + contact);
                 }
-
-                UpdateAppleValue(
-                    mail.Id,
-                    "top_a_envoyer",
-                    "F");
-
-                WriteToFile(
-                    "   Apple communication ID " + mail.Id +
-                    " successfully sent to " + contacts.Count +
-                    " contact(s)");
+                UpdateAppleValue(mail.Id, "top_a_envoyer", "F");
+                WriteToFile("   Apple communication ID " + mail.Id +
+                    " successfully completed - Total contacts : " + contacts.Count +
+                    " - Confirmed recipients : " + alreadySent.Count);
             }
             catch (Exception ex)
             {
-                try
-                {
-                    UpdateAppleValue(
-                        mail.Id,
-                        "top_a_envoyer",
-                        "E");
-                }
-                catch
-                {
-                }
-
-                SendTechnicalIssueMail(
-                    nameof(Transfert_de_mail_communications_APPLE),
-                    "Apple mail ID " + mail.Id + " - " +
-                    ex.Message,
-                    "APPLE");
-
+                try { UpdateAppleValue(mail.Id, "top_a_envoyer", "R"); } catch { }
+                string details = GetDetailedExceptionMessage(ex);
+                SendTechnicalIssueMail(nameof(Transfert_de_mail_communications_APPLE),
+                    "Apple mail ID " + mail.Id + " - " + details, "APPLE");
                 throw new TechnicalAlertAlreadySentException(
-                    "Apple communication failed : " + ex.Message,
-                    ex);
+                    "Apple communication failed : " + details, ex);
             }
+        }
+        private static HashSet<string> SplitAppleRecipients(string addresses)
+        {
+            return new HashSet<string>((addresses ?? "")
+                .Split(new[] { ';', ',' }, StringSplitOptions.RemoveEmptyEntries)
+                .Select(address => address.Trim())
+                .Where(address => !string.IsNullOrWhiteSpace(address)),
+                StringComparer.OrdinalIgnoreCase);
         }
 
         private Recipient BuildAppleSenderRecipient()
@@ -907,48 +853,32 @@ WHERE EwsID COLLATE Latin1_General_CS_AS = @EWSID AND id_mailboxe = @ID;";
         private AppleMailToSend GetNextAppleMailToSend()
         {
             const string sql = @"
-                                SELECT TOP (1)
-                                    c.id,
-                                    ISNULL(c.sujet, '') AS sujet,
-                                    ISNULL(c.body, '') AS body,
-                                    ISNULL(c.affecte_a, '') AS affecte_a,
-                                    c.fichier
-                                FROM dbo.T_contenu_email AS c WITH (NOLOCK)
-                                WHERE c.id_mailboxe = @ID_MAILBOXE
-                                  AND c.top_a_envoyer = 'O'
-                                  AND c.affecte_a IS NOT NULL
-                                  AND LTRIM(RTRIM(c.affecte_a)) <> ''
-                                ORDER BY c.id;";
-
-            using (SqlConnection con =
-                new SqlConnection(sql_connexion))
-            using (SqlCommand cmd =
-                new SqlCommand(sql, con))
+SELECT TOP (1) c.id,ISNULL(c.sujet,'') sujet,ISNULL(c.body,'') body,
+       ISNULL(c.affecte_a,'') affecte_a,ISNULL(c.envoyer_a,'') envoyer_a,
+       ISNULL(c.top_a_envoyer,'') top_a_envoyer,c.fichier
+FROM dbo.T_contenu_email c WITH (UPDLOCK,READPAST)
+WHERE c.id_mailboxe=@ID_MAILBOXE
+  AND c.top_a_envoyer IN ('O','R')
+  AND NULLIF(LTRIM(RTRIM(c.affecte_a)),'') IS NOT NULL
+ORDER BY CASE WHEN c.top_a_envoyer='R' THEN 0 ELSE 1 END,c.id;";
+            using (SqlConnection con = new SqlConnection(sql_connexion))
+            using (SqlCommand cmd = new SqlCommand(sql, con))
             {
                 cmd.CommandTimeout = 300;
-                cmd.Parameters.Add(
-                    "@ID_MAILBOXE",
-                    SqlDbType.Int).Value = id_mailboxe;
-
+                cmd.Parameters.Add("@ID_MAILBOXE", SqlDbType.Int).Value = id_mailboxe;
                 con.Open();
-
-                using (SqlDataReader reader =
-                    cmd.ExecuteReader(CommandBehavior.SingleRow))
+                using (SqlDataReader reader = cmd.ExecuteReader(CommandBehavior.SingleRow))
                 {
-                    if (!reader.Read())
-                    {
-                        return null;
-                    }
-
+                    if (!reader.Read()) return null;
                     return new AppleMailToSend
                     {
                         Id = Convert.ToInt32(reader["id"]),
                         Sujet = Convert.ToString(reader["sujet"]),
                         Body = Convert.ToString(reader["body"]),
                         AffecteA = Convert.ToString(reader["affecte_a"]),
-                        Fichier = reader["fichier"] == DBNull.Value
-                            ? null
-                            : (byte[])reader["fichier"]
+                        EnvoyerA = Convert.ToString(reader["envoyer_a"]),
+                        StatutEnvoi = Convert.ToString(reader["top_a_envoyer"]),
+                        Fichier = reader["fichier"] == DBNull.Value ? null : (byte[])reader["fichier"]
                     };
                 }
             }
