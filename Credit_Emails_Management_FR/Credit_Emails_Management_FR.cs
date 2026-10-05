@@ -40,6 +40,7 @@ namespace CREDIT_EMAILS_MANAGEMENT_FR
         private string email_in_case_of_technical_issue_parameter_global = "", email_in_case_of_technical_issue = "";
         private string fr_graph_send_as_parameter_global = "", fr_graph_send_as = "";
         private string credit_managers_contentieux = "", contentieux_recipients = "";
+        private string list_credit_mgr_code = "";
         private string path_archives = "";
         private string dss_con_openrowset_parameter_global = "";
         private string dss_con_openrowset = "";
@@ -88,6 +89,7 @@ namespace CREDIT_EMAILS_MANAGEMENT_FR
             public string fr_graph_send_as_parameter_global { get; set; } = "";
 
             public string credit_managers_contentieux { get; set; } = "";
+            public string list_credit_mgr_code { get; set; } = "";
 
             public string contentieux_recipients { get; set; } = "";
             public string path_archives { get; set; } = "";
@@ -307,6 +309,7 @@ namespace CREDIT_EMAILS_MANAGEMENT_FR
             email_in_case_of_technical_issue_parameter_global = i.email_in_case_of_technical_issue_parameter_global ?? "";
             fr_graph_send_as_parameter_global = i.fr_graph_send_as_parameter_global ?? "";
             credit_managers_contentieux = i.credit_managers_contentieux ?? "";
+            list_credit_mgr_code = i.list_credit_mgr_code ?? "";
             contentieux_recipients = i.contentieux_recipients ?? "";
             path_archives = i.path_archives ?? "";
             dss_con_openrowset_parameter_global = i.dss_con_openrowset_parameter_global ?? "";
@@ -1131,7 +1134,6 @@ WHERE id_mailboxe = @MAILBOX_ID;";
             int imported = 0;
             int ignored = 0;
             int alreadyProcessed = 0;
-            int cleanupErrors = 0;
             int errors = 0;
 
             foreach (Message summary in messages)
@@ -1141,44 +1143,42 @@ WHERE id_mailboxe = @MAILBOX_ID;";
 
                 try
                 {
-                    if (IsOpeningMessageAlreadyProcessed(summary) ||
-                        IsProcessingStateSuccessful(summary.Id))
+                    // Un statut SQL S signifie que l'import metier a reussi.
+                    // Si le message est encore present, seule sa suppression est
+                    // rejouee, sans nouvel import en base.
+                    if (IsProcessingStateSuccessful(summary.Id))
                     {
-                        // Le métier a déjà abouti. Si le message est encore dans
-                        // Inbox, seule sa suppression est rejouée, sans nouvel
-                        // insert SQL.
-                        try
+                        PermanentlyDeleteOpeningMessage(summary.Id);
+
+                        if (!latestHandled.HasValue ||
+                            received > latestHandled.Value)
                         {
-                            PermanentlyDeleteOpeningMessage(summary.Id);
-                            UpsertProcessingState(
-                                summary,
-                                "S",
-                                null,
-                                "Opening account email already imported; mailbox cleanup completed");
-                            WriteLog(
-                                "       Opening account email already imported " +
-                                "and now permanently deleted : " +
-                                (summary.Subject ?? "<no subject>"));
-                        }
-                        catch (Exception cleanupException)
-                        {
-                            cleanupErrors++;
-                            UpsertProcessingState(
-                                summary,
-                                "E",
-                                null,
-                                "Database import completed but mailbox cleanup failed : " +
-                                GetInnermostExceptionMessage(cleanupException));
-                            WriteLog(
-                                "       Opening account cleanup retry failed" +
-                                " - Subject : " +
-                                (summary.Subject ?? "<no subject>") +
-                                " - Error : " + cleanupException);
+                            latestHandled = received;
                         }
 
-                        if (!latestHandled.HasValue || received > latestHandled.Value)
-                            latestHandled = received;
                         alreadyProcessed++;
+                        WriteLog(
+                            "       Opening account email already imported " +
+                            "and now permanently deleted : " +
+                            (summary.Subject ?? "<no subject>"));
+                        continue;
+                    }
+
+                    // Une propriete etendue sans statut SQL S correspond a un
+                    // message hors criteres. Il reste conserve et non lu dans Inbox.
+                    if (IsOpeningMessageAlreadyProcessed(summary))
+                    {
+                        if (!latestHandled.HasValue ||
+                            received > latestHandled.Value)
+                        {
+                            latestHandled = received;
+                        }
+
+                        ignored++;
+                        WriteLog(
+                            "       Opening account email outside robot criteria " +
+                            "already tagged; kept unread in Inbox : " +
+                            (summary.Subject ?? "<no subject>"));
                         continue;
                     }
 
@@ -1195,17 +1195,17 @@ WHERE id_mailboxe = @MAILBOX_ID;";
                             "ouverture de compte client ingram micro",
                             StringComparison.OrdinalIgnoreCase))
                     {
-                        matched = true;
                         dossierIdText =
                             GetOpeningDossierIdFromPdfAttachment(email.Id);
+                        matched = !string.IsNullOrWhiteSpace(dossierIdText);
                     }
                     else if (sender.Equals(
                                  "analystes.credit@ingrammicro.fr",
                                  StringComparison.OrdinalIgnoreCase))
                     {
-                        matched = true;
                         dossierIdText =
                             GetOpeningDossierIdFromCustomerNumber(subject);
+                        matched = !string.IsNullOrWhiteSpace(dossierIdText);
                     }
 
                     received =
@@ -1215,18 +1215,32 @@ WHERE id_mailboxe = @MAILBOX_ID;";
 
                     if (!matched)
                     {
-                        TryMarkOpeningMessageAsProcessed(email.Id, false);
+                        // Hors criteres : ajout uniquement de la propriete
+                        // etendue IMCA afin de ne pas retraiter le message.
+                        // Le message reste non lu et conserve dans Inbox.
+                        TryMarkOpeningMessageAsProcessed(
+                            email.Id,
+                            false);
+
                         UpsertProcessingState(
                             email,
-                            "S",
+                            "I",
                             null,
-                            "Opening account email outside robot criteria - tagged and left unread");
-                        if (!latestHandled.HasValue || received > latestHandled.Value)
+                            "Opening account email outside robot criteria - " +
+                            "tagged and kept unread in Inbox");
+
+                        if (!latestHandled.HasValue ||
+                            received > latestHandled.Value)
+                        {
                             latestHandled = received;
+                        }
+
                         ignored++;
                         WriteLog(
-                            "       Opening account email tagged, left unread " +
-                            "and in Inbox : " + subject);
+                            "       Opening account email outside robot criteria; " +
+                            "extended property added, left unread and kept in Inbox" +
+                            " - Sender : " + sender +
+                            " - Subject : " + subject);
                         continue;
                     }
 
@@ -1243,54 +1257,37 @@ WHERE id_mailboxe = @MAILBOX_ID;";
                             sender + " - Subject : " + subject);
                     }
 
-                    // Nouveau flux direct : le MIME est lu dans Inbox, importé
-                    // immédiatement en base, puis le message est supprimé.
                     byte[] mime = GetMimeContent(email.Id);
                     InsertOpeningMailInDatabase(dossierId, email, mime);
                     UpdateOpeningUploadStatus(dossierId);
 
-                    // Le succès métier est enregistré immédiatement après
-                    // l'import SQL. Un échec Graph ultérieur ne peut donc pas
-                    // provoquer un second import du même message.
+                    // Le succes metier est enregistre avant le nettoyage
+                    // Exchange. En cas d'echec de suppression, le prochain passage
+                    // rejouera uniquement la suppression, sans reinserer le MIME.
                     UpsertProcessingState(
                         email,
                         "S",
                         null,
-                        "Opening account email imported directly from Inbox for dossier " +
+                        "Opening account email imported for dossier " +
                         dossierId);
 
-                    try
+                    TryMarkOpeningMessageAsProcessed(
+                        email.Id,
+                        true);
+
+                    PermanentlyDeleteOpeningMessage(email.Id);
+
+                    if (!latestHandled.HasValue ||
+                        received > latestHandled.Value)
                     {
-                        TryMarkOpeningMessageAsProcessed(email.Id, true);
-                        PermanentlyDeleteOpeningMessage(email.Id);
-                    }
-                    catch (Exception cleanupException)
-                    {
-                        // L'import SQL reste en statut S. Au prochain passage,
-                        // IsProcessingStateSuccessful déclenchera uniquement
-                        // le nettoyage de la boîte, sans nouvel import métier.
-                        cleanupErrors++;
-                        WriteLog(
-                            "       Opening account imported but mailbox cleanup failed" +
-                            " - Dossier : " + dossierId +
-                            " - Processing state kept as S" +
-                            " - Error : " + cleanupException);
-                        SendTechnicalAlert(
-                            nameof(ReadOpeningAccountMailbox),
-                            mailboxAddress +
-                            " - Dossier : " + dossierId +
-                            " - Database import completed but Graph tagging or " +
-                            "message deletion failed - " + cleanupException,
-                            "OPENING ACCOUNT MAILBOX CLEANUP");
+                        latestHandled = received;
                     }
 
-                    if (!latestHandled.HasValue || received > latestHandled.Value)
-                        latestHandled = received;
                     imported++;
                     WriteLog(
                         "       Opening account email imported directly from Inbox" +
                         " - Dossier : " + dossierId +
-                        " - Message deletion requested" +
+                        " - Message permanently deleted after database import" +
                         " - Subject : " +
                         (email.Subject ?? "<no subject>"));
                 }
@@ -1300,6 +1297,7 @@ WHERE id_mailboxe = @MAILBOX_ID;";
                     UpsertProcessingState(summary, "E", null, ex.ToString());
                     WriteLog(
                         "       Opening account email processing error" +
+                        " - Mailbox message left unchanged" +
                         " - Subject : " +
                         (summary.Subject ?? "<no subject>") +
                         " - Error : " + ex);
@@ -1308,7 +1306,6 @@ WHERE id_mailboxe = @MAILBOX_ID;";
                         mailboxAddress + " - Mail : " +
                         (summary.Subject ?? "<no subject>") + " - " + ex,
                         "OPENING ACCOUNT EMAIL PROCESSING");
-                    continue;
                 }
             }
 
@@ -1316,13 +1313,13 @@ WHERE id_mailboxe = @MAILBOX_ID;";
                 "       Opening account summary" +
                 " - Candidates : " + messages.Count +
                 " - Imported directly from Inbox : " + imported +
-                " - Ignored tagged unread : " + ignored +
-                " - Already imported cleanup : " + alreadyProcessed +
-                " - Cleanup errors : " + cleanupErrors +
+                " - Ignored and left unchanged : " + ignored +
+                " - Already processed and left unchanged : " +
+                alreadyProcessed +
                 " - Processing errors : " + errors);
+
             return latestHandled;
         }
-
         private List<Message> GetOpeningAccountMessages(string folderId)
         {
             int top;
@@ -1720,6 +1717,8 @@ WHERE MailboxId = @MAILBOX_ID
             }
         }
 
+
+
         private void PermanentlyDeleteOpeningMessage(string messageId)
         {
             ExecuteGraphWithRetry(
@@ -1728,15 +1727,14 @@ WHERE MailboxId = @MAILBOX_ID
                     graphService.Users[mailboxAddress]
                         .Messages[messageId]
                         .PermanentDelete
-                        .PostAsync(q => AddImmutableHeader(q.Headers))
+                        .PostAsync(configuration =>
+                            AddImmutableHeader(configuration.Headers))
                         .GetAwaiter()
                         .GetResult();
-
                     return true;
                 },
                 "Permanently delete imported opening account message");
         }
-
 
         private void UpdateOpeningUploadStatus(int dossierId)
         {
@@ -3299,6 +3297,742 @@ WHERE MailboxId = @MAILBOX_ID
             return string.IsNullOrWhiteSpace(l) ? AppDomain.CurrentDomain.BaseDirectory : Path.GetDirectoryName(l);
         }
 
+        public void Extract_Data_Recouvrement_Ar_Open(
+            string sql_con,
+            string logs,
+            string tmp_folder,
+            string session_name)
+        {
+            const string executionParameter =
+                "date_dernier_extract_data_recouvrement_ar_open";
+
+            string root = GetServicePath();
+            logsFolder = Path.Combine(root, logs ?? "");
+            tempFolder = Path.Combine(root, tmp_folder ?? "");
+            sessionName = session_name ?? "";
+            Directory.CreateDirectory(logsFolder);
+            Directory.CreateDirectory(tempFolder);
+
+            JsonFile configuration = JsonConvert.DeserializeObject<JsonFile>(
+                GetImcaParameter(sql_con, global_application_name) ?? "");
+            if (configuration?.countries == null || configuration.countries.Count == 0)
+                throw new InvalidOperationException(
+                    global_application_name + " parameters are empty or invalid");
+
+            foreach (Country item in configuration.countries)
+            {
+                ApplyCountryConfiguration(item, sql_con);
+                if (!IsTrue(active) ||
+                    !country.Equals("FR", StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                try
+                {
+                    ValidateArOpenExtractionConfiguration();
+
+                    DateTime? arOpenUpdatedAt;
+                    string sourceDetails;
+                    if (!IsArOpenUpdatedToday(out arOpenUpdatedAt, out sourceDetails))
+                    {
+                        WriteLog(
+                            "   AR Open recovery extraction skipped" +
+                            " - Source ar_open is not updated today" +
+                            " - Details : " + sourceDetails);
+                        continue;
+                    }
+
+                    DateTime lastExecution =
+                        GetOptionalExecutionParameterDate(executionParameter);
+                    if (lastExecution.Date >= DateTime.Today)
+                    {
+                        WriteLog(
+                            "   AR Open recovery extraction already completed today" +
+                            " - Last successful execution : " +
+                            lastExecution.ToString("dd/MM/yyyy HH:mm:ss") +
+                            " - Source : " + sourceDetails);
+                        continue;
+                    }
+
+                    WriteLog(
+                        "   Starting AR Open recovery extraction" +
+                        " - Source : " + sourceDetails);
+
+                    int importedRows = ProcessArOpenRecoveryExtraction();
+
+                    SetCreditReviewScheduleDate(
+                        executionParameter,
+                        DateTime.Now);
+
+                    WriteLog(
+                        "   AR Open recovery extraction completed" +
+                        " - Imported row(s) : " + importedRows +
+                        " - Source update : " +
+                        arOpenUpdatedAt.Value.ToString("dd/MM/yyyy HH:mm:ss"));
+                }
+                catch (Exception ex)
+                {
+                    string details = GetDetailedExceptionMessage(ex);
+                    WriteLog(
+                        "   AR Open recovery extraction error" +
+                        " - Execution parameter not updated" +
+                        " - Details : " + details);
+
+                    try
+                    {
+                        if (graphService == null)
+                        {
+                            WriteLog(
+                                "   Connecting to Microsoft Graph for " +
+                                "AR Open technical alert");
+                            graphService = ConnectGraph();
+                        }
+
+                        SendTechnicalAlert(
+                            nameof(Extract_Data_Recouvrement_Ar_Open),
+                            details,
+                            "AR OPEN RECOVERY EXTRACTION");
+
+                        WriteLog(
+                            "   AR Open technical alert sent");
+                    }
+                    catch (Exception alertException)
+                    {
+                        WriteLog(
+                            "   AR Open technical alert could not be sent" +
+                            " - Details : " +
+                            GetDetailedExceptionMessage(alertException));
+                    }
+                }
+                finally
+                {
+                    graphService = null;
+                }
+            }
+        }
+
+        private void ValidateArOpenExtractionConfiguration()
+        {
+            if (string.IsNullOrWhiteSpace(sql_connexion))
+                throw new InvalidOperationException(
+                    "sql_connexion is empty for AR Open extraction");
+            if (string.IsNullOrWhiteSpace(sql_dss_copie))
+                throw new InvalidOperationException(
+                    "sql_dss_copie is empty. Configure " +
+                    "sql_dss_copie_parameter_global=FR_SQLCON_DSS_COPIE");
+            if (string.IsNullOrWhiteSpace(sql_creation_compte))
+                throw new InvalidOperationException(
+                    "sql_creation_compte is empty for AR Open scheduling");
+            if (ParseCreditManagerCodes().Count == 0)
+                throw new InvalidOperationException(
+                    "list_credit_mgr_code is empty for AR Open extraction");
+        }
+
+        private bool IsArOpenUpdatedToday(
+            out DateTime? updatedAt,
+            out string details)
+        {
+            updatedAt = null;
+            details = "";
+            DataTable table = FillDataTable(
+                sql_dss_copie,
+                @"SELECT TOP (1)
+                         id_table,
+                         date_maj,
+                         id_statut,
+                         ISNULL(cmt,'') AS cmt
+                  FROM dbo.t_maj_tables
+                  WHERE table_name=N'ar_open'
+                    AND actif=1
+                  ORDER BY date_maj DESC,id_table DESC;");
+            if (table.Rows.Count == 0)
+            {
+                details = "No active t_maj_tables row found for ar_open";
+                return false;
+            }
+            DataRow row = table.Rows[0];
+            if (row["date_maj"] == DBNull.Value)
+            {
+                details = "ar_open date_maj is NULL";
+                return false;
+            }
+            DateTime dateMaj = Convert.ToDateTime(row["date_maj"]);
+            updatedAt = dateMaj;
+            details =
+                "ID : " + Convert.ToString(row["id_table"]) +
+                " - Date : " + dateMaj.ToString("dd/MM/yyyy HH:mm:ss") +
+                " - Status : " + Convert.ToString(row["id_statut"]) +
+                " - Comment : " + Convert.ToString(row["cmt"]);
+            return dateMaj.Date == DateTime.Today;
+        }
+
+        private DateTime GetOptionalExecutionParameterDate(string parameterName)
+        {
+            string value = ExecuteScalarString(
+                sql_creation_compte,
+                @"SELECT ISNULL(ParameterValue,'')
+                  FROM dbo.T_STATS_OUVERTURE_COMPTEUR_PARAMETERS
+                  WHERE ParameterName=@NAME;",
+                new SqlParameter("@NAME", SqlDbType.VarChar, 100)
+                {
+                    Value = parameterName
+                });
+            if (string.IsNullOrWhiteSpace(value))
+                return new DateTime(1900, 1, 1);
+            DateTime parsed;
+            if (!DateTime.TryParse(
+                    value,
+                    CultureInfo.InvariantCulture,
+                    DateTimeStyles.AssumeLocal,
+                    out parsed))
+                throw new InvalidDataException(
+                    "Invalid execution parameter " + parameterName + " : " + value);
+            return parsed;
+        }
+
+        private List<string> ParseCreditManagerCodes()
+        {
+            return SplitQuotedValues(list_credit_mgr_code)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+        }
+
+        private int ProcessArOpenRecoveryExtraction()
+        {
+            List<string> managerCodes = ParseCreditManagerCodes();
+            var parameterNames = new List<string>();
+            for (int index = 0; index < managerCodes.Count; index++)
+                parameterNames.Add("@MGR" + index.ToString(CultureInfo.InvariantCulture));
+
+            string sourceSql = @"
+SELECT DISTINCT
+       ar_open.brcustnbr,
+       customer.cust_name,
+       customer.credit_mgr_code,
+       CASE
+           WHEN ar_open.PaySeqNbr IS NULL THEN ar_open.BrInvoiceNbr
+           ELSE ar_open.BrInvoiceNbr + RIGHT(ar_open.PaySeqNbr,2)
+       END AS [N° de Piéce],
+       CAST(ar_open.InvoiceDt AS smalldatetime) AS [Date Piéce],
+       CAST(ar_open.DueDt AS smalldatetime) AS Date_Echéance,
+       ar_open.CustOrderNbr AS [Votre N° de commande],
+       CASE
+           WHEN ar_open.CurrencyCd='USD' THEN ar_open.ForeignSalesAmt
+           ELSE ar_open.TotalSalesAmt
+       END AS [Montant TTC],
+       ar_open.SourceCd,
+       customer.TotalBalanceAmt,
+       customer.credit_limit
+FROM dbo.ar_open AS ar_open
+INNER JOIN dbo.customer AS customer
+    ON ar_open.BrCustNbr=customer.branch_customer_nbr
+INNER JOIN dbo.customer_location AS customer_location
+    ON customer_location.branch_customer_nbr=customer.branch_customer_nbr
+WHERE ar_open.CompanyCd='FR'
+  AND LEFT(ar_open.BrCustNbr,2) IN ('15','21','24')
+  AND customer.credit_mgr_code IN (" +
+                string.Join(",", parameterNames) + @")
+  AND customer_location.suffix='000';";
+
+            using (var sourceConnection = new SqlConnection(sql_dss_copie))
+            using (var sourceCommand = new SqlCommand(sourceSql, sourceConnection))
+            using (var targetConnection = new SqlConnection(sql_connexion))
+            {
+                sourceCommand.CommandTimeout = 0;
+                for (int index = 0; index < managerCodes.Count; index++)
+                    sourceCommand.Parameters.Add(
+                        parameterNames[index],
+                        SqlDbType.VarChar,
+                        20).Value = managerCodes[index];
+
+                sourceConnection.Open();
+                targetConnection.Open();
+                using (SqlTransaction transaction = targetConnection.BeginTransaction())
+                {
+                    try
+                    {
+                        using (var truncate = new SqlCommand(
+                            "TRUNCATE TABLE dbo.T_Credit_Recouvrement_AR_OPEN;",
+                            targetConnection,
+                            transaction))
+                        {
+                            truncate.CommandTimeout = 300;
+                            truncate.ExecuteNonQuery();
+                        }
+
+                        int importedRows = 0;
+                        using (SqlDataReader reader = sourceCommand.ExecuteReader())
+                        using (var bulkCopy = new SqlBulkCopy(
+                            targetConnection,
+                            SqlBulkCopyOptions.TableLock,
+                            transaction))
+                        {
+                            bulkCopy.DestinationTableName =
+                                "dbo.T_Credit_Recouvrement_AR_OPEN";
+                            bulkCopy.BulkCopyTimeout = 0;
+                            bulkCopy.ColumnMappings.Add("brcustnbr", "brcustnbr");
+                            bulkCopy.ColumnMappings.Add("cust_name", "cust_name");
+                            bulkCopy.ColumnMappings.Add("credit_mgr_code", "credit_mgr_code");
+                            bulkCopy.ColumnMappings.Add("N° de Piéce", "N° de Piéce");
+                            bulkCopy.ColumnMappings.Add("Date Piéce", "Date Piéce");
+                            bulkCopy.ColumnMappings.Add("Date_Echéance", "Date_Echéance");
+                            bulkCopy.ColumnMappings.Add("Votre N° de commande", "Votre N° de commande");
+                            bulkCopy.ColumnMappings.Add("Montant TTC", "Montant TTC");
+                            bulkCopy.ColumnMappings.Add("SourceCd", "SourceCd");
+                            bulkCopy.ColumnMappings.Add("TotalBalanceAmt", "TotalBalanceAmt");
+                            bulkCopy.ColumnMappings.Add("credit_limit", "credit_limit");
+                            bulkCopy.WriteToServer(reader);
+                        }
+
+                        using (var countCommand = new SqlCommand(
+                            "SELECT COUNT(*) FROM dbo.T_Credit_Recouvrement_AR_OPEN;",
+                            targetConnection,
+                            transaction))
+                            importedRows = Convert.ToInt32(countCommand.ExecuteScalar());
+
+                        ExecuteArOpenTargetSql(targetConnection, transaction, @"
+INSERT INTO dbo.T_Credit_Recouvrement_CONTACT_FICHE
+(
+    br_cust_nbr,cust_name,mgr_code,total_balance_amt,credit_limit
+)
+SELECT DISTINCT
+       source.brcustnbr,
+       source.cust_name,
+       source.credit_mgr_code,
+       source.TotalBalanceAmt,
+       source.credit_limit
+FROM dbo.T_Credit_Recouvrement_AR_OPEN AS source
+LEFT JOIN dbo.T_Credit_Recouvrement_CONTACT_FICHE AS target
+    ON target.br_cust_nbr=source.brcustnbr
+WHERE target.br_cust_nbr IS NULL;");
+
+                        string managerInClause =
+                            string.Join(",", parameterNames);
+                        using (var insertWithoutInvoice = new SqlCommand(@"
+INSERT INTO dbo.T_Credit_Recouvrement_CONTACT_FICHE
+(
+    br_cust_nbr,cust_name,mgr_code,total_balance_amt,credit_limit
+)
+SELECT customer.branch_customer_nbr,
+       customer.cust_name,
+       customer.credit_mgr_code,
+       customer.TotalBalanceAmt,
+       customer.credit_limit
+FROM DSS_COPIE.dbo.customer AS customer
+INNER JOIN DSS_COPIE.dbo.customer_location AS customer_location
+    ON customer_location.branch_customer_nbr=customer.branch_customer_nbr
+LEFT JOIN dbo.T_Credit_Recouvrement_CONTACT_FICHE AS contact
+    ON contact.br_cust_nbr=customer.branch_customer_nbr
+WHERE customer.CompanyCd='FR'
+  AND LEFT(customer.branch_nbr,2) IN ('15','21','24')
+  AND customer.credit_mgr_code IN (" + managerInClause + @")
+  AND customer_location.suffix='000'
+  AND contact.br_cust_nbr IS NULL;", targetConnection, transaction))
+                        {
+                            insertWithoutInvoice.CommandTimeout = 300;
+                            for (int index = 0; index < managerCodes.Count; index++)
+                                insertWithoutInvoice.Parameters.Add(
+                                    parameterNames[index],
+                                    SqlDbType.VarChar,
+                                    20).Value = managerCodes[index];
+                            insertWithoutInvoice.ExecuteNonQuery();
+                        }
+
+                        ExecuteArOpenTargetSql(targetConnection, transaction, @"
+UPDATE contact
+SET total_balance_amt=customer.TotalBalanceAmt,
+    mgr_code=customer.credit_mgr_code,
+    credit_limit=customer.credit_limit
+FROM dbo.T_Credit_Recouvrement_CONTACT_FICHE AS contact
+INNER JOIN DSS_COPIE.dbo.customer AS customer
+    ON contact.br_cust_nbr=customer.branch_customer_nbr;");
+
+                        ExecuteArOpenTargetSql(targetConnection, transaction, @"
+UPDATE dbo.T_Credit_Recouvrement_CONTACT_FICHE
+SET red_alert=0,
+    relance_preventive=0,
+    relance_active_1=0,
+    relance_active_2=0,
+    relance_automatch=0,
+    relance_preventive_marketplace=0,
+    relance_active_1_marketplace=0,
+    relance_active_2_marketplace=0;");
+
+                        transaction.Commit();
+                        return importedRows;
+                    }
+                    catch
+                    {
+                        transaction.Rollback();
+                        throw;
+                    }
+                }
+            }
+        }
+
+        private static void ExecuteArOpenTargetSql(
+            SqlConnection connection,
+            SqlTransaction transaction,
+            string sql)
+        {
+            using (var command = new SqlCommand(sql, connection, transaction))
+            {
+                command.CommandTimeout = 300;
+                command.ExecuteNonQuery();
+            }
+        }
+
+        public void Planification_Auto_Calcul_Encours(
+            string sql_con,
+            string logs,
+            string tmp_folder,
+            string session_name)
+        {
+            const string executionParameter =
+                "date_planification_auto_calcul_encours";
+
+            string root = GetServicePath();
+            logsFolder = Path.Combine(root, logs ?? "");
+            tempFolder = Path.Combine(root, tmp_folder ?? "");
+            sessionName = session_name ?? "";
+            Directory.CreateDirectory(logsFolder);
+            Directory.CreateDirectory(tempFolder);
+
+            JsonFile configuration = JsonConvert.DeserializeObject<JsonFile>(
+                GetImcaParameter(sql_con, global_application_name) ?? "");
+
+            if (configuration?.countries == null ||
+                configuration.countries.Count == 0)
+            {
+                throw new InvalidOperationException(
+                    global_application_name +
+                    " parameters are empty or invalid");
+            }
+
+            foreach (Country item in configuration.countries)
+            {
+                ApplyCountryConfiguration(item, sql_con);
+
+                if (!IsTrue(active) ||
+                    !country.Equals(
+                        "FR",
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                try
+                {
+                    ValidateAutomaticOutstandingCalculationConfiguration();
+
+                    DateTime lastExecution =
+                        GetOptionalExecutionParameterDate(executionParameter);
+
+                    WriteLog(
+                        "   Automatic outstanding calculation schedule" +
+                        " - Last successful execution : " +
+                        lastExecution.ToString("dd/MM/yyyy HH:mm:ss") +
+                        " - Current date : " +
+                        DateTime.Now.ToString("dd/MM/yyyy HH:mm:ss"));
+
+                    if (lastExecution.Date >= DateTime.Today)
+                    {
+                        WriteLog(
+                            "   Automatic outstanding calculation " +
+                            "already completed today");
+                        continue;
+                    }
+
+                    WriteLog(
+                        "   Starting automatic outstanding calculation planning");
+
+                    int copiedClients;
+                    int createdRequests =
+                        ProcessAutomaticOutstandingCalculationPlanning(
+                            out copiedClients);
+
+                    DateTime completedAt = DateTime.Now;
+                    SetCreditReviewScheduleDate(
+                        executionParameter,
+                        completedAt);
+
+                    WriteLog(
+                        "   Automatic outstanding calculation planning completed" +
+                        " - New request(s) : " + createdRequests +
+                        " - Client row(s) copied : " + copiedClients +
+                        " - Successful execution : " +
+                        completedAt.ToString("dd/MM/yyyy HH:mm:ss"));
+                }
+                catch (Exception ex)
+                {
+                    string details = GetDetailedExceptionMessage(ex);
+
+                    WriteLog(
+                        "   Automatic outstanding calculation planning error" +
+                        " - Execution parameter not updated" +
+                        " - Details : " + details);
+
+                    try
+                    {
+                        if (graphService == null)
+                        {
+                            WriteLog(
+                                "   Connecting to Microsoft Graph for automatic " +
+                                "outstanding calculation technical alert");
+                            graphService = ConnectGraph();
+                        }
+
+                        SendTechnicalAlert(
+                            nameof(Planification_Auto_Calcul_Encours),
+                            details,
+                            "AUTOMATIC OUTSTANDING CALCULATION PLANNING");
+
+                        WriteLog(
+                            "   Automatic outstanding calculation " +
+                            "technical alert sent");
+                    }
+                    catch (Exception alertException)
+                    {
+                        WriteLog(
+                            "   Automatic outstanding calculation technical " +
+                            "alert could not be sent" +
+                            " - Details : " +
+                            GetDetailedExceptionMessage(alertException));
+                    }
+                }
+                finally
+                {
+                    graphService = null;
+                }
+            }
+        }
+
+        private void ValidateAutomaticOutstandingCalculationConfiguration()
+        {
+            if (string.IsNullOrWhiteSpace(sql_connexion))
+            {
+                throw new InvalidOperationException(
+                    "sql_connexion is empty for automatic outstanding " +
+                    "calculation planning");
+            }
+
+            if (string.IsNullOrWhiteSpace(sql_creation_compte))
+            {
+                throw new InvalidOperationException(
+                    "sql_creation_compte is empty for automatic outstanding " +
+                    "calculation scheduling");
+            }
+        }
+
+        private int ProcessAutomaticOutstandingCalculationPlanning(
+            out int copiedClients)
+        {
+            copiedClients = 0;
+            int createdRequests = 0;
+
+            using (var connection = new SqlConnection(sql_connexion))
+            {
+                connection.Open();
+
+                using (SqlTransaction transaction =
+                    connection.BeginTransaction(IsolationLevel.Serializable))
+                {
+                    try
+                    {
+                        // The application lock prevents two IMCA executions from
+                        // duplicating the same automatic requests concurrently.
+                        using (var lockCommand = new SqlCommand(
+                            @"DECLARE @result int;
+                              EXEC @result = sys.sp_getapplock
+                                  @Resource=N'CREDIT_PLANIFICATION_AUTO_CALCUL_ENCOURS',
+                                  @LockMode=N'Exclusive',
+                                  @LockOwner=N'Transaction',
+                                  @LockTimeout=0;
+                              SELECT @result;",
+                            connection,
+                            transaction))
+                        {
+                            lockCommand.CommandTimeout = 30;
+                            int lockResult =
+                                Convert.ToInt32(lockCommand.ExecuteScalar());
+
+                            if (lockResult < 0)
+                            {
+                                throw new InvalidOperationException(
+                                    "Automatic outstanding calculation planning " +
+                                    "is already running" +
+                                    " - SQL application lock result : " +
+                                    lockResult);
+                            }
+                        }
+
+                        var sourceRequestIds = new List<int>();
+
+                        using (var selectCommand = new SqlCommand(
+                            @"SELECT id_demande
+                              FROM dbo.T_Credit_Calcul_encours_demandes
+                              WHERE automatique=1
+                              ORDER BY id_demande;",
+                            connection,
+                            transaction))
+                        {
+                            selectCommand.CommandTimeout = 300;
+
+                            using (SqlDataReader reader =
+                                selectCommand.ExecuteReader())
+                            {
+                                while (reader.Read())
+                                {
+                                    sourceRequestIds.Add(
+                                        Convert.ToInt32(reader["id_demande"]));
+                                }
+                            }
+                        }
+
+                        foreach (int sourceRequestId in sourceRequestIds)
+                        {
+                            int newRequestId;
+
+                            using (var insertRequest = new SqlCommand(
+                                @"INSERT INTO dbo.T_Credit_Calcul_encours_demandes
+                                  (
+                                      qui,
+                                      quand,
+                                      id_statut,
+                                      commentaires,
+                                      pourcentage_risk,
+                                      open_order,
+                                      cto_valides,
+                                      reglement_en_cours,
+                                      commandes_a_valider,
+                                      commandes_non_valorisees,
+                                      financement,
+                                      automatique,
+                                      factor
+                                  )
+                                  SELECT qui,
+                                         GETDATE(),
+                                         0,
+                                         commentaires,
+                                         pourcentage_risk,
+                                         0,
+                                         0,
+                                         0,
+                                         0,
+                                         0,
+                                         financement,
+                                         1,
+                                         factor
+                                  FROM dbo.T_Credit_Calcul_encours_demandes
+                                  WHERE id_demande=@SOURCE_ID
+                                    AND automatique=1;
+
+                                  SELECT CAST(SCOPE_IDENTITY() AS int);",
+                                connection,
+                                transaction))
+                            {
+                                insertRequest.CommandTimeout = 300;
+                                insertRequest.Parameters.Add(
+                                    "@SOURCE_ID",
+                                    SqlDbType.Int).Value = sourceRequestId;
+
+                                object result = insertRequest.ExecuteScalar();
+                                if (result == null || result == DBNull.Value)
+                                {
+                                    throw new InvalidOperationException(
+                                        "Automatic outstanding calculation source " +
+                                        "request is no longer active" +
+                                        " - Source request ID : " +
+                                        sourceRequestId);
+                                }
+
+                                newRequestId = Convert.ToInt32(result);
+                            }
+
+                            using (var copyClients = new SqlCommand(
+                                @"INSERT INTO dbo.T_Credit_Calcul_encours_clients
+                                  (
+                                      id_demande,
+                                      code_client,
+                                      nom_client,
+                                      id_statut,
+                                      terms,
+                                      terms_descr,
+                                      risk_class,
+                                      tax_exempt_nbr,
+                                      taxe_code,
+                                      credit_limit_impulse,
+                                      devise,
+                                      taux_dollar
+                                  )
+                                  SELECT @NEW_REQUEST_ID,
+                                         code_client,
+                                         nom_client,
+                                         id_statut,
+                                         terms,
+                                         terms_descr,
+                                         risk_class,
+                                         tax_exempt_nbr,
+                                         taxe_code,
+                                         credit_limit_impulse,
+                                         devise,
+                                         taux_dollar
+                                  FROM dbo.T_Credit_Calcul_encours_clients
+                                  WHERE id_demande=@SOURCE_ID;",
+                                connection,
+                                transaction))
+                            {
+                                copyClients.CommandTimeout = 300;
+                                copyClients.Parameters.Add(
+                                    "@NEW_REQUEST_ID",
+                                    SqlDbType.Int).Value = newRequestId;
+                                copyClients.Parameters.Add(
+                                    "@SOURCE_ID",
+                                    SqlDbType.Int).Value = sourceRequestId;
+                                copiedClients += copyClients.ExecuteNonQuery();
+                            }
+
+                            using (var finalizeRequests = new SqlCommand(
+                                @"UPDATE dbo.T_Credit_Calcul_encours_demandes
+                                  SET automatique=0
+                                  WHERE id_demande=@SOURCE_ID;
+
+                                  UPDATE dbo.T_Credit_Calcul_encours_demandes
+                                  SET id_statut=1
+                                  WHERE id_demande=@NEW_REQUEST_ID;",
+                                connection,
+                                transaction))
+                            {
+                                finalizeRequests.CommandTimeout = 300;
+                                finalizeRequests.Parameters.Add(
+                                    "@SOURCE_ID",
+                                    SqlDbType.Int).Value = sourceRequestId;
+                                finalizeRequests.Parameters.Add(
+                                    "@NEW_REQUEST_ID",
+                                    SqlDbType.Int).Value = newRequestId;
+                                finalizeRequests.ExecuteNonQuery();
+                            }
+
+                            createdRequests++;
+
+                            WriteLog(
+                                "       Automatic outstanding calculation " +
+                                "request duplicated" +
+                                " - Source request ID : " + sourceRequestId +
+                                " - New request ID : " + newRequestId);
+                        }
+
+                        transaction.Commit();
+                        return createdRequests;
+                    }
+                    catch
+                    {
+                        transaction.Rollback();
+                        throw;
+                    }
+                }
+            }
+        }
+
         public void Credit_Review_Mails(
             string sql_con,
             string logs,
@@ -3345,8 +4079,10 @@ WHERE MailboxId = @MAILBOX_ID
 
                     DateTime currentDateTime = DateTime.Now;
 
-                    DateTime nextExecutionTime = currentDateTime.Date
-                        .Add(lastSuccessfulExecution.TimeOfDay);
+                    TimeSpan configuredExecutionTime =
+                        lastSuccessfulExecution.TimeOfDay;
+                    DateTime nextExecutionTime =
+                        currentDateTime.Date.Add(configuredExecutionTime);
 
                     WriteLog(
                         "   Credit Review daily schedule" +
@@ -3383,9 +4119,11 @@ WHERE MailboxId = @MAILBOX_ID
                     SendPendingCreditReviewImperativeMails();
 
                     DateTime completedAt = DateTime.Now;
+                    DateTime scheduleReference =
+                        completedAt.Date.Add(configuredExecutionTime);
                     SetCreditReviewScheduleDate(
                         scheduleParameter,
-                        completedAt);
+                        scheduleReference);
 
                     WriteLog(
                         "   Credit Review daily processing completed" +
@@ -4188,6 +4926,8 @@ SELECT e.id,
        e.id_dossier,
        e.nom_mail,
        e.email_destinataire,
+       e.top_traite,
+       e.date_demande,
        l.pieces_jointes,
        l.[sujet email] AS sujet_email,
        l.nom_fic_html,
@@ -4197,7 +4937,7 @@ INNER JOIN dbo.T_statut AS s
     ON s.idDossier = e.id_dossier
 INNER JOIN dbo.lien_email AS l
     ON l.nom_email_court = e.nom_mail
-WHERE e.top_traite = 'N'
+WHERE e.top_traite IN ('N','A')
   AND e.id > 12719481
 ORDER BY e.id;";
 
@@ -4218,7 +4958,10 @@ ORDER BY e.id;";
                 int currentStatus = Convert.ToInt32(row["idStatut"]);
                 string mailName = Convert.ToString(row["nom_mail"]).Trim();
                 string recipient = Convert.ToString(row["email_destinataire"]).Trim();
-
+                string queueStatus = Convert.ToString(row["top_traite"]).Trim();
+                DateTime requestDate = row["date_demande"] == DBNull.Value
+                    ? DateTime.Today
+                    : Convert.ToDateTime(row["date_demande"]);
                 try
                 {
                     if (!CanSendOpeningTemplate(mailName, currentStatus))
@@ -4246,11 +4989,7 @@ ORDER BY e.id;";
                             StringComparison.OrdinalIgnoreCase))
                     {
                         int divisionCount;
-                        html = ApplyRgpdDivisionRows(
-                            html,
-                            dossierId,
-                            out divisionCount);
-
+                        html = ApplyRgpdDivisionRows(html, dossierId, out divisionCount);
                         WriteLog(
                             "       RGPD divisions inserted" +
                             " - Dossier : " + dossierId +
@@ -4309,14 +5048,31 @@ ORDER BY e.id;";
                             ? fr_credit_administration_graph_send_as
                             : fr_ouverture_graph_send_as;
 
-                    SendGraphMailWithAttachments(
-                        sendAs,
-                        recipient,
-                        "",
-                        bcc,
-                        subject,
-                        html,
-                        attachments);
+                    if (queueStatus.Equals(
+                            "A",
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        ArchiveExistingSentOpeningMail(
+                            id,
+                            dossierId,
+                            sendAs,
+                            recipient,
+                            subject,
+                            requestDate);
+                    }
+                    else
+                    {
+                        SendOpeningMailAndArchiveInDatabase(
+                            id,
+                            dossierId,
+                            sendAs,
+                            recipient,
+                            "",
+                            bcc,
+                            subject,
+                            html,
+                            attachments);
+                    }
 
                     SetMailRequestStatus("dbo.envoi_mail", id, "O");
 
@@ -4351,10 +5107,16 @@ ORDER BY e.id;";
                 catch (Exception ex)
                 {
                     errors++;
-                    SetMailRequestStatus("dbo.envoi_mail", id, "E");
-
+                    string currentQueueStatus = GetOpeningQueueStatus(id);
+                    if (!currentQueueStatus.Equals(
+                            "A",
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        SetMailRequestStatus("dbo.envoi_mail", id, "E");
+                    }
                     WriteLog(
                         "       Opening account template error" +
+                        " - Current status : " + currentQueueStatus +
                         " - Queue ID : " + id +
                         " - Dossier : " + dossierId +
                         " - Template : " + mailName +
@@ -4414,52 +5176,29 @@ WHERE c.id=@ID;";
         {
             List<string> divisions = GetRgpdDivisions(dossierId);
             divisionCount = divisions.Count;
-
             if (divisions.Count == 0)
-            {
                 throw new InvalidOperationException(
-                    "No active RGPD subscription division found" +
-                    " - Dossier : " + dossierId);
-            }
+                    "No active RGPD subscription division found - Dossier : " + dossierId);
 
             string sourceHtml = html ?? "";
-
             Match rowMatch = Regex.Match(
                 sourceHtml,
                 "<tr\\b[^>]*\\bid\\s*=\\s*['\"]ligne_tab['\"][^>]*>.*?</tr>",
-                RegexOptions.IgnoreCase | RegexOptions.Singleline |
-                RegexOptions.CultureInvariant);
-
+                RegexOptions.IgnoreCase | RegexOptions.Singleline | RegexOptions.CultureInvariant);
             if (!rowMatch.Success)
-            {
                 throw new InvalidDataException(
-                    "The RGPD template does not contain the historical " +
-                    "table row id=\"ligne_tab\"" +
-                    " - Dossier : " + dossierId);
-            }
-
-            if (rowMatch.Value.IndexOf(
-                    "[DIVISION]",
-                    StringComparison.OrdinalIgnoreCase) < 0)
-            {
+                    "The RGPD template does not contain the historical table row id=\"ligne_tab\" - Dossier : " + dossierId);
+            if (rowMatch.Value.IndexOf("[DIVISION]", StringComparison.OrdinalIgnoreCase) < 0)
                 throw new InvalidDataException(
-                    "The RGPD template row id=\"ligne_tab\" does not " +
-                    "contain [DIVISION]" +
-                    " - Dossier : " + dossierId);
-            }
+                    "The RGPD template row id=\"ligne_tab\" does not contain [DIVISION] - Dossier : " + dossierId);
 
             var generatedRows = new StringBuilder();
-
             foreach (string division in divisions)
-            {
-                generatedRows.Append(
-                    Regex.Replace(
-                        rowMatch.Value,
-                        "\\[DIVISION\\]",
-                        WebUtility.HtmlEncode(division),
-                        RegexOptions.IgnoreCase |
-                        RegexOptions.CultureInvariant));
-            }
+                generatedRows.Append(Regex.Replace(
+                    rowMatch.Value,
+                    "\\[DIVISION\\]",
+                    WebUtility.HtmlEncode(division),
+                    RegexOptions.IgnoreCase | RegexOptions.CultureInvariant));
 
             return sourceHtml.Substring(0, rowMatch.Index) +
                 generatedRows +
@@ -4470,26 +5209,17 @@ WHERE c.id=@ID;";
         {
             DataTable divisions = FillDataTable(
                 sql_creation_compte,
-                @"SELECT DISTINCT
-                         LTRIM(RTRIM(category.lib_cat)) AS lib_cat
+                @"SELECT DISTINCT LTRIM(RTRIM(category.lib_cat)) AS lib_cat
                   FROM dbo.T_customer_choix_abonnement AS subscription
                   INNER JOIN dbo.T_liste_categorie_MKT AS category
-                      ON category.id_cat = subscription.id_cat
-                  WHERE subscription.id = @DOSSIER_ID
-                    AND NULLIF(LTRIM(RTRIM(category.lib_cat)), '') IS NOT NULL
+                      ON category.id_cat=subscription.id_cat
+                  WHERE subscription.id=@DOSSIER_ID
+                    AND NULLIF(LTRIM(RTRIM(category.lib_cat)),'') IS NOT NULL
                   ORDER BY LTRIM(RTRIM(category.lib_cat));",
-                new SqlParameter(
-                    "@DOSSIER_ID",
-                    SqlDbType.Int)
-                {
-                    Value = dossierId
-                });
-
+                new SqlParameter("@DOSSIER_ID", SqlDbType.Int) { Value = dossierId });
             return divisions.AsEnumerable()
-                .Select(row =>
-                    Convert.ToString(row["lib_cat"]).Trim())
-                .Where(value =>
-                    !string.IsNullOrWhiteSpace(value))
+                .Select(row => Convert.ToString(row["lib_cat"]).Trim())
+                .Where(value => !string.IsNullOrWhiteSpace(value))
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .ToList();
         }
@@ -5572,6 +6302,429 @@ ORDER BY q.id;";
                 " - Details : " +
                 GetDetailedExceptionMessage(lastException),
                 lastException);
+        }
+
+        private string GetOpeningQueueStatus(int queueId)
+        {
+            return ExecuteScalarString(
+                sql_creation_compte,
+                @"SELECT ISNULL(top_traite,'')
+                  FROM dbo.envoi_mail
+                  WHERE id=@ID;",
+                new SqlParameter("@ID", SqlDbType.Int)
+                {
+                    Value = queueId
+                });
+        }
+
+        private void SendOpeningMailAndArchiveInDatabase(
+            int queueId,
+            int dossierId,
+            string sendAs,
+            string to,
+            string cc,
+            string bcc,
+            string subject,
+            string html,
+            List<string> files)
+        {
+            Message draftMessage = BuildOpeningOutgoingMessage(
+                sendAs,
+                to,
+                cc,
+                bcc,
+                subject,
+                html,
+                files);
+
+            Message draft = ExecuteGraphWithRetry(
+                () => graphService.Users[sendAs]
+                    .Messages
+                    .PostAsync(
+                        draftMessage,
+                        config => AddImmutableHeader(config.Headers))
+                    .GetAwaiter()
+                    .GetResult(),
+                "Create opening account draft : " + subject);
+
+            if (draft == null || string.IsNullOrWhiteSpace(draft.Id))
+            {
+                throw new InvalidOperationException(
+                    "Opening account draft creation returned no message ID");
+            }
+
+            ExecuteGraphWithRetry(
+                () =>
+                {
+                    graphService.Users[sendAs]
+                        .Messages[draft.Id]
+                        .Send
+                        .PostAsync(config => AddImmutableHeader(config.Headers))
+                        .GetAwaiter()
+                        .GetResult();
+                    return true;
+                },
+                "Send opening account draft : " + subject);
+
+            // Le message a été accepté par Graph. Le statut A empêche tout
+            // nouvel envoi si l'archivage MIME échoue ensuite.
+            SetMailRequestStatus("dbo.envoi_mail", queueId, "A");
+
+            Message sentMessage = WaitForSentOpeningMessage(
+                sendAs,
+                draft.Id,
+                subject);
+
+            ArchiveSentOpeningMessageInDatabase(
+                queueId,
+                dossierId,
+                sendAs,
+                sentMessage,
+                to);
+        }
+
+        private Message BuildOpeningOutgoingMessage(
+            string sendAs,
+            string to,
+            string cc,
+            string bcc,
+            string subject,
+            string html,
+            List<string> files)
+        {
+            List<Recipient> toRecipients = BuildRecipients(to);
+            if (toRecipients.Count == 0)
+            {
+                throw new InvalidOperationException(
+                    "Invalid opening account recipients for " + subject);
+            }
+
+            string displayName = string.Equals(
+                    sendAs,
+                    fr_credit_administration_graph_send_as,
+                    StringComparison.OrdinalIgnoreCase)
+                ? "Ingram Micro - Changement de domiciliation bancaire"
+                : "Ingram Micro - Service Nouveaux clients";
+
+            var sender = new Recipient
+            {
+                EmailAddress = new EmailAddress
+                {
+                    Address = sendAs,
+                    Name = displayName
+                }
+            };
+
+            var message = new Message
+            {
+                Subject = subject,
+                From = sender,
+                Sender = sender,
+                Body = new ItemBody
+                {
+                    ContentType = BodyType.Html,
+                    Content = html
+                },
+                ToRecipients = toRecipients,
+                CcRecipients = BuildRecipients(cc),
+                BccRecipients = BuildRecipients(bcc),
+                Attachments = new List<Microsoft.Graph.Models.Attachment>()
+            };
+
+            foreach (string path in files ?? new List<string>())
+            {
+                byte[] bytes = File.ReadAllBytes(path);
+                if (bytes.Length > 3 * 1024 * 1024)
+                {
+                    throw new InvalidDataException(
+                        "Attachment exceeds 3 MB : " + Path.GetFileName(path));
+                }
+
+                message.Attachments.Add(new FileAttachment
+                {
+                    OdataType = "#microsoft.graph.fileAttachment",
+                    Name = Path.GetFileName(path),
+                    ContentType = "application/octet-stream",
+                    ContentBytes = bytes
+                });
+            }
+
+            return message;
+        }
+
+        private Message WaitForSentOpeningMessage(
+            string mailbox,
+            string immutableMessageId,
+            string subject)
+        {
+            Exception lastException = null;
+
+            for (int attempt = 1; attempt <= 12; attempt++)
+            {
+                try
+                {
+                    Message message = graphService.Users[mailbox]
+                        .Messages[immutableMessageId]
+                        .GetAsync(config =>
+                        {
+                            AddImmutableHeader(config.Headers);
+                            config.QueryParameters.Select = new[]
+                            {
+                                "id",
+                                "subject",
+                                "sentDateTime",
+                                "createdDateTime",
+                                "toRecipients",
+                                "isDraft"
+                            };
+                        })
+                        .GetAwaiter()
+                        .GetResult();
+
+                    if (message != null && message.IsDraft != true)
+                    {
+                        return message;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    lastException = ex;
+                    if (!IsGraphObjectNotFound(ex) &&
+                        !IsTransientGraphError(ex))
+                    {
+                        throw;
+                    }
+                }
+
+                System.Threading.Thread.Sleep(attempt * 500);
+            }
+
+            throw new InvalidOperationException(
+                "The opening account email was sent but its Sent Items copy " +
+                "could not be loaded" +
+                " - Subject : " + subject +
+                " - Details : " +
+                GetDetailedExceptionMessage(lastException),
+                lastException);
+        }
+
+        private void ArchiveExistingSentOpeningMail(
+            int queueId,
+            int dossierId,
+            string mailbox,
+            string recipients,
+            string subject,
+            DateTime requestDate)
+        {
+            MailFolder sentItems = ExecuteGraphWithRetry(
+                () => graphService.Users[mailbox]
+                    .MailFolders["sentitems"]
+                    .GetAsync(config => AddImmutableHeader(config.Headers))
+                    .GetAwaiter()
+                    .GetResult(),
+                "Read opening account Sent Items folder for archive retry");
+
+            string filter =
+                "subject eq '" + EscapeODataString(subject) + "'" +
+                " and sentDateTime ge " +
+                requestDate.Date.ToUniversalTime().ToString(
+                    "yyyy-MM-ddTHH:mm:ssZ",
+                    CultureInfo.InvariantCulture);
+
+            MessageCollectionResponse response = ExecuteGraphWithRetry(
+                () => graphService.Users[mailbox]
+                    .MailFolders[sentItems.Id]
+                    .Messages
+                    .GetAsync(config =>
+                    {
+                        AddImmutableHeader(config.Headers);
+                        config.QueryParameters.Top = 25;
+                        config.QueryParameters.Filter = filter;
+                        config.QueryParameters.Select = new[]
+                        {
+                            "id",
+                            "subject",
+                            "sentDateTime",
+                            "createdDateTime",
+                            "toRecipients",
+                            "isDraft"
+                        };
+                    })
+                    .GetAwaiter()
+                    .GetResult(),
+                "Find sent opening account email for database archive retry");
+
+            HashSet<string> expectedRecipients = BuildRecipients(recipients)
+                .Select(recipient => recipient.EmailAddress?.Address ?? "")
+                .Where(address => !string.IsNullOrWhiteSpace(address))
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+            Message sentMessage = (response?.Value ?? new List<Message>())
+                .Where(message => message.IsDraft != true)
+                .OrderByDescending(message => message.SentDateTime)
+                .FirstOrDefault(message =>
+                {
+                    HashSet<string> actualRecipients =
+                        (message.ToRecipients ?? new List<Recipient>())
+                            .Select(recipient =>
+                                recipient.EmailAddress?.Address ?? "")
+                            .Where(address =>
+                                !string.IsNullOrWhiteSpace(address))
+                            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+                    return expectedRecipients.SetEquals(actualRecipients);
+                });
+
+            if (sentMessage == null)
+            {
+                throw new InvalidOperationException(
+                    "Sent opening account email not found for database archive retry" +
+                    " - Queue ID : " + queueId +
+                    " - Dossier : " + dossierId +
+                    " - Subject : " + subject);
+            }
+
+            ArchiveSentOpeningMessageInDatabase(
+                queueId,
+                dossierId,
+                mailbox,
+                sentMessage,
+                recipients);
+        }
+
+        private void ArchiveSentOpeningMessageInDatabase(
+            int queueId,
+            int dossierId,
+            string mailbox,
+            Message sentMessage,
+            string recipients)
+        {
+            byte[] mime = GetMailboxMessageMimeContent(
+                mailbox,
+                sentMessage.Id,
+                "Get sent opening account MIME");
+
+            DateTime sentDate =
+                sentMessage.SentDateTime?.LocalDateTime ??
+                sentMessage.CreatedDateTime?.LocalDateTime ??
+                DateTime.Now;
+
+            string actualRecipients = string.Join(
+                ";",
+                (sentMessage.ToRecipients ?? new List<Recipient>())
+                    .Select(recipient =>
+                        recipient?.EmailAddress?.Address)
+                    .Where(address =>
+                        !string.IsNullOrWhiteSpace(address))
+                    .Distinct(StringComparer.OrdinalIgnoreCase));
+
+            if (string.IsNullOrWhiteSpace(actualRecipients))
+            {
+                throw new InvalidDataException(
+                    "The sent opening account message has no Graph recipient" +
+                    " - Queue ID : " + queueId +
+                    " - Dossier : " + dossierId);
+            }
+
+            InsertSentOpeningMailInDatabase(
+                dossierId,
+                sentDate,
+                sentMessage.Subject ?? "",
+                actualRecipients,
+                mime);
+
+            UpdateOpeningUploadStatus(dossierId);
+
+            WriteLog(
+                "       Sent opening account email archived in database" +
+                " - Queue ID : " + queueId +
+                " - Dossier : " + dossierId +
+                " - Subject : " + (sentMessage.Subject ?? "") +
+                " - Recipient(s) : " + actualRecipients);
+
+            // La copie reste volontairement dans les Elements envoyes.
+            // La base contient le MIME pour l'interface web et Exchange
+            // conserve la copie utilisateur du message envoye.
+            WriteLog(
+                "       Sent opening account email kept in Sent Items" +
+                " - Queue ID : " + queueId +
+                " - Dossier : " + dossierId +
+                " - Message ID : " + sentMessage.Id);
+        }
+
+        private byte[] GetMailboxMessageMimeContent(
+            string mailbox,
+            string messageId,
+            string operation)
+        {
+            using (Stream input = ExecuteGraphWithRetry(
+                () => graphService.Users[mailbox]
+                    .Messages[messageId]
+                    .Content
+                    .GetAsync(config => AddImmutableHeader(config.Headers))
+                    .GetAwaiter()
+                    .GetResult(),
+                operation))
+            using (var output = new MemoryStream())
+            {
+                if (input == null)
+                {
+                    throw new InvalidDataException(
+                        "Graph MIME stream is empty" +
+                        " - Mailbox : " + mailbox +
+                        " - Message ID : " + messageId);
+                }
+
+                input.CopyTo(output);
+                return output.ToArray();
+            }
+        }
+
+        private void InsertSentOpeningMailInDatabase(
+            int dossierId,
+            DateTime sentDate,
+            string subject,
+            string recipients,
+            byte[] mime)
+        {
+            if (mime == null || mime.Length == 0)
+            {
+                throw new InvalidDataException(
+                    "Sent opening account MIME content is empty");
+            }
+
+            string fileName =
+                dossierId +
+                "_EMAIL_" +
+                sentDate.ToString(
+                    "yyyyMMdd_HHmmss",
+                    CultureInfo.InvariantCulture);
+
+            using (var connection = new SqlConnection(sql_creation_compte))
+            using (var command = new SqlCommand(
+                "dbo.USP_Insert_mail_boite_ouverture",
+                connection))
+            {
+                command.CommandType = CommandType.StoredProcedure;
+                command.CommandTimeout = 300;
+                command.Parameters.Add("@id_dossier", SqlDbType.Int)
+                    .Value = dossierId;
+                command.Parameters.Add("@fichier", SqlDbType.Image)
+                    .Value = mime;
+                command.Parameters.Add("@nom_fichier", SqlDbType.VarChar, 500)
+                    .Value = Truncate(fileName, 500);
+                command.Parameters.Add("@extension", SqlDbType.NChar, 10)
+                    .Value = "eml";
+                command.Parameters.Add("@date_mail", SqlDbType.Date)
+                    .Value = sentDate.Date;
+                command.Parameters.Add("@sujet_mail", SqlDbType.VarChar, -1)
+                    .Value = subject ?? "";
+                command.Parameters.Add("@destinataire_mail", SqlDbType.VarChar, -1)
+                    .Value = recipients ?? "";
+                command.Parameters.Add("@date_importation", SqlDbType.Date)
+                    .Value = DateTime.Today;
+                connection.Open();
+                command.ExecuteNonQuery();
+            }
         }
 
         private void SendGraphMailWithAttachments(string sendAs, string to, string cc, string bcc, string subject, string html, List<string> files)
