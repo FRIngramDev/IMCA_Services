@@ -47,8 +47,10 @@ namespace CREDIT_EMAILS_MANAGEMENT_FR
         private string uri_webservice = "";
         private HashSet<string> credit_managers_contentieux_list = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private string logsFolder = "", tempFolder = "", sessionName = "";
-        private string maquettes_rapports_pj_credit = "", fr_ouverture_graph_send_as = "", fr_credit_administration_graph_send_as = "", fr_credit_review_graph_send_as = "";
+        private string maquettes_rapports_pj_credit = "", fr_ouverture_graph_send_as = "", fr_credit_administration_graph_send_as = "", fr_credit_review_graph_send_as = "", fr_lcrna_graph_send_as = "", fr_facturation_graph_send_as = "";
         private string email_rapport_compteur = "", email_rapport_stat_ouverture = "", admin_ventes = "";
+        private List<AutomaticStatementCustomer> automaticStatementCustomers =
+            new List<AutomaticStatementCustomer>();
         private string templatesReportsFolder = "";
         private static readonly object logSyncRoot = new object();
         private GraphServiceClient graphService;
@@ -99,9 +101,22 @@ namespace CREDIT_EMAILS_MANAGEMENT_FR
             public string fr_ouverture_graph_send_as { get; set; } = "";
             public string fr_credit_administration_graph_send_as { get; set; } = "";
             public string fr_credit_review_graph_send_as { get; set; } = "";
+            public string fr_lcrna_graph_send_as { get; set; } = "";
+            public string fr_facturation_graph_send_as { get; set; } = "";
+            public List<AutomaticStatementCustomer> echeancier_auto_clients
+            {
+                get;
+                set;
+            } = new List<AutomaticStatementCustomer>();
             public string email_rapport_compteur { get; set; } = "";
             public string email_rapport_stat_ouverture { get; set; } = "";
             public string admin_ventes { get; set; } = "";
+        }
+
+        public sealed class AutomaticStatementCustomer
+        {
+            public string code_client { get; set; } = "";
+            public string email_destinataire { get; set; } = "";
         }
 
         private sealed class MailboxConfiguration
@@ -318,6 +333,11 @@ namespace CREDIT_EMAILS_MANAGEMENT_FR
             fr_ouverture_graph_send_as = i.fr_ouverture_graph_send_as ?? "";
             fr_credit_administration_graph_send_as = i.fr_credit_administration_graph_send_as ?? "";
             fr_credit_review_graph_send_as = i.fr_credit_review_graph_send_as ?? "";
+            fr_lcrna_graph_send_as = i.fr_lcrna_graph_send_as ?? "";
+            fr_facturation_graph_send_as =
+                i.fr_facturation_graph_send_as ?? "";
+            automaticStatementCustomers = i.echeancier_auto_clients ??
+                new List<AutomaticStatementCustomer>();
             email_rapport_compteur = i.email_rapport_compteur ?? "";
             email_rapport_stat_ouverture = i.email_rapport_stat_ouverture ?? "";
             admin_ventes = i.admin_ventes ?? "";
@@ -3681,6 +3701,830 @@ SET red_alert=0,
             }
         }
 
+        public void Envoi_Echeancier_Auto_Client(
+            string sql_con,
+            string logs,
+            string tmp_folder,
+            string session_name)
+        {
+            const string executionParameter =
+                "date_dernier_envoi_echeancier_auto_client";
+
+            string root = GetServicePath();
+            logsFolder = Path.Combine(root, logs ?? "");
+            tempFolder = Path.Combine(root, tmp_folder ?? "");
+            sessionName = session_name ?? "";
+            Directory.CreateDirectory(logsFolder);
+            Directory.CreateDirectory(tempFolder);
+
+            JsonFile configuration = JsonConvert.DeserializeObject<JsonFile>(
+                GetImcaParameter(sql_con, global_application_name) ?? "");
+
+            if (configuration?.countries == null ||
+                configuration.countries.Count == 0)
+            {
+                throw new InvalidOperationException(
+                    global_application_name +
+                    " parameters are empty or invalid");
+            }
+
+            foreach (Country item in configuration.countries)
+            {
+                ApplyCountryConfiguration(item, sql_con);
+
+                if (!IsTrue(active) ||
+                    !country.Equals("FR", StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                try
+                {
+                    ValidateAutomaticStatementConfiguration();
+
+                    DateTime lastExecution =
+                        GetOptionalExecutionParameterDate(executionParameter);
+
+                    WriteLog(
+                        "   Automatic customer statement schedule" +
+                        " - Last successful execution : " +
+                        lastExecution.ToString("dd/MM/yyyy HH:mm:ss") +
+                        " - Current date : " +
+                        DateTime.Now.ToString("dd/MM/yyyy HH:mm:ss"));
+
+                    if (lastExecution.Date >= DateTime.Today)
+                    {
+                        WriteLog(
+                            "   Automatic customer statement already sent today");
+                        continue;
+                    }
+
+                    graphService = ConnectGraph();
+                    int sent = 0;
+                    int skipped = 0;
+
+                    foreach (AutomaticStatementCustomer customer
+                        in automaticStatementCustomers)
+                    {
+                        string customerCode =
+                            (customer?.code_client ?? "").Trim();
+                        string recipients =
+                            (customer?.email_destinataire ?? "").Trim();
+
+                        if (string.IsNullOrWhiteSpace(customerCode))
+                        {
+                            throw new InvalidDataException(
+                                "An echeancier_auto_clients entry has no code_client");
+                        }
+
+                        if (BuildRecipients(recipients).Count == 0)
+                        {
+                            throw new InvalidDataException(
+                                "Invalid automatic statement recipient" +
+                                " - Customer : " + customerCode +
+                                " - Value : " + recipients);
+                        }
+
+                        DataTable details = GetAutomaticStatementRows(customerCode);
+                        if (details.Rows.Count == 0)
+                        {
+                            skipped++;
+                            WriteLog(
+                                "       Automatic customer statement skipped" +
+                                " - No AR Open row" +
+                                " - Customer : " + customerCode +
+                                " - Recipient(s) : " + recipients);
+                            continue;
+                        }
+
+                        string filePath = Path.Combine(
+                            tempFolder,
+                            "Detail_Compte_" +
+                            CleanFileName(customerCode) +
+                            "_" +
+                            DateTime.Now.ToString(
+                                "yyyyMMdd_HHmmss",
+                                CultureInfo.InvariantCulture) +
+                            ".xlsx");
+
+                        try
+                        {
+                            CreateAutomaticStatementWorkbook(
+                                details,
+                                filePath);
+
+                            SendGraphMailWithAttachments(
+                                fr_facturation_graph_send_as,
+                                recipients,
+                                "",
+                                "",
+                                "Etat de compte",
+                                "Bonjour,<br/><br/>" +
+                                "Veuillez trouver ci-joint votre état de compte." +
+                                "<br/><br/>Cordialement,<br/>" +
+                                "Ingram Micro - Service Analyse Crédit",
+                                new List<string> { filePath });
+
+                            sent++;
+                            WriteLog(
+                                "       Automatic customer statement sent" +
+                                " - Customer : " + customerCode +
+                                " - Recipient(s) : " + recipients +
+                                " - Row(s) : " + details.Rows.Count +
+                                " - File : " + filePath);
+                        }
+                        finally
+                        {
+                            try
+                            {
+                                if (File.Exists(filePath))
+                                    File.Delete(filePath);
+                            }
+                            catch (Exception cleanupException)
+                            {
+                                WriteLog(
+                                    "       Automatic statement temporary file " +
+                                    "cleanup error" +
+                                    " - File : " + filePath +
+                                    " - Error : " +
+                                    cleanupException.Message);
+                            }
+                        }
+                    }
+
+                    DateTime completedAt = DateTime.Now;
+                    SetCreditReviewScheduleDate(
+                        executionParameter,
+                        completedAt);
+
+                    WriteLog(
+                        "   Automatic customer statement processing completed" +
+                        " - Configured customer(s) : " +
+                        automaticStatementCustomers.Count +
+                        " - Email(s) sent : " + sent +
+                        " - Customer(s) without AR Open row : " + skipped +
+                        " - Successful execution : " +
+                        completedAt.ToString("dd/MM/yyyy HH:mm:ss"));
+                }
+                catch (Exception ex)
+                {
+                    string details = GetDetailedExceptionMessage(ex);
+                    WriteLog(
+                        "   Automatic customer statement error" +
+                        " - Execution parameter not updated" +
+                        " - Details : " + details);
+
+                    try
+                    {
+                        if (graphService == null)
+                            graphService = ConnectGraph();
+
+                        SendTechnicalAlert(
+                            nameof(Envoi_Echeancier_Auto_Client),
+                            details,
+                            "AUTOMATIC CUSTOMER STATEMENT");
+                    }
+                    catch (Exception alertException)
+                    {
+                        WriteLog(
+                            "   Automatic customer statement technical alert " +
+                            "could not be sent" +
+                            " - Details : " +
+                            GetDetailedExceptionMessage(alertException));
+                    }
+                }
+                finally
+                {
+                    graphService = null;
+                }
+            }
+        }
+
+        private void ValidateAutomaticStatementConfiguration()
+        {
+            if (string.IsNullOrWhiteSpace(sql_connexion))
+            {
+                throw new InvalidOperationException(
+                    "sql_connexion is empty for automatic customer statements");
+            }
+
+            if (string.IsNullOrWhiteSpace(sql_creation_compte))
+            {
+                throw new InvalidOperationException(
+                    "sql_creation_compte is empty for automatic customer " +
+                    "statement scheduling");
+            }
+
+            if (string.IsNullOrWhiteSpace(fr_facturation_graph_send_as))
+            {
+                throw new InvalidOperationException(
+                    "fr_facturation_graph_send_as is empty for automatic " +
+                    "customer statements");
+            }
+
+            if (automaticStatementCustomers == null ||
+                automaticStatementCustomers.Count == 0)
+            {
+                throw new InvalidOperationException(
+                    "echeancier_auto_clients is empty");
+            }
+        }
+
+        private DataTable GetAutomaticStatementRows(string customerCode)
+        {
+            return FillDataTable(
+                sql_connexion,
+                @"SELECT brcustnbr AS [Code Client],
+                         cust_name AS [Nom Client],
+                         [N° de Piéce],
+                         [Votre N° de commande],
+                         [Date Piéce],
+                         [Montant TTC],
+                         Date_Echéance AS [Date Echéance]
+                  FROM dbo.T_Credit_Recouvrement_AR_OPEN
+                  WHERE brcustnbr=@CUSTOMER
+                  ORDER BY Date_Echéance,[Date Piéce];",
+                new SqlParameter(
+                    "@CUSTOMER",
+                    SqlDbType.VarChar,
+                    50)
+                {
+                    Value = customerCode ?? ""
+                });
+        }
+
+        private static void CreateAutomaticStatementWorkbook(
+            DataTable details,
+            string outputPath)
+        {
+            string directory = Path.GetDirectoryName(outputPath);
+            if (!string.IsNullOrWhiteSpace(directory))
+                Directory.CreateDirectory(directory);
+
+            using (var workbook = new XLWorkbook())
+            {
+                IXLWorksheet worksheet = workbook.AddWorksheet("echeancier");
+                worksheet.Cell(1, 1).InsertTable(
+                    details,
+                    "Echeancier",
+                    true);
+                worksheet.SheetView.FreezeRows(1);
+                worksheet.Row(1).Style.Font.Bold = true;
+                worksheet.Row(1).Style.Fill.BackgroundColor =
+                    XLColor.DarkBlue;
+                worksheet.Row(1).Style.Font.FontColor = XLColor.White;
+                worksheet.Columns().AdjustToContents(1, 80);
+
+                if (details.Columns.Contains("Montant TTC"))
+                {
+                    int amountColumn =
+                        details.Columns["Montant TTC"].Ordinal + 1;
+                    worksheet.Column(amountColumn)
+                        .Style.NumberFormat.Format = "#,##0.00";
+                }
+
+                workbook.SaveAs(outputPath);
+            }
+        }
+
+        public void Extract_And_Send_Traites(
+            string sql_con,
+            string logs,
+            string tmp_folder,
+            string session_name)
+        {
+            const string extractionParameter =
+                "date_dernier_extract_data_traites_ar_open";
+            const string sendingParameter =
+                "date_dernier_envoi_traites";
+
+            string root = GetServicePath();
+            logsFolder = Path.Combine(root, logs ?? "");
+            tempFolder = Path.Combine(root, tmp_folder ?? "");
+            sessionName = session_name ?? "";
+            Directory.CreateDirectory(logsFolder);
+            Directory.CreateDirectory(tempFolder);
+
+            JsonFile configuration = JsonConvert.DeserializeObject<JsonFile>(
+                GetImcaParameter(sql_con, global_application_name) ?? "");
+
+            if (configuration?.countries == null ||
+                configuration.countries.Count == 0)
+            {
+                throw new InvalidOperationException(
+                    global_application_name +
+                    " parameters are empty or invalid");
+            }
+
+            foreach (Country item in configuration.countries)
+            {
+                ApplyCountryConfiguration(item, sql_con);
+
+                if (!IsTrue(active) ||
+                    !country.Equals("FR", StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                try
+                {
+                    ValidateTraitesConfiguration();
+
+                    DateTime extractionDate =
+                        GetOptionalExecutionParameterDate(extractionParameter);
+
+                    if (extractionDate.Date < DateTime.Today)
+                    {
+                        DateTime? arOpenUpdatedAt;
+                        string sourceDetails;
+
+                        if (!IsArOpenUpdatedToday(
+                                out arOpenUpdatedAt,
+                                out sourceDetails))
+                        {
+                            WriteLog(
+                                "   Traites AR Open extraction skipped" +
+                                " - Source ar_open is not updated today" +
+                                " - Details : " + sourceDetails);
+                            continue;
+                        }
+
+                        WriteLog(
+                            "   Starting Traites AR Open extraction" +
+                            " - Source : " + sourceDetails);
+
+                        int extractedRows;
+                        int insertedRows = ProcessTraitesArOpenExtraction(
+                            out extractedRows);
+
+                        extractionDate = DateTime.Now;
+                        SetCreditReviewScheduleDate(
+                            extractionParameter,
+                            extractionDate);
+
+                        WriteLog(
+                            "   Traites AR Open extraction completed" +
+                            " - Temporary row(s) : " + extractedRows +
+                            " - New row(s) queued : " + insertedRows +
+                            " - Successful execution : " +
+                            extractionDate.ToString("dd/MM/yyyy HH:mm:ss"));
+                    }
+                    else
+                    {
+                        WriteLog(
+                            "   Traites AR Open extraction already completed today" +
+                            " - Last successful execution : " +
+                            extractionDate.ToString("dd/MM/yyyy HH:mm:ss"));
+                    }
+
+                    // Sending is only allowed after a successful extraction today.
+                    extractionDate =
+                        GetOptionalExecutionParameterDate(extractionParameter);
+                    if (extractionDate.Date < DateTime.Today)
+                    {
+                        WriteLog(
+                            "   Traites sending skipped" +
+                            " - Today's extraction has not completed successfully");
+                        continue;
+                    }
+
+                    DateTime sendingDate =
+                        GetOptionalExecutionParameterDate(sendingParameter);
+                    if (sendingDate.Date >= DateTime.Today)
+                    {
+                        WriteLog(
+                            "   Traites sending already completed today" +
+                            " - Last successful execution : " +
+                            sendingDate.ToString("dd/MM/yyyy HH:mm:ss"));
+                        continue;
+                    }
+
+                    WriteLog("   Starting automatic Traites sending");
+                    graphService = ConnectGraph();
+
+                    int sentCustomers;
+                    int sentRows;
+                    int removedWithoutContact;
+                    ProcessTraitesSending(
+                        out sentCustomers,
+                        out sentRows,
+                        out removedWithoutContact);
+
+                    sendingDate = DateTime.Now;
+                    SetCreditReviewScheduleDate(
+                        sendingParameter,
+                        sendingDate);
+
+                    WriteLog(
+                        "   Automatic Traites sending completed" +
+                        " - Customer email(s) sent : " + sentCustomers +
+                        " - Row(s) marked sent : " + sentRows +
+                        " - Pending row(s) removed without contact : " +
+                        removedWithoutContact +
+                        " - Successful execution : " +
+                        sendingDate.ToString("dd/MM/yyyy HH:mm:ss"));
+                }
+                catch (Exception ex)
+                {
+                    string details = GetDetailedExceptionMessage(ex);
+                    WriteLog(
+                        "   Traites extraction/sending error" +
+                        " - Daily parameter of the failing phase not updated" +
+                        " - Details : " + details);
+
+                    try
+                    {
+                        if (graphService == null)
+                            graphService = ConnectGraph();
+
+                        SendTechnicalAlert(
+                            nameof(Extract_And_Send_Traites),
+                            details,
+                            "TRAITES AR OPEN");
+                    }
+                    catch (Exception alertException)
+                    {
+                        WriteLog(
+                            "   Traites technical alert could not be sent" +
+                            " - Details : " +
+                            GetDetailedExceptionMessage(alertException));
+                    }
+                }
+                finally
+                {
+                    graphService = null;
+                }
+            }
+        }
+
+        private void ValidateTraitesConfiguration()
+        {
+            if (string.IsNullOrWhiteSpace(sql_connexion))
+                throw new InvalidOperationException(
+                    "sql_connexion is empty for Traites processing");
+            if (string.IsNullOrWhiteSpace(sql_dss_copie))
+                throw new InvalidOperationException(
+                    "sql_dss_copie is empty for Traites extraction");
+            if (string.IsNullOrWhiteSpace(sql_creation_compte))
+                throw new InvalidOperationException(
+                    "sql_creation_compte is empty for Traites scheduling");
+            if (string.IsNullOrWhiteSpace(fr_lcrna_graph_send_as))
+                throw new InvalidOperationException(
+                    "fr_lcrna_graph_send_as is empty for Traites sending");
+        }
+
+        private int ProcessTraitesArOpenExtraction(out int extractedRows)
+        {
+            const string sourceSql = @"
+SELECT DISTINCT
+       ar_open.brcustnbr,
+       customer.cust_name,
+       customer.credit_mgr_code,
+       CASE
+           WHEN ar_open.PaySeqNbr IS NULL THEN ar_open.BrInvoiceNbr
+           ELSE ar_open.BrInvoiceNbr + RIGHT(ar_open.PaySeqNbr,2)
+       END AS [N° de Piéce],
+       CAST(ar_open.InvoiceDt AS smalldatetime) AS [Date Piéce],
+       CAST(ar_open.DueDt AS smalldatetime) AS Date_Echéance,
+       ar_open.CustOrderNbr AS [Votre N° de commande],
+       CASE
+           WHEN ar_open.CurrencyCd='USD' THEN ar_open.ForeignSalesAmt
+           ELSE ar_open.TotalSalesAmt
+       END AS [Montant TTC],
+       ar_open.SourceCd
+FROM dbo.ar_open AS ar_open
+INNER JOIN dbo.customer AS customer
+    ON ar_open.BrCustNbr=customer.branch_customer_nbr
+WHERE ar_open.BrCustNbr IN
+(
+    SELECT branch_customer_nbr
+    FROM dbo.customer
+    WHERE branch_nbr='21'
+      AND Apply_Cash_Flg='D'
+      AND StatusCustFlg<>'D'
+)
+AND ar_open.CheckApplyCd='T';";
+
+            using (var sourceConnection = new SqlConnection(sql_dss_copie))
+            using (var sourceCommand = new SqlCommand(sourceSql, sourceConnection))
+            using (var targetConnection = new SqlConnection(sql_connexion))
+            {
+                sourceCommand.CommandTimeout = 0;
+                sourceConnection.Open();
+                targetConnection.Open();
+
+                using (SqlTransaction transaction =
+                    targetConnection.BeginTransaction())
+                {
+                    try
+                    {
+                        using (var truncate = new SqlCommand(
+                            "TRUNCATE TABLE dbo.T_Credit_Traites_AR_OPEN_TMP;",
+                            targetConnection,
+                            transaction))
+                        {
+                            truncate.CommandTimeout = 300;
+                            truncate.ExecuteNonQuery();
+                        }
+
+                        using (SqlDataReader reader = sourceCommand.ExecuteReader())
+                        using (var bulkCopy = new SqlBulkCopy(
+                            targetConnection,
+                            SqlBulkCopyOptions.TableLock,
+                            transaction))
+                        {
+                            bulkCopy.DestinationTableName =
+                                "dbo.T_Credit_Traites_AR_OPEN_TMP";
+                            bulkCopy.BulkCopyTimeout = 0;
+                            bulkCopy.ColumnMappings.Add("brcustnbr", "brcustnbr");
+                            bulkCopy.ColumnMappings.Add("cust_name", "cust_name");
+                            bulkCopy.ColumnMappings.Add(
+                                "credit_mgr_code",
+                                "credit_mgr_code");
+                            bulkCopy.ColumnMappings.Add(
+                                "N° de Piéce",
+                                "N° de Piéce");
+                            bulkCopy.ColumnMappings.Add(
+                                "Date Piéce",
+                                "Date Piéce");
+                            bulkCopy.ColumnMappings.Add(
+                                "Date_Echéance",
+                                "Date_Echéance");
+                            bulkCopy.ColumnMappings.Add(
+                                "Votre N° de commande",
+                                "Votre N° de commande");
+                            bulkCopy.ColumnMappings.Add(
+                                "Montant TTC",
+                                "Montant TTC");
+                            bulkCopy.ColumnMappings.Add("SourceCd", "SourceCd");
+                            bulkCopy.WriteToServer(reader);
+                        }
+
+                        using (var count = new SqlCommand(
+                            "SELECT COUNT(*) FROM " +
+                            "dbo.T_Credit_Traites_AR_OPEN_TMP;",
+                            targetConnection,
+                            transaction))
+                        {
+                            extractedRows = Convert.ToInt32(
+                                count.ExecuteScalar());
+                        }
+
+                        int insertedRows;
+                        using (var insert = new SqlCommand(@"
+INSERT INTO dbo.T_Credit_Traites_AR_OPEN
+(
+    brcustnbr,
+    cust_name,
+    credit_mgr_code,
+    [N° de Piéce],
+    [Date Piéce],
+    Date_Echéance,
+    [Votre N° de commande],
+    [Montant TTC],
+    SourceCd,
+    top_traite
+)
+SELECT source.brcustnbr,
+       source.cust_name,
+       source.credit_mgr_code,
+       source.[N° de Piéce],
+       source.[Date Piéce],
+       source.Date_Echéance,
+       source.[Votre N° de commande],
+       source.[Montant TTC],
+       source.SourceCd,
+       'N'
+FROM dbo.T_Credit_Traites_AR_OPEN_TMP AS source
+LEFT JOIN dbo.T_Credit_Traites_AR_OPEN AS target
+    ON target.brcustnbr=source.brcustnbr
+   AND target.[N° de Piéce]=source.[N° de Piéce]
+   AND target.Date_Echéance=source.Date_Echéance
+WHERE target.brcustnbr IS NULL;",
+                            targetConnection,
+                            transaction))
+                        {
+                            insert.CommandTimeout = 300;
+                            insertedRows = insert.ExecuteNonQuery();
+                        }
+
+                        transaction.Commit();
+                        return insertedRows;
+                    }
+                    catch
+                    {
+                        transaction.Rollback();
+                        throw;
+                    }
+                }
+            }
+        }
+
+        private void ProcessTraitesSending(
+            out int sentCustomers,
+            out int sentRows,
+            out int removedWithoutContact)
+        {
+            sentCustomers = 0;
+            sentRows = 0;
+            removedWithoutContact = 0;
+
+            DataTable customers = FillDataTable(
+                sql_connexion,
+                @"SELECT DISTINCT brcustnbr
+                  FROM dbo.T_Credit_Traites_AR_OPEN
+                  WHERE top_traite='N'
+                  ORDER BY brcustnbr;");
+
+            const string body =
+                "Bonjour Madame, Monsieur,<br/><br/>" +
+                "Vous avez opté pour le paiement par lcr automatique.<br/>" +
+                "Afin de vous aider au mieux dans la gestion de votre " +
+                "trésorerie, nous vous adressons ci-joint le détail des " +
+                "prélèvements à venir.<br/>" +
+                "Si il vous manque des factures ou avoirs, vous pouvez vous " +
+                "connecter sur votre compte Ingram micro Rubrique " +
+                "<a href='https://fr-new.ingrammicro.com/Site/InvoiceList'>" +
+                "Mon compte/ Mes factures</a> ou nous contacter sur " +
+                "l’adresse mail <a href='mailto:duplicatas-France@ingrammicro.com'>" +
+                "duplicatas-France@ingrammicro.com</a><br/>" +
+                "Si vous souhaitez l’arrêt de ce service n’hésitez pas à " +
+                "contacter votre gestionnaire de crédit.<br/><br/>" +
+                "Nous restons bien évidemment à votre disposition,<br/>" +
+                "Cordialement<br/>L’équipe Finance Ingram Micro";
+
+            foreach (DataRow customerRow in customers.Rows)
+            {
+                string customerCode =
+                    Convert.ToString(customerRow["brcustnbr"]).Trim();
+
+                string recipients = GetTraitesRecipients(customerCode);
+                if (BuildRecipients(recipients).Count == 0)
+                {
+                    WriteLog(
+                        "       Traites customer has no recovery contact" +
+                        " - Customer : " + customerCode);
+                    continue;
+                }
+
+                DataTable details = FillDataTable(
+                    sql_connexion,
+                    @"SELECT brcustnbr AS [Code Client],
+                             cust_name AS [Nom Client],
+                             [N° de Piéce],
+                             [Votre N° de commande],
+                             [Date Piéce],
+                             [Montant TTC],
+                             Date_Echéance AS [Date Echéance]
+                      FROM dbo.T_Credit_Traites_AR_OPEN
+                      WHERE brcustnbr=@CUSTOMER
+                        AND top_traite='N'
+                      ORDER BY Date_Echéance,[Date Piéce];",
+                    new SqlParameter(
+                        "@CUSTOMER",
+                        SqlDbType.VarChar,
+                        50)
+                    {
+                        Value = customerCode
+                    });
+
+                if (details.Rows.Count == 0)
+                    continue;
+
+                string filePath = Path.Combine(
+                    tempFolder,
+                    "Traites_Client_" +
+                    CleanFileName(customerCode) +
+                    "_" +
+                    DateTime.Now.ToString(
+                        "yyyyMMdd_HHmmss",
+                        CultureInfo.InvariantCulture) +
+                    ".xlsx");
+
+                try
+                {
+                    CreateTraitesWorkbook(details, filePath);
+
+                    SendGraphMailWithAttachments(
+                        fr_lcrna_graph_send_as,
+                        recipients,
+                        "",
+                        "",
+                        "Le détail de votre prélèvement automatique (" +
+                        customerCode + ")",
+                        body,
+                        new List<string> { filePath });
+
+                    int affected;
+                    using (var connection = new SqlConnection(sql_connexion))
+                    using (var command = new SqlCommand(@"
+UPDATE dbo.T_Credit_Traites_AR_OPEN
+SET top_traite='O',
+    envoye_le=GETDATE()
+WHERE brcustnbr=@CUSTOMER
+  AND top_traite='N';", connection))
+                    {
+                        command.CommandTimeout = 300;
+                        command.Parameters.Add(
+                            "@CUSTOMER",
+                            SqlDbType.VarChar,
+                            50).Value = customerCode;
+                        connection.Open();
+                        affected = command.ExecuteNonQuery();
+                    }
+
+                    sentCustomers++;
+                    sentRows += affected;
+                    WriteLog(
+                        "       Traites customer email sent" +
+                        " - Customer : " + customerCode +
+                        " - Recipient(s) : " + recipients +
+                        " - Row(s) : " + affected);
+                }
+                finally
+                {
+                    try
+                    {
+                        if (File.Exists(filePath))
+                            File.Delete(filePath);
+                    }
+                    catch (Exception cleanupException)
+                    {
+                        WriteLog(
+                            "       Traites temporary workbook cleanup error" +
+                            " - File : " + filePath +
+                            " - Error : " + cleanupException.Message);
+                    }
+                }
+            }
+
+            // Historical behavior: rows still pending after the loop correspond
+            // to customers without a configured recovery contact and are removed.
+            using (var connection = new SqlConnection(sql_connexion))
+            using (var command = new SqlCommand(
+                "DELETE FROM dbo.T_Credit_Traites_AR_OPEN " +
+                "WHERE top_traite='N';",
+                connection))
+            {
+                command.CommandTimeout = 300;
+                connection.Open();
+                removedWithoutContact = command.ExecuteNonQuery();
+            }
+        }
+
+        private string GetTraitesRecipients(string customerCode)
+        {
+            DataTable contacts = FillDataTable(
+                sql_connexion,
+                @"SELECT DISTINCT Email
+                  FROM dbo.T_Credit_Review_CONTACT_FICHE
+                  WHERE code_client=@CUSTOMER
+                    AND id_fonction IN (6,7)
+                    AND NULLIF(LTRIM(RTRIM(Email)),'') IS NOT NULL;",
+                new SqlParameter(
+                    "@CUSTOMER",
+                    SqlDbType.VarChar,
+                    50)
+                {
+                    Value = customerCode ?? ""
+                });
+
+            return string.Join(
+                ";",
+                contacts.AsEnumerable()
+                    .Select(row => Convert.ToString(row["Email"]).Trim())
+                    .Where(IsEmail)
+                    .Distinct(StringComparer.OrdinalIgnoreCase));
+        }
+
+        private static void CreateTraitesWorkbook(
+            DataTable details,
+            string outputPath)
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(outputPath));
+
+            using (var workbook = new XLWorkbook())
+            {
+                IXLWorksheet worksheet = workbook.AddWorksheet("traites");
+                worksheet.Cell(1, 1).InsertTable(details, "Traites", true);
+                worksheet.SheetView.FreezeRows(1);
+                worksheet.Row(1).Style.Font.Bold = true;
+                worksheet.Row(1).Style.Fill.BackgroundColor = XLColor.DarkBlue;
+                worksheet.Row(1).Style.Font.FontColor = XLColor.White;
+                worksheet.Columns().AdjustToContents(1, 80);
+
+                if (details.Columns.Contains("Montant TTC"))
+                {
+                    int amountColumn =
+                        details.Columns["Montant TTC"].Ordinal + 1;
+                    worksheet.Column(amountColumn)
+                        .Style.NumberFormat.Format = "#,##0.00";
+                }
+
+                workbook.SaveAs(outputPath);
+            }
+        }
+
         public void Planification_Auto_Calcul_Encours(
             string sql_con,
             string logs,
@@ -5123,10 +5967,29 @@ ORDER BY e.id;";
                         " - Recipient : " + recipient +
                         " - Error : " + ex.Message);
 
-                    SendTechnicalAlert(
-                        nameof(ProcessPendingOpeningTemplates),
-                        "Dossier " + dossierId + " - " + ex.Message,
-                        "OPENING TEMPLATE");
+                    bool isMissingRgpdDivision =
+                        mailName.Equals(
+                            "rgpd",
+                            StringComparison.OrdinalIgnoreCase) &&
+                        ex.Message.IndexOf(
+                            "No active RGPD subscription division found",
+                            StringComparison.OrdinalIgnoreCase) >= 0;
+
+                    if (isMissingRgpdDivision)
+                    {
+                        WriteLog(
+                            "       RGPD technical alert suppressed" +
+                            " - Queue ID : " + id +
+                            " - Dossier : " + dossierId +
+                            " - Reason : no active RGPD subscription division");
+                    }
+                    else
+                    {
+                        SendTechnicalAlert(
+                            nameof(ProcessPendingOpeningTemplates),
+                            "Dossier " + dossierId + " - " + ex.Message,
+                            "OPENING TEMPLATE");
+                    }
                 }
             }
 
@@ -6733,17 +7596,33 @@ ORDER BY q.id;";
                 sendAs,
                 fr_credit_review_graph_send_as,
                 StringComparison.OrdinalIgnoreCase);
+            bool isLcrnaSender = string.Equals(
+                sendAs,
+                fr_lcrna_graph_send_as,
+                StringComparison.OrdinalIgnoreCase);
+            bool isFacturationSender = string.Equals(
+                sendAs,
+                fr_facturation_graph_send_as,
+                StringComparison.OrdinalIgnoreCase);
 
-            var sender = isCreditReviewSender
-                ? new Recipient
+            string senderDisplayName = isCreditReviewSender
+                ? "Ingram Micro - Service Analyse Crédit"
+                : isLcrnaSender
+                    ? "Ingram Micro - Service Finances"
+                    : isFacturationSender
+                        ? "Ingram Micro - Service Facturation"
+                        : "";
+
+            var sender = string.IsNullOrWhiteSpace(senderDisplayName)
+                ? null
+                : new Recipient
                 {
                     EmailAddress = new EmailAddress
                     {
                         Address = sendAs,
-                        Name = "Ingram Micro - Service Analyse Crédit"
+                        Name = senderDisplayName
                     }
-                }
-                : null;
+                };
 
             var message = new Message { Subject = subject, From = sender, Sender = sender, Body = new ItemBody { ContentType = BodyType.Html, Content = html }, ToRecipients = BuildRecipients(to), CcRecipients = BuildRecipients(cc), BccRecipients = BuildRecipients(bcc), Attachments = new List<Microsoft.Graph.Models.Attachment>() };
             if (message.ToRecipients.Count == 0) throw new InvalidOperationException("Invalid recipients for " + subject);

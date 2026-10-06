@@ -718,7 +718,7 @@ WHERE SK_VALID = 0 AND PARAMETER = @PARAMETER";
 
                 // insertion dans sql
                 strSql = "select *  from filtre_code_intra";
-                strSql2 = "select *  from arp0292";
+                strSql2 = "select top 0 * from arp0292";
                 msg = InsertSQL(strSql, strSql2, ConBaseMDB, "ARP0292");
                 if (msg != "")
                 {
@@ -885,7 +885,7 @@ WHERE SK_VALID = 0 AND PARAMETER = @PARAMETER";
 
                 // insertion dans sql
                 strSql = "select *  from filtre_code_intra";
-                strSql2 = "select *  from arp0292";
+                strSql2 = "select top 0 * from arp0292";
                 msg = InsertSQL_with_odbc(strSql, strSql2, ConBaseMDB, "ARP0292");
                 if (msg != "")
                 {
@@ -1016,7 +1016,7 @@ WHERE SK_VALID = 0 AND PARAMETER = @PARAMETER";
 
                 // insertion dans sql
                 strSql = "select *  from filtre_code_intra";
-                strSql2 = "select *  from pup7902";
+                strSql2 = "select top 0 * from pup7902";
                 msg = InsertSQL(strSql, strSql2, ConBaseMDB, "PUP7902");
                 if (msg != "")
                 {
@@ -1160,7 +1160,7 @@ WHERE SK_VALID = 0 AND PARAMETER = @PARAMETER";
 
                 // insertion dans sql
                 strSql = "select *  from filtre_code_intra";
-                strSql2 = "select *  from pup7902";
+                strSql2 = "select top 0 * from pup7902";
                 msg = InsertSQL_with_odbc(strSql, strSql2, ConBaseMDB, "PUP7902");
                 if (msg != "")
                 {
