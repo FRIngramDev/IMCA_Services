@@ -5759,7 +5759,8 @@ WHERE e.nom_mail IN('1ere_relance_expert','1ere_relance_export')
   AND NOT EXISTS(SELECT 1 FROM dbo.envoi_mail x WHERE x.id_dossier=e.id_dossier AND x.nom_mail IN('refus_expert','refus_export') AND x.id>e.id);
 UPDATE s SET Comment='3'
 FROM dbo.T_Statut s
-WHERE EXISTS(SELECT 1 FROM dbo.envoi_mail e WHERE e.id_dossier=s.idDossier AND e.top_traite='N' AND e.nom_mail IN('refus_expert','refus_export'));";
+WHERE NULLIF(LTRIM(RTRIM(s.Comment)), '') IS NULL
+  AND EXISTS(SELECT 1 FROM dbo.envoi_mail e WHERE e.id_dossier=s.idDossier AND e.top_traite='N' AND e.nom_mail IN('refus_expert','refus_export'));";
             ExecuteNonQuery(sql_creation_compte, refusal);
         }
 

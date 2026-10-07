@@ -503,8 +503,15 @@ namespace APPLE_EMAILS_MANAGEMENT_FR
 
         private string DownloadMatchingAttachment(string messageId, string prefix, string destinationFolder)
         {
-            AttachmentCollectionResponse response = graphService.Users[sharedmailbox_name]
-                .Messages[messageId].Attachments.GetAsync().GetAwaiter().GetResult();
+            AttachmentCollectionResponse response = ExecuteGraphWithRetry(
+                () => graphService.Users[sharedmailbox_name]
+                    .Messages[messageId]
+                    .Attachments
+                    .GetAsync()
+                    .GetAwaiter()
+                    .GetResult(),
+                "List attachments for message " + messageId +
+                " in " + sharedmailbox_name);
 
             foreach (Microsoft.Graph.Models.Attachment attachment in response?.Value ?? new List<Microsoft.Graph.Models.Attachment>())
             {
@@ -512,9 +519,20 @@ namespace APPLE_EMAILS_MANAGEMENT_FR
                 if (file == null || !(file.Name ?? "").StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) continue;
 
                 if (file.ContentBytes == null && !string.IsNullOrWhiteSpace(file.Id))
-                    file = graphService.Users[sharedmailbox_name].Messages[messageId]
-                        .Attachments[file.Id].GetAsync().GetAwaiter().GetResult()
-                        as Microsoft.Graph.Models.FileAttachment;
+                {
+                    string attachmentId = file.Id;
+                    file = ExecuteGraphWithRetry(
+                        () => graphService.Users[sharedmailbox_name]
+                            .Messages[messageId]
+                            .Attachments[attachmentId]
+                            .GetAsync()
+                            .GetAwaiter()
+                            .GetResult()
+                            as Microsoft.Graph.Models.FileAttachment,
+                        "Get attachment " + attachmentId +
+                        " for message " + messageId +
+                        " in " + sharedmailbox_name);
+                }
 
                 if (file?.ContentBytes == null)
                     throw new InvalidOperationException("Attachment content is empty : " + attachment.Name);
@@ -1204,48 +1222,128 @@ WHERE id_mailboxe=@ID;";
 
         private Message GetCompleteMessage(string id)
         {
-            return graphService.Users[sharedmailbox_name].Messages[id].GetAsync(c =>
-            {
-                c.QueryParameters.Select = new[] { "id", "subject", "body", "bodyPreview", "from", "toRecipients", "ccRecipients", "receivedDateTime", "createdDateTime", "conversationId", "hasAttachments" };
-            }).GetAwaiter().GetResult();
+            return ExecuteGraphWithRetry(
+                () => graphService.Users[sharedmailbox_name]
+                    .Messages[id]
+                    .GetAsync(c =>
+                    {
+                        c.QueryParameters.Select = new[]
+                        {
+                            "id", "subject", "body", "bodyPreview", "from",
+                            "toRecipients", "ccRecipients", "receivedDateTime",
+                            "createdDateTime", "conversationId", "hasAttachments"
+                        };
+                    })
+                    .GetAwaiter()
+                    .GetResult(),
+                "Get complete message " + id +
+                " for " + sharedmailbox_name);
         }
 
         private byte[] GetMimeContent(string id)
         {
-            using (Stream stream = graphService.Users[sharedmailbox_name].Messages[id].Content.GetAsync().GetAwaiter().GetResult())
-            using (MemoryStream memory = new MemoryStream())
-            {
-                stream.CopyTo(memory);
-                return memory.ToArray();
-            }
+            return ExecuteGraphWithRetry(
+                () =>
+                {
+                    using (Stream stream = graphService.Users[sharedmailbox_name]
+                        .Messages[id]
+                        .Content
+                        .GetAsync()
+                        .GetAwaiter()
+                        .GetResult())
+                    using (MemoryStream memory = new MemoryStream())
+                    {
+                        stream.CopyTo(memory);
+                        return memory.ToArray();
+                    }
+                },
+                "Get MIME content for message " + id +
+                " in " + sharedmailbox_name);
         }
 
         private MailFolder GetInputFolder()
         {
-            return string.Equals(sharedmailbox_folder_in, "Inbox", StringComparison.OrdinalIgnoreCase)
-                ? graphService.Users[sharedmailbox_name].MailFolders["inbox"].GetAsync().GetAwaiter().GetResult()
-                : GetChildFolderByName(sharedmailbox_folder_in);
+            if (string.Equals(
+                sharedmailbox_folder_in,
+                "Inbox",
+                StringComparison.OrdinalIgnoreCase))
+            {
+                return ExecuteGraphWithRetry(
+                    () => graphService.Users[sharedmailbox_name]
+                        .MailFolders["inbox"]
+                        .GetAsync()
+                        .GetAwaiter()
+                        .GetResult(),
+                    "Get input folder Inbox for " + sharedmailbox_name);
+            }
+
+            return GetChildFolderByName(sharedmailbox_folder_in);
         }
 
         private MailFolder GetChildFolderByName(string nameFolder)
         {
             string safe = (nameFolder ?? "").Replace("'", "''");
-            MailFolderCollectionResponse folders = graphService.Users[sharedmailbox_name].MailFolders["inbox"].ChildFolders
-                .GetAsync(c => c.QueryParameters.Filter = "displayName eq '" + safe + "'").GetAwaiter().GetResult();
+
+            MailFolderCollectionResponse folders = ExecuteGraphWithRetry(
+                () => graphService.Users[sharedmailbox_name]
+                    .MailFolders["inbox"]
+                    .ChildFolders
+                    .GetAsync(c =>
+                    {
+                        c.QueryParameters.Filter =
+                            "displayName eq '" + safe + "'";
+                    })
+                    .GetAwaiter()
+                    .GetResult(),
+                "Find folder " + nameFolder +
+                " for " + sharedmailbox_name);
+
             MailFolder folder = folders?.Value?.FirstOrDefault();
-            if (folder == null) throw new DirectoryNotFoundException("Folder not found : " + nameFolder);
+            if (folder == null)
+                throw new DirectoryNotFoundException(
+                    "Folder not found : " + nameFolder);
+
             return folder;
         }
 
         private void MarkEmailAsRead(string id)
         {
-            graphService.Users[sharedmailbox_name].Messages[id].PatchAsync(new Message { IsRead = true }).GetAwaiter().GetResult();
+            ExecuteGraphWithRetry(
+                () =>
+                {
+                    graphService.Users[sharedmailbox_name]
+                        .Messages[id]
+                        .PatchAsync(new Message { IsRead = true })
+                        .GetAwaiter()
+                        .GetResult();
+                    return true;
+                },
+                "Mark message as read " + id +
+                " in " + sharedmailbox_name);
         }
 
         private void MoveEmail(string id, string destinationId)
         {
-            var request = new Microsoft.Graph.Users.Item.Messages.Item.Move.MovePostRequestBody { DestinationId = destinationId };
-            graphService.Users[sharedmailbox_name].Messages[id].Move.PostAsync(request).GetAwaiter().GetResult();
+            ExecuteGraphWithRetry(
+                () =>
+                {
+                    var request =
+                        new Microsoft.Graph.Users.Item.Messages.Item.Move
+                            .MovePostRequestBody
+                        {
+                            DestinationId = destinationId
+                        };
+
+                    graphService.Users[sharedmailbox_name]
+                        .Messages[id]
+                        .Move
+                        .PostAsync(request)
+                        .GetAwaiter()
+                        .GetResult();
+                    return true;
+                },
+                "Move message " + id +
+                " in " + sharedmailbox_name);
         }
 
         private void SendTechnicalIssueMail(string method, string error, string type)
