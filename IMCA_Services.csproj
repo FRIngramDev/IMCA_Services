@@ -315,6 +315,7 @@
     <Compile Include="Brother_load_Bid\Brother_load_Bid.cs" />
     <Compile Include="Credit_Emails_Management_FR\Credit_Emails_Management_FR.cs" />
     <Compile Include="Encodage_SPLA_FR\Encodage_SPLA_FR.cs" />
+    <Compile Include="Flux_Ent_Emails_Management_FR\Flux_Ent_Management_FR.cs" />
     <Compile Include="Fortinet_load_Bid\Fortinet_load_bid.cs" />
     <Compile Include="Gestion_Requete_FR\Gestion_Requete_FR.cs" />
     <Compile Include="Idep_FR\Idep_FR.cs" />
@@ -371,6 +372,7 @@
       <Install>false</Install>
     </BootstrapperPackage>
   </ItemGroup>
+  <ItemGroup />
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
   <Import Project="packages\System.ValueTuple.4.6.2\build\net471\System.ValueTuple.targets" Condition="Exists('packages\System.ValueTuple.4.6.2\build\net471\System.ValueTuple.targets')" />
   <Target Name="EnsureNuGetPackageBuildImports" BeforeTargets="PrepareForBuild">
