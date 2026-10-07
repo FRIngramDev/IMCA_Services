@@ -1,15 +1,19 @@
 ﻿using Microsoft.Graph;
 using Microsoft.Graph.Models;
+using Microsoft.Graph.Models.ODataErrors;
+using Microsoft.Kiota.Abstractions;
 using Newtonsoft.Json;
 using System;
 using System.Collections.Generic;
-using System.Data.SqlClient;
-using System.Text.RegularExpressions;
-using System.Net;
 using System.Data;
+using System.Data.SqlClient;
+using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Net;
+using System.Net.Http;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 
 namespace GESTION_REQUETE_FR
@@ -62,6 +66,7 @@ namespace GESTION_REQUETE_FR
         private string sql_incentives_parameter_global = "";       // Nom du param incentives
 
         // ----- Client Microsoft Graph (utilisé pour lecture/envoi emails) -----
+        private static readonly object logSyncRoot = new object();
         private GraphServiceClient graphService = null;
 
 
@@ -256,7 +261,7 @@ namespace GESTION_REQUETE_FR
                                 }
                                 catch (Exception ex)
                                 {
-                                    WriteToFile("   Error processing email : " + ex.Message + " at " + DateTime.Now.ToString("dd/MM/yyyy HH:mm:ss"));
+                                    WriteToFile("   Error processing email : " + GetDetailedExceptionMessage(ex) + " at " + DateTime.Now.ToString("dd/MM/yyyy HH:mm:ss"));
 
                                     try
                                     {
@@ -271,7 +276,7 @@ namespace GESTION_REQUETE_FR
                                     }
                                     catch (Exception mailEx)
                                     {
-                                        WriteToFile("   Error sending alert email : " + mailEx.Message);
+                                        WriteToFile("   Error sending alert email : " + GetDetailedExceptionMessage(mailEx));
                                     }
 
                                     try
@@ -280,7 +285,7 @@ namespace GESTION_REQUETE_FR
                                     }
                                     catch (Exception moveEx)
                                     {
-                                        WriteToFile("   Error moving email to Erreur folder : " + moveEx.Message);
+                                        WriteToFile("   Error moving email to Erreur folder : " + GetDetailedExceptionMessage(moveEx));
                                     }
                                 }
                             }
@@ -302,13 +307,13 @@ namespace GESTION_REQUETE_FR
                     }
                     catch (Exception e)
                     {
-                        WriteToFile("   Error get emails : " + e.Message);
+                        WriteToFile("   Error get emails : " + GetDetailedExceptionMessage(e));
                     }
                 }
             }
             catch (Exception ex)
             {
-                WriteToFile("Global error Read_Email_with_Graph : " + ex.Message);
+                WriteToFile("Global error Read_Email_with_Graph : " + GetDetailedExceptionMessage(ex));
             }
             finally
             {
@@ -339,10 +344,21 @@ namespace GESTION_REQUETE_FR
         private void ProcessGestionRequeteEmail(GraphServiceClient service, Message summary)
         {
             // Récupération du message complet avec les champs nécessaires via Graph
-            Message email = service.Users[sharedmailbox_name].Messages[summary.Id]
-                .GetAsync(c => c.QueryParameters.Select = new string[]
-                { "id", "subject", "from", "ccRecipients", "body", "hasAttachments" })
-                .GetAwaiter().GetResult();
+            Message email = ExecuteGraphWithRetry(
+                () => service.Users[sharedmailbox_name]
+                    .Messages[summary.Id]
+                    .GetAsync(c => c.QueryParameters.Select = new string[]
+                    {
+                        "id",
+                        "subject",
+                        "from",
+                        "ccRecipients",
+                        "body",
+                        "hasAttachments"
+                    })
+                    .GetAwaiter()
+                    .GetResult(),
+                "Read complete Gestion Requete message");
 
             // Normalisation des valeurs lues
             string subject = email.Subject ?? "";
@@ -390,23 +406,41 @@ namespace GESTION_REQUETE_FR
 
         }
 
-        private string SaveMessageAsEml(GraphServiceClient service, string messageId)
+        private string SaveMessageAsEml(
+            GraphServiceClient service,
+            string messageId)
         {
-            string path = Path.Combine(temp_folder,
-                global_application_name + "_EMAIL_" + DateTime.Now.ToString("yyyyMMdd_HHmmssfff") + ".eml");
+            string path = Path.Combine(
+                temp_folder,
+                global_application_name + "_EMAIL_" +
+                DateTime.Now.ToString("yyyyMMdd_HHmmssfff") + ".eml");
+
             try
             {
-                using (Stream mime = service.Users[sharedmailbox_name].Messages[messageId]
-                    .Content.GetAsync().GetAwaiter().GetResult())
-                using (FileStream output = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.None))
+                using (Stream mime = ExecuteGraphWithRetry(
+                    () => service.Users[sharedmailbox_name]
+                        .Messages[messageId]
+                        .Content
+                        .GetAsync()
+                        .GetAwaiter()
+                        .GetResult(),
+                    "Download Gestion Requete MIME content"))
+                using (FileStream output = new FileStream(
+                    path,
+                    FileMode.Create,
+                    FileAccess.Write,
+                    FileShare.None))
                 {
                     mime.CopyTo(output);
                 }
+
                 return path;
             }
             catch (Exception ex)
             {
-                WriteToFile("Unable to save EML for message " + messageId + " : " + ex.Message);
+                WriteToFile(
+                    "Unable to save EML for message " + messageId +
+                    " : " + GetDetailedExceptionMessage(ex));
                 throw;
             }
         }
@@ -460,10 +494,41 @@ SELECT @id,GETDATE(),@user,35,@comment,ISNULL(id_gestionnaire,0) FROM T_Requeteu
         /// Télécharge les pièces jointes d'un message et les enregistre dans le dossier temporaire.
         /// Retourne la liste des chemins vers les fichiers téléchargés.
         /// </summary>
-        private List<string> DownloadAttachments(GraphServiceClient service, string messageId)
+        private List<string> DownloadAttachments(
+            GraphServiceClient service,
+            string messageId)
         {
-            var files = new List<string>(); var r = service.Users[sharedmailbox_name].Messages[messageId].Attachments.GetAsync().GetAwaiter().GetResult();
-            foreach (Attachment a in r?.Value ?? new List<Attachment>()) if (a is FileAttachment f && f.ContentBytes != null && !string.IsNullOrWhiteSpace(f.Name)) { string path = Path.Combine(temp_folder, global_application_name + "_" + CleanFileName(f.Name)); File.WriteAllBytes(path, f.ContentBytes); files.Add(path); }
+            var files = new List<string>();
+
+            AttachmentCollectionResponse response = ExecuteGraphWithRetry(
+                () => service.Users[sharedmailbox_name]
+                    .Messages[messageId]
+                    .Attachments
+                    .GetAsync()
+                    .GetAwaiter()
+                    .GetResult(),
+                "Read Gestion Requete attachments");
+
+            foreach (Attachment attachment in
+                response?.Value ?? new List<Attachment>())
+            {
+                if (attachment is FileAttachment fileAttachment &&
+                    fileAttachment.ContentBytes != null &&
+                    !string.IsNullOrWhiteSpace(fileAttachment.Name))
+                {
+                    string path = Path.Combine(
+                        temp_folder,
+                        global_application_name + "_" +
+                        CleanFileName(fileAttachment.Name));
+
+                    File.WriteAllBytes(
+                        path,
+                        fileAttachment.ContentBytes);
+
+                    files.Add(path);
+                }
+            }
+
             return files;
         }
 
@@ -474,53 +539,58 @@ SELECT @id,GETDATE(),@user,35,@comment,ISNULL(id_gestionnaire,0) FROM T_Requeteu
         }
 
         private int ExecuteNonQuerySql(string method, string connection, string sql, params SqlParameter[] ps)
-        { 
-            try 
-            { 
-                using (var con = new SqlConnection(connection)) 
-                { con.Open(); 
-                    using (var cmd = new SqlCommand(sql, con)) 
-                    { cmd.CommandTimeout = 300; 
-                        if (ps != null) cmd.Parameters.AddRange(ps); 
-                        return cmd.ExecuteNonQuery(); 
-                    } 
-                } 
-            } catch (Exception ex) 
-            { 
-                SendSqlTechnicalIssueMail(method, sql, ex); throw; 
-            } 
+        {
+            try
+            {
+                using (var con = new SqlConnection(connection))
+                {
+                    con.Open();
+                    using (var cmd = new SqlCommand(sql, con))
+                    {
+                        cmd.CommandTimeout = 300;
+                        if (ps != null) cmd.Parameters.AddRange(ps);
+                        return cmd.ExecuteNonQuery();
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                SendSqlTechnicalIssueMail(method, sql, ex); throw;
+            }
         }
 
         private int ExecuteStoredProcedureSql(string method, string connection, string proc, params SqlParameter[] ps)
-        { 
-            try 
-            { 
-                using (var con = new SqlConnection(connection)) 
-                { con.Open(); 
-                    using (var cmd = new SqlCommand(proc, con)) 
-                    { cmd.CommandType = CommandType.StoredProcedure; 
+        {
+            try
+            {
+                using (var con = new SqlConnection(connection))
+                {
+                    con.Open();
+                    using (var cmd = new SqlCommand(proc, con))
+                    {
+                        cmd.CommandType = CommandType.StoredProcedure;
                         cmd.CommandTimeout = 300; if (ps != null) cmd.Parameters.AddRange(ps);
-                        return cmd.ExecuteNonQuery(); 
-                    } 
-                } 
-            } 
-            catch (Exception ex) 
-            { 
-                SendSqlTechnicalIssueMail(method, proc, ex); throw; 
-            } 
+                        return cmd.ExecuteNonQuery();
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                SendSqlTechnicalIssueMail(method, proc, ex); throw;
+            }
         }
 
         private static SqlParameter P(string name, object value) => new SqlParameter(name, value ?? DBNull.Value);
-        private int ExtractNumber(string text, string pattern) 
-        { 
-            var m = Regex.Match(text ?? "", pattern, RegexOptions.IgnoreCase); 
-            return m.Success && int.TryParse(m.Groups[1].Value, out int n) ? n : 0; 
+        private int ExtractNumber(string text, string pattern)
+        {
+            var m = Regex.Match(text ?? "", pattern, RegexOptions.IgnoreCase);
+            return m.Success && int.TryParse(m.Groups[1].Value, out int n) ? n : 0;
         }
-        private string ExtractPeriod(string body) 
-        { 
-            var d = Regex.Match(body ?? "", @"DATE DE DEBUT[^0-9]*(\d{2}/\d{2}/\d{4})", RegexOptions.IgnoreCase); 
-            var f = Regex.Match(body ?? "", @"DATE DE FIN[^0-9]*(\d{2}/\d{2}/\d{4})", RegexOptions.IgnoreCase); 
-            return (d.Success ? d.Groups[1].Value : "") + " au " + (f.Success ? f.Groups[1].Value : ""); 
+        private string ExtractPeriod(string body)
+        {
+            var d = Regex.Match(body ?? "", @"DATE DE DEBUT[^0-9]*(\d{2}/\d{2}/\d{4})", RegexOptions.IgnoreCase);
+            var f = Regex.Match(body ?? "", @"DATE DE FIN[^0-9]*(\d{2}/\d{2}/\d{4})", RegexOptions.IgnoreCase);
+            return (d.Success ? d.Groups[1].Value : "") + " au " + (f.Success ? f.Groups[1].Value : "");
         }
 
         private string HtmlToText(string html) => WebUtility.HtmlDecode(Regex.Replace(Regex.Replace(html ?? "", "<br\\s*/?>", "\n", RegexOptions.IgnoreCase), "<[^>]+>", " ")).Trim();
@@ -532,41 +602,54 @@ SELECT @id,GETDATE(),@user,35,@comment,ISNULL(id_gestionnaire,0) FROM T_Requeteu
         /// Le nombre d'emails récupérés est contrôlé par 'number_of_mails' et le filtre
         /// par la date de début si défini.
         /// </summary>
-        private MessageCollectionResponse GetMessagesToProcess(GraphServiceClient graphService, string folderId)
+        private MessageCollectionResponse GetMessagesToProcess(
+            GraphServiceClient graphService,
+            string folderId)
         {
-            int topEmails = 10;
+            int topEmails;
 
-            if (!int.TryParse(number_of_mails, out topEmails))
+            if (!int.TryParse(number_of_mails, out topEmails) || topEmails <= 0)
             {
                 topEmails = 10;
             }
 
-            return graphService.Users[sharedmailbox_name]
-                .MailFolders[folderId]
-                .Messages
-                .GetAsync(config =>
-                {
-                    config.QueryParameters.Top = topEmails;
-                    config.QueryParameters.Orderby = new string[] { "receivedDateTime asc" };
-                    config.QueryParameters.Select = new string[]
-                    {
-                        "id",
-                        "subject",
-                        "from",
-                        "hasAttachments",
-                        "receivedDateTime",
-                        "isRead"
-                    };
+            string filter = BuildMessageFilter();
 
-                    string filter = BuildMessageFilter();
+            WriteToFile(
+                "   Listing Graph messages" +
+                " - Mailbox : " + sharedmailbox_name +
+                " - Folder : " + sharedmailbox_folder_in +
+                " - Filter : " +
+                (string.IsNullOrWhiteSpace(filter) ? "<none>" : filter) +
+                " - Top : " + topEmails);
 
-                    if (!string.IsNullOrWhiteSpace(filter))
+            return ExecuteGraphWithRetry(
+                () => graphService.Users[sharedmailbox_name]
+                    .MailFolders[folderId]
+                    .Messages
+                    .GetAsync(config =>
                     {
-                        config.QueryParameters.Filter = filter;
-                    }
-                })
-                .GetAwaiter()
-                .GetResult();
+                        config.QueryParameters.Top = topEmails;
+                        config.QueryParameters.Orderby =
+                            new string[] { "receivedDateTime asc" };
+                        config.QueryParameters.Select = new string[]
+                        {
+                            "id",
+                            "subject",
+                            "from",
+                            "hasAttachments",
+                            "receivedDateTime",
+                            "isRead"
+                        };
+
+                        if (!string.IsNullOrWhiteSpace(filter))
+                        {
+                            config.QueryParameters.Filter = filter;
+                        }
+                    })
+                    .GetAwaiter()
+                    .GetResult(),
+                "List Gestion Requete messages");
         }
 
         /// <summary>
@@ -607,67 +690,97 @@ SELECT @id,GETDATE(),@user,35,@comment,ISNULL(id_gestionnaire,0) FROM T_Requeteu
         /// </summary>
         private MailFolder GetInputFolder(GraphServiceClient graphService)
         {
-            if (sharedmailbox_folder_in.ToUpper().Trim() == "INBOX")
+            if (sharedmailbox_folder_in.ToUpperInvariant().Trim() == "INBOX")
             {
-                return graphService.Users[sharedmailbox_name]
-                    .MailFolders["inbox"]
-                    .GetAsync()
-                    .GetAwaiter()
-                    .GetResult();
+                return ExecuteGraphWithRetry(
+                    () => graphService.Users[sharedmailbox_name]
+                        .MailFolders["inbox"]
+                        .GetAsync()
+                        .GetAwaiter()
+                        .GetResult(),
+                    "Read Gestion Requete Inbox folder");
             }
 
-            return GetChildFolderByName(graphService, sharedmailbox_name, sharedmailbox_folder_in);
+            return GetChildFolderByName(
+                graphService,
+                sharedmailbox_name,
+                sharedmailbox_folder_in);
         }
 
-        private MailFolder GetChildFolderByName(GraphServiceClient graphService, string mailbox, string folderName)
+        private MailFolder GetChildFolderByName(
+            GraphServiceClient graphService,
+            string mailbox,
+            string folderName)
         {
             string safeFolderName = EscapeODataString(folderName);
 
-            MailFolderCollectionResponse folders = graphService.Users[mailbox]
-                .MailFolders["inbox"]
-                .ChildFolders
-                .GetAsync(config =>
-                {
-                    config.QueryParameters.Filter = $"displayName eq '{safeFolderName}'";
-                })
-                .GetAwaiter()
-                .GetResult();
+            MailFolderCollectionResponse folders = ExecuteGraphWithRetry(
+                () => graphService.Users[mailbox]
+                    .MailFolders["inbox"]
+                    .ChildFolders
+                    .GetAsync(config =>
+                    {
+                        config.QueryParameters.Filter =
+                            $"displayName eq '{safeFolderName}'";
+                    })
+                    .GetAwaiter()
+                    .GetResult(),
+                "Find Gestion Requete folder " + folderName);
 
-            if (folders == null || folders.Value == null || folders.Value.Count == 0)
+            if (folders == null ||
+                folders.Value == null ||
+                folders.Value.Count == 0)
             {
-                throw new Exception("Folder not found : " + folderName);
+                throw new DirectoryNotFoundException(
+                    "Folder not found under Inbox : " + folderName);
             }
 
             return folders.Value.First();
         }
 
-        private void MarkEmailAsRead(GraphServiceClient graphService, string mailbox, string messageId)
+        private void MarkEmailAsRead(
+            GraphServiceClient graphService,
+            string mailbox,
+            string messageId)
         {
-            Message messageUpdate = new Message
-            {
-                IsRead = true
-            };
-
-            graphService.Users[mailbox]
-                .Messages[messageId]
-                .PatchAsync(messageUpdate)
-                .GetAwaiter()
-                .GetResult();
+            ExecuteGraphWithRetry(
+                () =>
+                {
+                    graphService.Users[mailbox]
+                        .Messages[messageId]
+                        .PatchAsync(new Message { IsRead = true })
+                        .GetAwaiter()
+                        .GetResult();
+                    return true;
+                },
+                "Mark Gestion Requete message as read");
         }
 
-        private void MoveEmail(GraphServiceClient graphService, string mailbox, string messageId, string destinationFolderId)
+        private void MoveEmail(
+            GraphServiceClient graphService,
+            string mailbox,
+            string messageId,
+            string destinationFolderId)
         {
-            var requestBody = new Microsoft.Graph.Users.Item.Messages.Item.Move.MovePostRequestBody
-            {
-                DestinationId = destinationFolderId
-            };
+            var requestBody =
+                new Microsoft.Graph.Users.Item.Messages.Item.Move
+                    .MovePostRequestBody
+                {
+                    DestinationId = destinationFolderId
+                };
 
-            graphService.Users[mailbox]
-                .Messages[messageId]
-                .Move
-                .PostAsync(requestBody)
-                .GetAwaiter()
-                .GetResult();
+            ExecuteGraphWithRetry(
+                () =>
+                {
+                    graphService.Users[mailbox]
+                        .Messages[messageId]
+                        .Move
+                        .PostAsync(requestBody)
+                        .GetAwaiter()
+                        .GetResult();
+                    return true;
+                },
+                "Move Gestion Requete message");
         }
 
         private void EnvoiEmail_with_Graph(GraphServiceClient graphService, string subject, string body, string recipient)
@@ -702,11 +815,158 @@ SELECT @id,GETDATE(),@user,35,@comment,ISNULL(id_gestionnaire,0) FROM T_Requeteu
                 SaveToSentItems = true
             };
 
-            graphService.Users[sharedmailbox_name]
-                .SendMail
-                .PostAsync(requestBody)
-                .GetAwaiter()
-                .GetResult();
+            ExecuteGraphWithRetry(
+                () =>
+                {
+                    graphService.Users[sharedmailbox_name]
+                        .SendMail
+                        .PostAsync(requestBody)
+                        .GetAwaiter()
+                        .GetResult();
+                    return true;
+                },
+                "Send Gestion Requete email : " + subject);
+        }
+
+        private T ExecuteGraphWithRetry<T>(
+            Func<T> action,
+            string operation)
+        {
+            const int maxAttempts = 3;
+            Exception lastException = null;
+
+            for (int attempt = 1; attempt <= maxAttempts; attempt++)
+            {
+                try
+                {
+                    return action();
+                }
+                catch (Exception ex) when (IsTransientGraphError(ex))
+                {
+                    lastException = ex;
+
+                    if (attempt >= maxAttempts)
+                    {
+                        break;
+                    }
+
+                    int delayMilliseconds = attempt * 5000;
+
+                    WriteToFile(
+                        "   Temporary Graph error during " + operation +
+                        " - Attempt : " + attempt + "/" + maxAttempts +
+                        " - Retry in : " + delayMilliseconds + " ms" +
+                        " - Details : " + GetDetailedExceptionMessage(ex));
+
+                    System.Threading.Thread.Sleep(delayMilliseconds);
+                }
+            }
+
+            throw new InvalidOperationException(
+                "Graph operation failed after " + maxAttempts +
+                " application attempt(s) : " + operation +
+                " - " + GetDetailedExceptionMessage(lastException),
+                lastException);
+        }
+
+        private static bool IsTransientGraphError(Exception exception)
+        {
+            Exception current = exception;
+
+            while (current != null)
+            {
+                if (current is HttpRequestException ||
+                    current is TimeoutException ||
+                    current is TaskCanceledException)
+                {
+                    return true;
+                }
+
+                if (current is ApiException apiException)
+                {
+                    int status = apiException.ResponseStatusCode;
+
+                    if (status == 408 || status == 429 || status == 500 ||
+                        status == 502 || status == 503 || status == 504)
+                    {
+                        return true;
+                    }
+                }
+
+                ODataError graphError = current as ODataError;
+                string graphCode = graphError?.Error?.Code ?? "";
+
+                if (graphCode.Equals("TooManyRequests", StringComparison.OrdinalIgnoreCase) ||
+                    graphCode.Equals("ErrorServerBusy", StringComparison.OrdinalIgnoreCase) ||
+                    graphCode.Equals("ServiceUnavailable", StringComparison.OrdinalIgnoreCase) ||
+                    graphCode.Equals("ApplicationThrottled", StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+
+                string message = current.Message ?? "";
+
+                if (message.IndexOf("Too many retries performed", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    message.IndexOf("More than 3 retries encountered", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    message.IndexOf("temporarily unavailable", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    message.IndexOf("service unavailable", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    message.IndexOf("timed out", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    message.IndexOf("An error occurred while sending the request", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    return true;
+                }
+
+                current = current.InnerException;
+            }
+
+            return false;
+        }
+
+        private static string GetDetailedExceptionMessage(Exception exception)
+        {
+            if (exception == null)
+            {
+                return "Unknown error";
+            }
+
+            List<string> details = new List<string>();
+            Exception current = exception;
+
+            while (current != null)
+            {
+                details.Add("Type=" + current.GetType().FullName);
+
+                if (!string.IsNullOrWhiteSpace(current.Message))
+                {
+                    details.Add("Message=" + current.Message);
+                }
+
+                ODataError graphError = current as ODataError;
+
+                if (graphError != null)
+                {
+                    if (!string.IsNullOrWhiteSpace(graphError.Error?.Code))
+                    {
+                        details.Add("GraphCode=" + graphError.Error.Code);
+                    }
+
+                    if (!string.IsNullOrWhiteSpace(graphError.Error?.Message))
+                    {
+                        details.Add("GraphMessage=" + graphError.Error.Message);
+                    }
+                }
+
+                if (current is ApiException apiException)
+                {
+                    details.Add("HttpStatus=" + apiException.ResponseStatusCode);
+                }
+
+                current = current.InnerException;
+            }
+
+            return string.Join(
+                " | ",
+                details.Distinct(StringComparer.OrdinalIgnoreCase));
         }
 
         private void ValidateRequiredParameters()
@@ -824,25 +1084,160 @@ SELECT @id,GETDATE(),@user,35,@comment,ISNULL(id_gestionnaire,0) FROM T_Requeteu
 
         private void WriteToFile(string message)
         {
-            if (string.IsNullOrWhiteSpace(logs_folder))
+            try
             {
-                logs_folder = AppDomain.CurrentDomain.BaseDirectory;
-            }
+                string targetLogsFolder = logs_folder;
+                if (string.IsNullOrWhiteSpace(targetLogsFolder))
+                    targetLogsFolder = AppDomain.CurrentDomain.BaseDirectory;
 
-            if (!Directory.Exists(logs_folder))
+                Directory.CreateDirectory(targetLogsFolder);
+
+                string logPath = Path.Combine(
+                    targetLogsFolder,
+                    "IMCA_" + global_session_name + "_" +
+                    DateTime.Now.ToString("dd_MM_yyyy") + "_" +
+                    country + "_" + global_application_name + ".txt");
+
+                string line =
+                    DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") +
+                    " - " + (message ?? "") + Environment.NewLine;
+
+                lock (logSyncRoot)
+                {
+                    WriteLogLineWithCrossProcessLock(logPath, line);
+                }
+            }
+            catch (Exception ex)
             {
-                Directory.CreateDirectory(logs_folder);
+                WriteEmergencyLog(
+                    "WriteToFile failure" +
+                    " - Error : " + ex.Message +
+                    " - Original message : " + (message ?? ""));
             }
+        }
 
-            string filePath = Path.Combine(
-                logs_folder,
-                "IMCA_" + global_session_name + "_" + DateTime.Now.ToString("dd_MM_yyyy") + "_" + country + "_" + global_application_name + ".txt"
-            );
+        private static void WriteLogLineWithCrossProcessLock(
+            string logPath,
+            string line)
+        {
+            string mutexName =
+                "Local\\IMCA_GESTION_REQUETE_LOG_" +
+                GetStableLogNameHash(logPath);
 
-            File.AppendAllText(
-                filePath,
-                DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + " - " + message + Environment.NewLine
-            );
+            using (var mutex =
+                new System.Threading.Mutex(false, mutexName))
+            {
+                bool lockTaken = false;
+                try
+                {
+                    try
+                    {
+                        lockTaken = mutex.WaitOne(TimeSpan.FromSeconds(10));
+                    }
+                    catch (System.Threading.AbandonedMutexException)
+                    {
+                        lockTaken = true;
+                    }
+
+                    if (!lockTaken)
+                        throw new IOException(
+                            "Unable to acquire the log mutex within 10 seconds");
+
+                    const int maxAttempts = 5;
+                    IOException lastWriteException = null;
+
+                    for (int attempt = 1; attempt <= maxAttempts; attempt++)
+                    {
+                        try
+                        {
+                            byte[] content = Encoding.UTF8.GetBytes(line);
+                            using (var stream = new FileStream(
+                                logPath,
+                                FileMode.Append,
+                                FileAccess.Write,
+                                FileShare.ReadWrite))
+                            {
+                                stream.Write(content, 0, content.Length);
+                                stream.Flush();
+                            }
+                            return;
+                        }
+                        catch (IOException ex)
+                        {
+                            lastWriteException = ex;
+                            if (attempt < maxAttempts)
+                                System.Threading.Thread.Sleep(attempt * 100);
+                        }
+                    }
+
+                    throw new IOException(
+                        "Unable to write the log file after " +
+                        maxAttempts + " attempts : " + logPath,
+                        lastWriteException);
+                }
+                finally
+                {
+                    if (lockTaken)
+                    {
+                        try { mutex.ReleaseMutex(); }
+                        catch (ApplicationException) { }
+                    }
+                }
+            }
+        }
+
+        private void WriteEmergencyLog(string message)
+        {
+            try
+            {
+                string emergencyFolder =
+                    string.IsNullOrWhiteSpace(temp_folder)
+                        ? AppDomain.CurrentDomain.BaseDirectory
+                        : temp_folder;
+
+                Directory.CreateDirectory(emergencyFolder);
+
+                string emergencyFile = Path.Combine(
+                    emergencyFolder,
+                    "IMCA_LOG_FAILURE_" + global_application_name +
+                    "_ACTION_ID_" +
+                    System.Diagnostics.Process.GetCurrentProcess().Id +
+                    "_" + DateTime.Now.ToString("dd_MM_yyyy") + ".txt");
+
+                string line =
+                    DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff") +
+                    " - " + (message ?? "") + Environment.NewLine;
+
+                byte[] content = Encoding.UTF8.GetBytes(line);
+                using (var stream = new FileStream(
+                    emergencyFile,
+                    FileMode.Append,
+                    FileAccess.Write,
+                    FileShare.ReadWrite))
+                {
+                    stream.Write(content, 0, content.Length);
+                    stream.Flush();
+                }
+            }
+            catch
+            {
+                // Last-resort protection: logging must never stop processing.
+            }
+        }
+
+        private static string GetStableLogNameHash(string value)
+        {
+            unchecked
+            {
+                uint hash = 2166136261;
+                foreach (char character in
+                    (value ?? "").ToUpperInvariant())
+                {
+                    hash ^= character;
+                    hash *= 16777619;
+                }
+                return hash.ToString("X8", CultureInfo.InvariantCulture);
+            }
         }
 
         private string CleanFileName(string fileName)

@@ -1,6 +1,8 @@
 ﻿using ExcelDataReader;
 using Microsoft.Graph;
 using Microsoft.Graph.Models;
+using Microsoft.Graph.Models.ODataErrors;
+using Microsoft.Kiota.Abstractions;
 using Newtonsoft.Json;
 using System;
 using System.Collections.Generic;
@@ -11,6 +13,8 @@ using System.IO;
 using System.IO.Compression;
 using System.Linq;
 using System.Net;
+using System.Net.Http;
+using System.Text;
 using System.Text.RegularExpressions;
 
 namespace TREND_EMAILS_MANAGEMENT_FR
@@ -56,6 +60,7 @@ namespace TREND_EMAILS_MANAGEMENT_FR
         private string sql_connexion_parameter_global = "";
 
         // ----- Microsoft Graph client -----
+        private static readonly object logSyncRoot = new object();
         private GraphServiceClient graphService = null;
 
         public class JSON_file
@@ -156,7 +161,7 @@ namespace TREND_EMAILS_MANAGEMENT_FR
                     setParamDebug(p.debug);
                     setStartDateScan(p.start_date_scan);
                     setNumber_of_mails(p.number_of_mails);
-                    setsharedmailbox_folder_in( p.sharedmailbox_folder_in);
+                    setsharedmailbox_folder_in(p.sharedmailbox_folder_in);
                     setsharedmailbox_folder_out(p.sharedmailbox_folder_out);
                     setSqlConnexionParam(p.sql_connexion_parameter_global);
                     setEmailInCaseOfTechnicalIssueParam(p.email_in_case_of_technical_issue_parameter_global);
@@ -234,13 +239,13 @@ namespace TREND_EMAILS_MANAGEMENT_FR
                                 WriteToFile(
                                     "   Error reading mailbox " +
                                     sharedmailbox_name + " : " +
-                                    mailboxException.Message);
+                                    GetDetailedExceptionMessage(mailboxException));
 
                                 mailboxErrors.Add(
                                     new Exception(
                                         "Mailbox " +
                                         sharedmailbox_name + " : " +
-                                        mailboxException.Message,
+                                        GetDetailedExceptionMessage(mailboxException),
                                         mailboxException));
 
                                 if (!(mailboxException is
@@ -250,7 +255,7 @@ namespace TREND_EMAILS_MANAGEMENT_FR
                                         nameof(Read_Email_with_Graph),
                                         "",
                                         sharedmailbox_name + " - " +
-                                        mailboxException.Message,
+                                        GetDetailedExceptionMessage(mailboxException),
                                         "MAILBOX PROCESSING");
                                 }
                             }
@@ -258,17 +263,18 @@ namespace TREND_EMAILS_MANAGEMENT_FR
 
                         if (mailboxErrors.Count > 0)
                         {
-                            throw new AggregateException(
+                            WriteToFile(
+                                "Country processing completed with " +
                                 mailboxErrors.Count +
-                                " shared mailbox(es) could not be processed.",
-                                mailboxErrors);
+                                " mailbox technical error(s). " +
+                                "Errors were logged and alerted without stopping the IMCA action.");
                         }
                     }
                     catch (Exception ex)
                     {
                         WriteToFile(
-                            "   Error get emails : " + ex.Message);
-                        throw;
+                            "   Error get emails : " +
+                            GetDetailedExceptionMessage(ex));
                     }
                 }
             }
@@ -276,7 +282,7 @@ namespace TREND_EMAILS_MANAGEMENT_FR
             {
                 WriteToFile(
                     "Global error Read_Email_with_Graph : " +
-                    ex.Message);
+                    GetDetailedExceptionMessage(ex));
                 throw;
             }
             finally
@@ -344,7 +350,7 @@ namespace TREND_EMAILS_MANAGEMENT_FR
                 {
                     WriteToFile(
                         "       Error processing email : " +
-                        ex.Message);
+                        GetDetailedExceptionMessage(ex));
 
                     if (!(ex is TechnicalAlertAlreadySentException))
                     {
@@ -366,7 +372,7 @@ namespace TREND_EMAILS_MANAGEMENT_FR
                     {
                         WriteToFile(
                             "       Error moving email to Erreur folder : " +
-                            moveException.Message);
+                            GetDetailedExceptionMessage(moveException));
                     }
                 }
             }
@@ -671,68 +677,81 @@ namespace TREND_EMAILS_MANAGEMENT_FR
         {
             int topEmails;
 
-            if (!int.TryParse(number_of_mails, out topEmails) ||
-                topEmails <= 0)
+            if (!int.TryParse(number_of_mails, out topEmails) || topEmails <= 0)
             {
                 topEmails = 10;
             }
 
-            return graphService.Users[sharedmailbox_name]
-                .MailFolders[folderId]
-                .Messages
-                .GetAsync(config =>
-                {
-                    config.QueryParameters.Top = topEmails;
-                    config.QueryParameters.Orderby =
-                        new[] { "receivedDateTime asc" };
-                    config.QueryParameters.Select = new[]
-                    {
-                        "id",
-                        "subject",
-                        "receivedDateTime",
-                        "hasAttachments",
-                        "isRead"
-                    };
+            string filter = BuildMessageFilter();
 
-                    string filter = BuildMessageFilter();
-                    if (!string.IsNullOrWhiteSpace(filter))
+            WriteToFile(
+                "   Listing Graph messages" +
+                " - Mailbox : " + sharedmailbox_name +
+                " - Folder : " + sharedmailbox_folder_in +
+                " - Filter : " +
+                (string.IsNullOrWhiteSpace(filter) ? "<none>" : filter) +
+                " - Top : " + topEmails);
+
+            return ExecuteGraphWithRetry(
+                () => graphService.Users[sharedmailbox_name]
+                    .MailFolders[folderId]
+                    .Messages
+                    .GetAsync(config =>
                     {
-                        config.QueryParameters.Filter = filter;
-                    }
-                })
-                .GetAwaiter()
-                .GetResult();
+                        config.QueryParameters.Top = topEmails;
+                        config.QueryParameters.Orderby =
+                            new[] { "receivedDateTime asc" };
+                        config.QueryParameters.Select = new[]
+                        {
+                            "id",
+                            "subject",
+                            "receivedDateTime",
+                            "hasAttachments",
+                            "isRead"
+                        };
+
+                        if (!string.IsNullOrWhiteSpace(filter))
+                        {
+                            config.QueryParameters.Filter = filter;
+                        }
+                    })
+                    .GetAwaiter()
+                    .GetResult(),
+                "List TREND messages");
         }
 
         private Message GetCompleteMessage(string messageId)
         {
-            return graphService.Users[sharedmailbox_name]
-                .Messages[messageId]
-                .GetAsync(config =>
-                {
-                    config.QueryParameters.Select = new[]
+            return ExecuteGraphWithRetry(
+                () => graphService.Users[sharedmailbox_name]
+                    .Messages[messageId]
+                    .GetAsync(config =>
                     {
-                        "id",
-                        "subject",
-                        "receivedDateTime",
-                        "hasAttachments"
-                    };
-                })
-                .GetAwaiter()
-                .GetResult();
+                        config.QueryParameters.Select = new[]
+                        {
+                            "id",
+                            "subject",
+                            "receivedDateTime",
+                            "hasAttachments"
+                        };
+                    })
+                    .GetAwaiter()
+                    .GetResult(),
+                "Read complete TREND message");
         }
 
         private string DownloadMatchingAttachment(
             string messageId,
             string expectedPrefix)
         {
-            AttachmentCollectionResponse response =
-                graphService.Users[sharedmailbox_name]
+            AttachmentCollectionResponse response = ExecuteGraphWithRetry(
+                () => graphService.Users[sharedmailbox_name]
                     .Messages[messageId]
                     .Attachments
                     .GetAsync()
                     .GetAwaiter()
-                    .GetResult();
+                    .GetResult(),
+                "Read TREND attachments");
 
             foreach (Attachment attachment in
                 response?.Value ?? new List<Attachment>())
@@ -751,13 +770,14 @@ namespace TREND_EMAILS_MANAGEMENT_FR
                 if (fileAttachment.ContentBytes == null &&
                     !string.IsNullOrWhiteSpace(fileAttachment.Id))
                 {
-                    fileAttachment =
-                        graphService.Users[sharedmailbox_name]
+                    fileAttachment = ExecuteGraphWithRetry(
+                        () => graphService.Users[sharedmailbox_name]
                             .Messages[messageId]
                             .Attachments[fileAttachment.Id]
                             .GetAsync()
                             .GetAwaiter()
-                            .GetResult() as FileAttachment;
+                            .GetResult() as FileAttachment,
+                        "Read complete TREND attachment");
                 }
 
                 if (fileAttachment?.ContentBytes == null)
@@ -980,15 +1000,16 @@ namespace TREND_EMAILS_MANAGEMENT_FR
                 "Inbox",
                 StringComparison.OrdinalIgnoreCase))
             {
-                return graphService.Users[sharedmailbox_name]
-                    .MailFolders["inbox"]
-                    .GetAsync()
-                    .GetAwaiter()
-                    .GetResult();
+                return ExecuteGraphWithRetry(
+                    () => graphService.Users[sharedmailbox_name]
+                        .MailFolders["inbox"]
+                        .GetAsync()
+                        .GetAwaiter()
+                        .GetResult(),
+                    "Read TREND Inbox folder");
             }
 
-            return GetChildFolderByName(
-                sharedmailbox_folder_in);
+            return GetChildFolderByName(sharedmailbox_folder_in);
         }
 
         private MailFolder GetChildFolderByName(string folderName)
@@ -996,21 +1017,20 @@ namespace TREND_EMAILS_MANAGEMENT_FR
             string safeFolderName =
                 (folderName ?? "").Replace("'", "''");
 
-            MailFolderCollectionResponse folders =
-                graphService.Users[sharedmailbox_name]
+            MailFolderCollectionResponse folders = ExecuteGraphWithRetry(
+                () => graphService.Users[sharedmailbox_name]
                     .MailFolders["inbox"]
                     .ChildFolders
                     .GetAsync(config =>
                     {
                         config.QueryParameters.Filter =
-                            "displayName eq '" +
-                            safeFolderName + "'";
+                            "displayName eq '" + safeFolderName + "'";
                     })
                     .GetAwaiter()
-                    .GetResult();
+                    .GetResult(),
+                "Find TREND folder " + folderName);
 
-            MailFolder folder =
-                folders?.Value?.FirstOrDefault();
+            MailFolder folder = folders?.Value?.FirstOrDefault();
 
             if (folder == null)
             {
@@ -1023,11 +1043,17 @@ namespace TREND_EMAILS_MANAGEMENT_FR
 
         private void MarkEmailAsRead(string messageId)
         {
-            graphService.Users[sharedmailbox_name]
-                .Messages[messageId]
-                .PatchAsync(new Message { IsRead = true })
-                .GetAwaiter()
-                .GetResult();
+            ExecuteGraphWithRetry(
+                () =>
+                {
+                    graphService.Users[sharedmailbox_name]
+                        .Messages[messageId]
+                        .PatchAsync(new Message { IsRead = true })
+                        .GetAwaiter()
+                        .GetResult();
+                    return true;
+                },
+                "Mark TREND message as read");
         }
 
         private void MoveEmail(
@@ -1041,12 +1067,18 @@ namespace TREND_EMAILS_MANAGEMENT_FR
                     DestinationId = destinationFolderId
                 };
 
-            graphService.Users[sharedmailbox_name]
-                .Messages[messageId]
-                .Move
-                .PostAsync(requestBody)
-                .GetAwaiter()
-                .GetResult();
+            ExecuteGraphWithRetry(
+                () =>
+                {
+                    graphService.Users[sharedmailbox_name]
+                        .Messages[messageId]
+                        .Move
+                        .PostAsync(requestBody)
+                        .GetAwaiter()
+                        .GetResult();
+                    return true;
+                },
+                "Move TREND message");
         }
 
         private string ExtractExcelFile(
@@ -1224,11 +1256,17 @@ namespace TREND_EMAILS_MANAGEMENT_FR
                         SaveToSentItems = true
                     };
 
-                graphService.Users[sharedmailbox_name]
-                    .SendMail
-                    .PostAsync(requestBody)
-                    .GetAwaiter()
-                    .GetResult();
+                ExecuteGraphWithRetry(
+                    () =>
+                    {
+                        graphService.Users[sharedmailbox_name]
+                            .SendMail
+                            .PostAsync(requestBody)
+                            .GetAwaiter()
+                            .GetResult();
+                        return true;
+                    },
+                    "Send TREND technical email");
             }
             catch (Exception ex)
             {
@@ -1255,6 +1293,136 @@ namespace TREND_EMAILS_MANAGEMENT_FR
                     }
                 })
                 .ToList();
+        }
+
+        private T ExecuteGraphWithRetry<T>(
+            Func<T> action,
+            string operation)
+        {
+            const int maxAttempts = 3;
+            Exception lastException = null;
+
+            for (int attempt = 1; attempt <= maxAttempts; attempt++)
+            {
+                try
+                {
+                    return action();
+                }
+                catch (Exception ex) when (IsTransientGraphError(ex))
+                {
+                    lastException = ex;
+
+                    if (attempt >= maxAttempts)
+                    {
+                        break;
+                    }
+
+                    int delayMilliseconds = attempt * 5000;
+                    WriteToFile(
+                        "   Temporary Graph error during " + operation +
+                        " - Attempt : " + attempt + "/" + maxAttempts +
+                        " - Retry in : " + delayMilliseconds + " ms" +
+                        " - Details : " + GetDetailedExceptionMessage(ex));
+                    System.Threading.Thread.Sleep(delayMilliseconds);
+                }
+            }
+
+            throw new InvalidOperationException(
+                "Graph operation failed after " + maxAttempts +
+                " application attempt(s) : " + operation +
+                " - " + GetDetailedExceptionMessage(lastException),
+                lastException);
+        }
+
+        private static bool IsTransientGraphError(Exception exception)
+        {
+            Exception current = exception;
+
+            while (current != null)
+            {
+                if (current is HttpRequestException ||
+                    current is TimeoutException ||
+                    current is System.Threading.Tasks.TaskCanceledException)
+                {
+                    return true;
+                }
+
+                if (current is ApiException apiException)
+                {
+                    int status = apiException.ResponseStatusCode;
+                    if (status == 408 || status == 429 || status == 500 ||
+                        status == 502 || status == 503 || status == 504)
+                    {
+                        return true;
+                    }
+                }
+
+                ODataError graphError = current as ODataError;
+                string graphCode = graphError?.Error?.Code ?? "";
+                if (graphCode.Equals("TooManyRequests", StringComparison.OrdinalIgnoreCase) ||
+                    graphCode.Equals("ErrorServerBusy", StringComparison.OrdinalIgnoreCase) ||
+                    graphCode.Equals("ServiceUnavailable", StringComparison.OrdinalIgnoreCase) ||
+                    graphCode.Equals("ApplicationThrottled", StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+
+                string message = current.Message ?? "";
+                if (message.IndexOf("Too many retries performed", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    message.IndexOf("More than 3 retries encountered", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    message.IndexOf("temporarily unavailable", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    message.IndexOf("service unavailable", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    message.IndexOf("timed out", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    message.IndexOf("An error occurred while sending the request", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    return true;
+                }
+
+                current = current.InnerException;
+            }
+            return false;
+        }
+
+        private static string GetDetailedExceptionMessage(Exception exception)
+        {
+            if (exception == null)
+            {
+                return "Unknown error";
+            }
+
+            List<string> details = new List<string>();
+            Exception current = exception;
+            while (current != null)
+            {
+                details.Add("Type=" + current.GetType().FullName);
+                if (!string.IsNullOrWhiteSpace(current.Message))
+                {
+                    details.Add("Message=" + current.Message);
+                }
+
+                ODataError graphError = current as ODataError;
+                if (graphError != null)
+                {
+                    if (!string.IsNullOrWhiteSpace(graphError.Error?.Code))
+                    {
+                        details.Add("GraphCode=" + graphError.Error.Code);
+                    }
+                    if (!string.IsNullOrWhiteSpace(graphError.Error?.Message))
+                    {
+                        details.Add("GraphMessage=" + graphError.Error.Message);
+                    }
+                }
+
+                if (current is ApiException apiException)
+                {
+                    details.Add("HttpStatus=" + apiException.ResponseStatusCode);
+                }
+                current = current.InnerException;
+            }
+
+            return string.Join(
+                " | ",
+                details.Distinct(StringComparer.OrdinalIgnoreCase));
         }
 
         private void ValidateRequiredCountryParameters()
@@ -1316,25 +1484,160 @@ WHERE SK_VALID = 0
 
         private void WriteToFile(string message)
         {
-            if (string.IsNullOrWhiteSpace(logs_folder))
+            try
             {
-                logs_folder =
-                    AppDomain.CurrentDomain.BaseDirectory;
+                string targetLogsFolder = logs_folder;
+                if (string.IsNullOrWhiteSpace(targetLogsFolder))
+                    targetLogsFolder = AppDomain.CurrentDomain.BaseDirectory;
+
+                Directory.CreateDirectory(targetLogsFolder);
+
+                string logPath = Path.Combine(
+                    targetLogsFolder,
+                    "IMCA_" + global_session_name + "_" +
+                    DateTime.Now.ToString("dd_MM_yyyy") + "_" +
+                    country + "_" + global_application_name + ".txt");
+
+                string line =
+                    DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") +
+                    " - " + (message ?? "") + Environment.NewLine;
+
+                lock (logSyncRoot)
+                {
+                    WriteLogLineWithCrossProcessLock(logPath, line);
+                }
             }
+            catch (Exception ex)
+            {
+                WriteEmergencyLog(
+                    "WriteToFile failure" +
+                    " - Error : " + ex.Message +
+                    " - Original message : " + (message ?? ""));
+            }
+        }
 
-            Directory.CreateDirectory(logs_folder);
+        private static void WriteLogLineWithCrossProcessLock(
+            string logPath,
+            string line)
+        {
+            string mutexName =
+                "Local\\IMCA_TREND_LOG_" +
+                GetStableLogNameHash(logPath);
 
-            string filePath = Path.Combine(
-                logs_folder,
-                "IMCA_" + global_session_name + "_" +
-                DateTime.Now.ToString("dd_MM_yyyy") + "_" +
-                country + "_" +
-                global_application_name + ".txt");
+            using (var mutex =
+                new System.Threading.Mutex(false, mutexName))
+            {
+                bool lockTaken = false;
+                try
+                {
+                    try
+                    {
+                        lockTaken = mutex.WaitOne(TimeSpan.FromSeconds(10));
+                    }
+                    catch (System.Threading.AbandonedMutexException)
+                    {
+                        lockTaken = true;
+                    }
 
-            File.AppendAllText(
-                filePath,
-                DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") +
-                " - " + message + Environment.NewLine);
+                    if (!lockTaken)
+                        throw new IOException(
+                            "Unable to acquire the log mutex within 10 seconds");
+
+                    const int maxAttempts = 5;
+                    IOException lastWriteException = null;
+
+                    for (int attempt = 1; attempt <= maxAttempts; attempt++)
+                    {
+                        try
+                        {
+                            byte[] content = Encoding.UTF8.GetBytes(line);
+                            using (var stream = new FileStream(
+                                logPath,
+                                FileMode.Append,
+                                FileAccess.Write,
+                                FileShare.ReadWrite))
+                            {
+                                stream.Write(content, 0, content.Length);
+                                stream.Flush();
+                            }
+                            return;
+                        }
+                        catch (IOException ex)
+                        {
+                            lastWriteException = ex;
+                            if (attempt < maxAttempts)
+                                System.Threading.Thread.Sleep(attempt * 100);
+                        }
+                    }
+
+                    throw new IOException(
+                        "Unable to write the log file after " +
+                        maxAttempts + " attempts : " + logPath,
+                        lastWriteException);
+                }
+                finally
+                {
+                    if (lockTaken)
+                    {
+                        try { mutex.ReleaseMutex(); }
+                        catch (ApplicationException) { }
+                    }
+                }
+            }
+        }
+
+        private void WriteEmergencyLog(string message)
+        {
+            try
+            {
+                string emergencyFolder =
+                    string.IsNullOrWhiteSpace(temp_folder)
+                        ? AppDomain.CurrentDomain.BaseDirectory
+                        : temp_folder;
+
+                Directory.CreateDirectory(emergencyFolder);
+
+                string emergencyFile = Path.Combine(
+                    emergencyFolder,
+                    "IMCA_LOG_FAILURE_" + global_application_name +
+                    "_ACTION_ID_" +
+                    System.Diagnostics.Process.GetCurrentProcess().Id +
+                    "_" + DateTime.Now.ToString("dd_MM_yyyy") + ".txt");
+
+                string line =
+                    DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff") +
+                    " - " + (message ?? "") + Environment.NewLine;
+
+                byte[] content = Encoding.UTF8.GetBytes(line);
+                using (var stream = new FileStream(
+                    emergencyFile,
+                    FileMode.Append,
+                    FileAccess.Write,
+                    FileShare.ReadWrite))
+                {
+                    stream.Write(content, 0, content.Length);
+                    stream.Flush();
+                }
+            }
+            catch
+            {
+                // Last-resort protection: logging must never stop processing.
+            }
+        }
+
+        private static string GetStableLogNameHash(string value)
+        {
+            unchecked
+            {
+                uint hash = 2166136261;
+                foreach (char character in
+                    (value ?? "").ToUpperInvariant())
+                {
+                    hash ^= character;
+                    hash *= 16777619;
+                }
+                return hash.ToString("X8", CultureInfo.InvariantCulture);
+            }
         }
 
         private static string GetServicePath()

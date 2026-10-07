@@ -1,5 +1,7 @@
 ﻿using Microsoft.Graph;
 using Microsoft.Graph.Models;
+using Microsoft.Graph.Models.ODataErrors;
+using Microsoft.Kiota.Abstractions;
 using Newtonsoft.Json;
 using System;
 using System.Collections.Generic;
@@ -8,6 +10,7 @@ using System.Data.SqlClient;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Net.Http;
 using System.Text;
 using ExcelDataReader;
 using System.Threading.Tasks;
@@ -46,6 +49,7 @@ namespace Backorder_HP_FR
 
         private string sql_licences_parameter_global { get; set; } = "";
 
+        private static readonly object logSyncRoot = new object();
         private GraphServiceClient graphService = null;
 
 
@@ -247,7 +251,7 @@ namespace Backorder_HP_FR
                                 }
                                 catch (Exception ex)
                                 {
-                                    WriteToFile("   Error processing email : " + ex.Message + " at " + DateTime.Now.ToString("dd/MM/yyyy HH:mm:ss"));
+                                    WriteToFile("   Error processing email : " + GetDetailedExceptionMessage(ex) + " at " + DateTime.Now.ToString("dd/MM/yyyy HH:mm:ss"));
 
                                     try
                                     {
@@ -293,13 +297,13 @@ namespace Backorder_HP_FR
                     }
                     catch (Exception e)
                     {
-                        WriteToFile("   Error get emails : " + e.Message);
+                        WriteToFile("   Error get emails : " + GetDetailedExceptionMessage(e));
                     }
                 }
             }
             catch (Exception ex)
             {
-                WriteToFile("Global error Read_Email_with_Graph : " + ex.Message);
+                WriteToFile("Global error Read_Email_with_Graph : " + GetDetailedExceptionMessage(ex));
             }
             finally
             {
@@ -308,41 +312,258 @@ namespace Backorder_HP_FR
             }
         }
 
-        private MessageCollectionResponse GetMessagesToProcess(GraphServiceClient graphService, string folderId)
+        private T ExecuteGraphWithRetry<T>(
+            Func<T> action,
+            string operation)
+        {
+            const int maximumAttempts = 3;
+            Exception lastException = null;
+
+            for (int attempt = 1;
+                 attempt <= maximumAttempts;
+                 attempt++)
+            {
+                try
+                {
+                    return action();
+                }
+                catch (Exception ex) when (IsTransientGraphError(ex))
+                {
+                    lastException = ex;
+
+                    if (attempt >= maximumAttempts)
+                    {
+                        break;
+                    }
+
+                    int delayMilliseconds = attempt * 5000;
+
+                    WriteToFile(
+                        "       Temporary Graph error during " +
+                        operation +
+                        ". Application attempt " +
+                        attempt + "/" + maximumAttempts +
+                        ". Retry in " + delayMilliseconds +
+                        " ms. Details : " +
+                        GetDetailedExceptionMessage(ex));
+
+                    System.Threading.Thread.Sleep(delayMilliseconds);
+                }
+            }
+
+            throw new InvalidOperationException(
+                "Graph operation failed after " +
+                maximumAttempts +
+                " application attempt(s) : " +
+                operation + " - " +
+                GetDetailedExceptionMessage(lastException),
+                lastException);
+        }
+
+        private static bool IsTransientGraphError(
+            Exception exception)
+        {
+            Exception current = exception;
+
+            while (current != null)
+            {
+                if (current is HttpRequestException ||
+                    current is TimeoutException ||
+                    current is TaskCanceledException)
+                {
+                    return true;
+                }
+
+                if (current is ApiException apiException)
+                {
+                    int status = apiException.ResponseStatusCode;
+
+                    if (status == 408 ||
+                        status == 429 ||
+                        status == 500 ||
+                        status == 502 ||
+                        status == 503 ||
+                        status == 504)
+                    {
+                        return true;
+                    }
+                }
+
+                ODataError oDataError = current as ODataError;
+                string graphCode =
+                    oDataError?.Error?.Code ?? "";
+
+                if (graphCode.Equals(
+                        "TooManyRequests",
+                        StringComparison.OrdinalIgnoreCase) ||
+                    graphCode.Equals(
+                        "ErrorServerBusy",
+                        StringComparison.OrdinalIgnoreCase) ||
+                    graphCode.Equals(
+                        "ServiceUnavailable",
+                        StringComparison.OrdinalIgnoreCase) ||
+                    graphCode.Equals(
+                        "ApplicationThrottled",
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+
+                string text = current.Message ?? "";
+
+                if (text.IndexOf(
+                        "Too many retries performed",
+                        StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    text.IndexOf(
+                        "More than 3 retries encountered",
+                        StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    text.IndexOf(
+                        "TooManyRequests",
+                        StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    text.IndexOf(
+                        "ApplicationThrottled",
+                        StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    text.IndexOf(
+                        "temporarily unavailable",
+                        StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    text.IndexOf(
+                        "service unavailable",
+                        StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    text.IndexOf(
+                        "12002",
+                        StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    text.IndexOf(
+                        "timed out",
+                        StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    text.IndexOf(
+                        "operation was canceled",
+                        StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    text.IndexOf(
+                        "An error occurred while sending the request",
+                        StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    return true;
+                }
+
+                current = current.InnerException;
+            }
+
+            return false;
+        }
+
+        private static string GetDetailedExceptionMessage(
+            Exception exception)
+        {
+            if (exception == null)
+            {
+                return "Unknown error";
+            }
+
+            var details = new List<string>();
+            Exception current = exception;
+
+            while (current != null)
+            {
+                details.Add(
+                    "Type=" + current.GetType().FullName);
+
+                if (!string.IsNullOrWhiteSpace(current.Message))
+                {
+                    details.Add(
+                        "Message=" + current.Message);
+                }
+
+                ODataError oDataError =
+                    current as ODataError;
+
+                if (oDataError != null)
+                {
+                    if (!string.IsNullOrWhiteSpace(
+                            oDataError.Error?.Code))
+                    {
+                        details.Add(
+                            "GraphCode=" +
+                            oDataError.Error.Code);
+                    }
+
+                    if (!string.IsNullOrWhiteSpace(
+                            oDataError.Error?.Message))
+                    {
+                        details.Add(
+                            "GraphMessage=" +
+                            oDataError.Error.Message);
+                    }
+                }
+
+                if (current is ApiException apiException)
+                {
+                    details.Add(
+                        "HttpStatus=" +
+                        apiException.ResponseStatusCode);
+                }
+
+                current = current.InnerException;
+            }
+
+            return string.Join(
+                " | ",
+                details
+                    .Where(value =>
+                        !string.IsNullOrWhiteSpace(value))
+                    .Distinct(
+                        StringComparer.OrdinalIgnoreCase));
+        }
+
+        private MessageCollectionResponse GetMessagesToProcess(
+            GraphServiceClient graphService,
+            string folderId)
         {
             int topEmails = 10;
-
-            if (!int.TryParse(number_of_mails, out topEmails))
+            if (!int.TryParse(number_of_mails, out topEmails) ||
+                topEmails <= 0)
             {
                 topEmails = 10;
             }
 
-            return graphService.Users[sharedmailbox_name]
-                .MailFolders[folderId]
-                .Messages
-                .GetAsync(config =>
-                {
-                    config.QueryParameters.Top = topEmails;
-                    config.QueryParameters.Orderby = new string[] { "receivedDateTime asc" };
-                    config.QueryParameters.Select = new string[]
-                    {
-                        "id",
-                        "subject",
-                        "from",
-                        "hasAttachments",
-                        "receivedDateTime",
-                        "isRead"
-                    };
+            string filter = BuildMessageFilter();
 
-                    string filter = BuildMessageFilter();
+            WriteToFile(
+                "       Listing Graph messages" +
+                " - Mailbox : " + sharedmailbox_name +
+                " - Folder : " + sharedmailbox_folder_in +
+                " - Filter : " +
+                (string.IsNullOrWhiteSpace(filter) ? "<none>" : filter) +
+                " - Top : " + topEmails);
 
-                    if (!string.IsNullOrWhiteSpace(filter))
+            return ExecuteGraphWithRetry(
+                () => graphService.Users[sharedmailbox_name]
+                    .MailFolders[folderId]
+                    .Messages
+                    .GetAsync(config =>
                     {
-                        config.QueryParameters.Filter = filter;
-                    }
-                })
-                .GetAwaiter()
-                .GetResult();
+                        config.QueryParameters.Top = topEmails;
+                        config.QueryParameters.Orderby = new string[]
+                        {
+                            "receivedDateTime asc"
+                        };
+                        config.QueryParameters.Select = new string[]
+                        {
+                            "id",
+                            "subject",
+                            "from",
+                            "hasAttachments",
+                            "receivedDateTime",
+                            "isRead"
+                        };
+
+                        if (!string.IsNullOrWhiteSpace(filter))
+                        {
+                            config.QueryParameters.Filter = filter;
+                        }
+                    })
+                    .GetAwaiter()
+                    .GetResult(),
+                "List messages for " + sharedmailbox_name);
         }
 
         private string BuildMessageFilter()
@@ -629,25 +850,160 @@ namespace Backorder_HP_FR
 
         private void WriteToFile(string message)
         {
-            if (string.IsNullOrWhiteSpace(logs_folder))
+            try
             {
-                logs_folder = AppDomain.CurrentDomain.BaseDirectory;
-            }
+                string targetLogsFolder = logs_folder;
+                if (string.IsNullOrWhiteSpace(targetLogsFolder))
+                    targetLogsFolder = AppDomain.CurrentDomain.BaseDirectory;
 
-            if (!Directory.Exists(logs_folder))
+                Directory.CreateDirectory(targetLogsFolder);
+
+                string logPath = Path.Combine(
+                    targetLogsFolder,
+                    "IMCA_" + global_session_name + "_" +
+                    DateTime.Now.ToString("dd_MM_yyyy") + "_" +
+                    country + "_" + global_application_name + ".txt");
+
+                string line =
+                    DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") +
+                    " - " + (message ?? "") + Environment.NewLine;
+
+                lock (logSyncRoot)
+                {
+                    WriteLogLineWithCrossProcessLock(logPath, line);
+                }
+            }
+            catch (Exception ex)
             {
-                Directory.CreateDirectory(logs_folder);
+                WriteEmergencyLog(
+                    "WriteToFile failure" +
+                    " - Error : " + ex.Message +
+                    " - Original message : " + (message ?? ""));
             }
+        }
 
-            string filePath = Path.Combine(
-                logs_folder,
-                "IMCA_" + global_session_name + "_" + DateTime.Now.ToString("dd_MM_yyyy") + "_" + country + "_" + global_application_name +".txt"
-            );
+        private static void WriteLogLineWithCrossProcessLock(
+            string logPath,
+            string line)
+        {
+            string mutexName =
+                "Local\\IMCA_BACKORDER_HP_LOG_" +
+                GetStableLogNameHash(logPath);
 
-            File.AppendAllText(
-                filePath,
-                DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + " - " + message + Environment.NewLine
-            );
+            using (var mutex =
+                new System.Threading.Mutex(false, mutexName))
+            {
+                bool lockTaken = false;
+                try
+                {
+                    try
+                    {
+                        lockTaken = mutex.WaitOne(TimeSpan.FromSeconds(10));
+                    }
+                    catch (System.Threading.AbandonedMutexException)
+                    {
+                        lockTaken = true;
+                    }
+
+                    if (!lockTaken)
+                        throw new IOException(
+                            "Unable to acquire the log mutex within 10 seconds");
+
+                    const int maxAttempts = 5;
+                    IOException lastWriteException = null;
+
+                    for (int attempt = 1; attempt <= maxAttempts; attempt++)
+                    {
+                        try
+                        {
+                            byte[] content = Encoding.UTF8.GetBytes(line);
+                            using (var stream = new FileStream(
+                                logPath,
+                                FileMode.Append,
+                                FileAccess.Write,
+                                FileShare.ReadWrite))
+                            {
+                                stream.Write(content, 0, content.Length);
+                                stream.Flush();
+                            }
+                            return;
+                        }
+                        catch (IOException ex)
+                        {
+                            lastWriteException = ex;
+                            if (attempt < maxAttempts)
+                                System.Threading.Thread.Sleep(attempt * 100);
+                        }
+                    }
+
+                    throw new IOException(
+                        "Unable to write the log file after " +
+                        maxAttempts + " attempts : " + logPath,
+                        lastWriteException);
+                }
+                finally
+                {
+                    if (lockTaken)
+                    {
+                        try { mutex.ReleaseMutex(); }
+                        catch (ApplicationException) { }
+                    }
+                }
+            }
+        }
+
+        private void WriteEmergencyLog(string message)
+        {
+            try
+            {
+                string emergencyFolder =
+                    string.IsNullOrWhiteSpace(temp_folder)
+                        ? AppDomain.CurrentDomain.BaseDirectory
+                        : temp_folder;
+
+                Directory.CreateDirectory(emergencyFolder);
+
+                string emergencyFile = Path.Combine(
+                    emergencyFolder,
+                    "IMCA_LOG_FAILURE_" + global_application_name +
+                    "_ACTION_ID_" +
+                    System.Diagnostics.Process.GetCurrentProcess().Id +
+                    "_" + DateTime.Now.ToString("dd_MM_yyyy") + ".txt");
+
+                string line =
+                    DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff") +
+                    " - " + (message ?? "") + Environment.NewLine;
+
+                byte[] content = Encoding.UTF8.GetBytes(line);
+                using (var stream = new FileStream(
+                    emergencyFile,
+                    FileMode.Append,
+                    FileAccess.Write,
+                    FileShare.ReadWrite))
+                {
+                    stream.Write(content, 0, content.Length);
+                    stream.Flush();
+                }
+            }
+            catch
+            {
+                // Last-resort protection: logging must never stop processing.
+            }
+        }
+
+        private static string GetStableLogNameHash(string value)
+        {
+            unchecked
+            {
+                uint hash = 2166136261;
+                foreach (char character in
+                    (value ?? "").ToUpperInvariant())
+                {
+                    hash ^= character;
+                    hash *= 16777619;
+                }
+                return hash.ToString("X8", CultureInfo.InvariantCulture);
+            }
         }
 
         private string CleanFileName(string fileName)
@@ -1099,11 +1455,6 @@ VALUES (@date_maj,@PurchaseOrderNo,@PurchaseOrderDate,@HPOrderNo,@SchedDelvDate,
 
         public Backorder_HP_FR()
         {
-
-
-
-
-
         }
     }
 

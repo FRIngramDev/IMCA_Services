@@ -1,5 +1,7 @@
 ﻿using Microsoft.Graph;
 using Microsoft.Graph.Models;
+using Microsoft.Graph.Models.ODataErrors;
+using Microsoft.Kiota.Abstractions;
 using MimeKit;
 using Newtonsoft.Json;
 using System;
@@ -10,6 +12,8 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Net;
+using System.Net.Http;
+using System.Text;
 
 namespace APPLE_EMAILS_MANAGEMENT_FR
 {
@@ -49,6 +53,7 @@ namespace APPLE_EMAILS_MANAGEMENT_FR
 
 
         private const string global_application_name = "APPLE_EMAILS_MANAGEMENT_FR";
+        private static readonly object logSyncRoot = new object();
         private GraphServiceClient graphService;
 
         public class JSON_file
@@ -94,6 +99,8 @@ namespace APPLE_EMAILS_MANAGEMENT_FR
             public string Sujet { get; set; } = "";
             public string Body { get; set; } = "";
             public string AffecteA { get; set; } = "";
+            public string EnvoyerA { get; set; } = "";
+            public string StatutEnvoi { get; set; } = "";
             public byte[] Fichier { get; set; }
         }
 
@@ -255,24 +262,29 @@ namespace APPLE_EMAILS_MANAGEMENT_FR
                             }
                             catch (Exception mailboxException)
                             {
+                                string errorDetails =
+                                    GetDetailedExceptionMessage(
+                                        mailboxException);
                                 WriteToFile(
-                                    "   Error reading mailbox " +
-                                    sharedmailbox_name + " : " +
-                                    mailboxException.Message);
-
+                                    "   Error reading mailbox" +
+                                    " - Mailbox : " + sharedmailbox_name +
+                                    " - Folder : " + sharedmailbox_folder_in +
+                                    " - Details : " + errorDetails);
                                 mailboxErrors.Add(
                                     new Exception(
                                         "Mailbox " + sharedmailbox_name +
-                                        " : " + mailboxException.Message,
+                                        " - Folder " + sharedmailbox_folder_in +
+                                        " : " + errorDetails,
                                         mailboxException));
-
                                 if (!(mailboxException is
                                     TechnicalAlertAlreadySentException))
                                 {
                                     SendTechnicalIssueMail(
                                         nameof(Read_Email_with_Graph),
-                                        sharedmailbox_name + " - " +
-                                        mailboxException.Message,
+                                        sharedmailbox_name +
+                                        " - Folder : " +
+                                        sharedmailbox_folder_in +
+                                        " - " + errorDetails,
                                         "MAILBOX PROCESSING");
                                 }
                             }
@@ -289,16 +301,24 @@ namespace APPLE_EMAILS_MANAGEMENT_FR
 
                         if (mailboxErrors.Count > 0)
                         {
-                            throw new AggregateException(
+                            WriteToFile(
+                                "   Country processing completed with " +
                                 mailboxErrors.Count +
-                                " APPLE_EMAILS processing error(s).",
-                                mailboxErrors);
+                                " technical error(s). Errors were logged and " +
+                                "alerted without stopping the IMCA action.");
+                        }
+                        else
+                        {
+                            WriteToFile(
+                                "   Country processing completed : " +
+                                country.ToUpperInvariant());
                         }
                     }
                     catch (Exception ex)
                     {
                         WriteToFile(
-                            "   Error get emails : " + ex.Message);
+                            "   Error get emails : " +
+                            GetDetailedExceptionMessage(ex));
                         throw;
                     }
                 }
@@ -307,7 +327,7 @@ namespace APPLE_EMAILS_MANAGEMENT_FR
             {
                 WriteToFile(
                     "Global error Read_Email_with_Graph : " +
-                    ex.Message);
+                    GetDetailedExceptionMessage(ex));
                 throw;
             }
             finally
@@ -483,8 +503,15 @@ namespace APPLE_EMAILS_MANAGEMENT_FR
 
         private string DownloadMatchingAttachment(string messageId, string prefix, string destinationFolder)
         {
-            AttachmentCollectionResponse response = graphService.Users[sharedmailbox_name]
-                .Messages[messageId].Attachments.GetAsync().GetAwaiter().GetResult();
+            AttachmentCollectionResponse response = ExecuteGraphWithRetry(
+                () => graphService.Users[sharedmailbox_name]
+                    .Messages[messageId]
+                    .Attachments
+                    .GetAsync()
+                    .GetAwaiter()
+                    .GetResult(),
+                "List attachments for message " + messageId +
+                " in " + sharedmailbox_name);
 
             foreach (Microsoft.Graph.Models.Attachment attachment in response?.Value ?? new List<Microsoft.Graph.Models.Attachment>())
             {
@@ -492,9 +519,20 @@ namespace APPLE_EMAILS_MANAGEMENT_FR
                 if (file == null || !(file.Name ?? "").StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) continue;
 
                 if (file.ContentBytes == null && !string.IsNullOrWhiteSpace(file.Id))
-                    file = graphService.Users[sharedmailbox_name].Messages[messageId]
-                        .Attachments[file.Id].GetAsync().GetAwaiter().GetResult()
-                        as Microsoft.Graph.Models.FileAttachment;
+                {
+                    string attachmentId = file.Id;
+                    file = ExecuteGraphWithRetry(
+                        () => graphService.Users[sharedmailbox_name]
+                            .Messages[messageId]
+                            .Attachments[attachmentId]
+                            .GetAsync()
+                            .GetAwaiter()
+                            .GetResult()
+                            as Microsoft.Graph.Models.FileAttachment,
+                        "Get attachment " + attachmentId +
+                        " for message " + messageId +
+                        " in " + sharedmailbox_name);
+                }
 
                 if (file?.ContentBytes == null)
                     throw new InvalidOperationException("Attachment content is empty : " + attachment.Name);
@@ -523,7 +561,7 @@ namespace APPLE_EMAILS_MANAGEMENT_FR
         }
         private int InsertEmailIfNew(Message email, byte[] mime)
         {
-            if (EmailAlreadyExists(email.Id,id_mailboxe))
+            if (EmailAlreadyExists(email.Id, id_mailboxe))
             {
                 return 0;
             }
@@ -534,7 +572,7 @@ namespace APPLE_EMAILS_MANAGEMENT_FR
 
             if (nomFichier.Length > 500)
             {
-                nomFichier =nomFichier.Substring(0, 500);
+                nomFichier = nomFichier.Substring(0, 500);
             }
 
             string fromAddress =
@@ -554,9 +592,9 @@ namespace APPLE_EMAILS_MANAGEMENT_FR
                 DateTime.Now;
 
             using (SqlConnection connection = new SqlConnection(sql_connexion))
-            using (SqlCommand command =new SqlCommand("dbo.USP_ADD_EMAIL_IN_DB",connection))
+            using (SqlCommand command = new SqlCommand("dbo.USP_ADD_EMAIL_IN_DB", connection))
             {
-                command.CommandType =CommandType.StoredProcedure;
+                command.CommandType = CommandType.StoredProcedure;
 
 
                 command.CommandTimeout = 300;
@@ -680,7 +718,7 @@ namespace APPLE_EMAILS_MANAGEMENT_FR
                         "@@id",
                         SqlDbType.Int);
 
-                output.Direction =ParameterDirection.Output;
+                output.Direction = ParameterDirection.Output;
 
                 connection.Open();
                 command.ExecuteNonQuery();
@@ -708,155 +746,99 @@ WHERE EwsID COLLATE Latin1_General_CS_AS = @EWSID AND id_mailboxe = @ID;";
 
         public void Transfert_de_mail_communications_APPLE()
         {
-            WriteToFile(
-                "   Starting Apple communication processing");
-
-            SharedMailboxConfiguration appleMailbox =
-                GetAppleMailbox();
-
+            WriteToFile("   Starting Apple communication processing");
+            SharedMailboxConfiguration appleMailbox = GetAppleMailbox();
             if (appleMailbox == null)
             {
-                WriteToFile(
-                    "   No active mailbox with typologie APPLE found");
+                WriteToFile("   No active mailbox with typologie APPLE found");
                 return;
             }
-
             SetCurrentMailbox(appleMailbox);
             AppleMailToSend mail = GetNextAppleMailToSend();
-
             if (mail == null)
             {
-                if (IsTrue(debug))
-                {
-                    WriteToFile(
-                        "   No Apple communication to send");
-                }
+                if (IsTrue(debug)) WriteToFile("   No Apple communication to send or resume");
                 return;
             }
-
-            WriteToFile(
-                "   Processing Apple communication ID : " +
-                mail.Id + " - Group : " + mail.AffecteA);
-
+            WriteToFile("   Processing Apple communication ID : " + mail.Id +
+                " - Group : " + mail.AffecteA + " - Initial status : " + mail.StatutEnvoi);
             try
             {
-                UpdateAppleValue(
-                    mail.Id,
-                    "top_a_envoyer",
-                    "P");
-
-                List<string> contacts =
-                    GetAppleContacts(mail.AffecteA);
-
+                UpdateAppleValue(mail.Id, "top_a_envoyer", "P");
+                List<string> contacts = GetAppleContacts(mail.AffecteA);
                 if (contacts.Count == 0)
+                    throw new InvalidOperationException("No Apple contact found for group : " + mail.AffecteA);
+                HashSet<string> alreadySent = SplitAppleRecipients(mail.EnvoyerA);
+                int remaining = contacts.Count(contact => !alreadySent.Contains(contact));
+                WriteToFile("   Apple contacts found : " + contacts.Count +
+                    " - Already confirmed : " + alreadySent.Count + " - Remaining : " + remaining);
+                if (remaining == 0)
                 {
-                    throw new InvalidOperationException(
-                        "No Apple contact found for group : " +
-                        mail.AffecteA);
+                    UpdateAppleValue(mail.Id, "top_a_envoyer", "F");
+                    WriteToFile("   Apple communication ID " + mail.Id +
+                        " already completed according to envoyer_a");
+                    return;
                 }
-
-                WriteToFile(
-                    "   Apple contacts found : " + contacts.Count);
-
-                MimeMessage source =
-                    LoadMimeMessage(mail.Fichier);
-                List<Microsoft.Graph.Models.Attachment> attachments =
-                    BuildGraphAttachments(source);
-                string sentTo = "";
-
+                MimeMessage source = LoadMimeMessage(mail.Fichier);
+                List<Microsoft.Graph.Models.Attachment> attachments = BuildGraphAttachments(source);
                 foreach (string contact in contacts)
                 {
-                    Message message = new Message
+                    if (alreadySent.Contains(contact))
                     {
-                        Subject =
-                            !string.IsNullOrWhiteSpace(source.Subject)
-                                ? source.Subject
-                                : mail.Sujet,
-
-                        Body =
-                            BuildAppleBody(source, mail),
-
-                        From =
-                            BuildAppleSenderRecipient(),
-
-                        ToRecipients =
-                            BuildRecipients(contact),
-
-                        ReplyTo =
-                            new List<Recipient>
-                            {
-                BuildAppleSenderRecipient()
-                            },
-
-                        Attachments =
-                            CloneAttachments(attachments)
-                    };
-
-                    var request =
-                        new Microsoft.Graph.Users.Item.SendMail
-                            .SendMailPostRequestBody
+                        if (IsTrue(debug)) WriteToFile(
+                            "       Apple communication already sent, skipped : " + contact);
+                        continue;
+                    }
+                    WriteToFile("       Starting Apple communication send" +
+                        " - Apple mail ID : " + mail.Id + " - Recipient : " + contact);
+                    ExecuteGraphWithRetry(() =>
+                    {
+                        Message attemptMessage = new Message
                         {
-                            Message = message,
+                            Subject = !string.IsNullOrWhiteSpace(source.Subject) ? source.Subject : mail.Sujet,
+                            Body = BuildAppleBody(source, mail),
+                            From = BuildAppleSenderRecipient(),
+                            ToRecipients = BuildRecipients(contact),
+                            ReplyTo = new List<Recipient> { BuildAppleSenderRecipient() },
+                            Attachments = CloneAttachments(attachments)
+                        };
+                        var attemptRequest = new Microsoft.Graph.Users.Item.SendMail.SendMailPostRequestBody
+                        {
+                            Message = attemptMessage,
                             SaveToSentItems = true
                         };
-
-                    graphService
-                        .Users[
-                            fr_graph_send_as
-                        ]
-                        .SendMail
-                        .PostAsync(request)
-                        .GetAwaiter()
-                        .GetResult();
-
-                    sentTo =
-                        string.IsNullOrWhiteSpace(sentTo)
-                            ? contact
-                            : sentTo + ";" + contact;
-
-                    UpdateAppleValue(
-                        mail.Id,
-                        "envoyer_a",
-                        sentTo);
-
-                    WriteToFile(
-                        "       Apple communication sent to : " +
-                        contact);
+                        graphService.Users[fr_graph_send_as].SendMail.PostAsync(attemptRequest)
+                            .GetAwaiter().GetResult();
+                        return true;
+                    }, "Send Apple communication - Apple mail ID : " + mail.Id +
+                        " - Recipient : " + contact);
+                    alreadySent.Add(contact);
+                    UpdateAppleValue(mail.Id, "envoyer_a", string.Join(";",
+                        alreadySent.OrderBy(address => address, StringComparer.OrdinalIgnoreCase)));
+                    WriteToFile("       Apple communication sent to : " + contact);
                 }
-
-                UpdateAppleValue(
-                    mail.Id,
-                    "top_a_envoyer",
-                    "F");
-
-                WriteToFile(
-                    "   Apple communication ID " + mail.Id +
-                    " successfully sent to " + contacts.Count +
-                    " contact(s)");
+                UpdateAppleValue(mail.Id, "top_a_envoyer", "F");
+                WriteToFile("   Apple communication ID " + mail.Id +
+                    " successfully completed - Total contacts : " + contacts.Count +
+                    " - Confirmed recipients : " + alreadySent.Count);
             }
             catch (Exception ex)
             {
-                try
-                {
-                    UpdateAppleValue(
-                        mail.Id,
-                        "top_a_envoyer",
-                        "E");
-                }
-                catch
-                {
-                }
-
-                SendTechnicalIssueMail(
-                    nameof(Transfert_de_mail_communications_APPLE),
-                    "Apple mail ID " + mail.Id + " - " +
-                    ex.Message,
-                    "APPLE");
-
+                try { UpdateAppleValue(mail.Id, "top_a_envoyer", "R"); } catch { }
+                string details = GetDetailedExceptionMessage(ex);
+                SendTechnicalIssueMail(nameof(Transfert_de_mail_communications_APPLE),
+                    "Apple mail ID " + mail.Id + " - " + details, "APPLE");
                 throw new TechnicalAlertAlreadySentException(
-                    "Apple communication failed : " + ex.Message,
-                    ex);
+                    "Apple communication failed : " + details, ex);
             }
+        }
+        private static HashSet<string> SplitAppleRecipients(string addresses)
+        {
+            return new HashSet<string>((addresses ?? "")
+                .Split(new[] { ';', ',' }, StringSplitOptions.RemoveEmptyEntries)
+                .Select(address => address.Trim())
+                .Where(address => !string.IsNullOrWhiteSpace(address)),
+                StringComparer.OrdinalIgnoreCase);
         }
 
         private Recipient BuildAppleSenderRecipient()
@@ -889,48 +871,32 @@ WHERE EwsID COLLATE Latin1_General_CS_AS = @EWSID AND id_mailboxe = @ID;";
         private AppleMailToSend GetNextAppleMailToSend()
         {
             const string sql = @"
-                                SELECT TOP (1)
-                                    c.id,
-                                    ISNULL(c.sujet, '') AS sujet,
-                                    ISNULL(c.body, '') AS body,
-                                    ISNULL(c.affecte_a, '') AS affecte_a,
-                                    c.fichier
-                                FROM dbo.T_contenu_email AS c WITH (NOLOCK)
-                                WHERE c.id_mailboxe = @ID_MAILBOXE
-                                  AND c.top_a_envoyer = 'O'
-                                  AND c.affecte_a IS NOT NULL
-                                  AND LTRIM(RTRIM(c.affecte_a)) <> ''
-                                ORDER BY c.id;";
-
-            using (SqlConnection con =
-                new SqlConnection(sql_connexion))
-            using (SqlCommand cmd =
-                new SqlCommand(sql, con))
+SELECT TOP (1) c.id,ISNULL(c.sujet,'') sujet,ISNULL(c.body,'') body,
+       ISNULL(c.affecte_a,'') affecte_a,ISNULL(c.envoyer_a,'') envoyer_a,
+       ISNULL(c.top_a_envoyer,'') top_a_envoyer,c.fichier
+FROM dbo.T_contenu_email c WITH (UPDLOCK,READPAST)
+WHERE c.id_mailboxe=@ID_MAILBOXE
+  AND c.top_a_envoyer IN ('O','R')
+  AND NULLIF(LTRIM(RTRIM(c.affecte_a)),'') IS NOT NULL
+ORDER BY CASE WHEN c.top_a_envoyer='R' THEN 0 ELSE 1 END,c.id;";
+            using (SqlConnection con = new SqlConnection(sql_connexion))
+            using (SqlCommand cmd = new SqlCommand(sql, con))
             {
                 cmd.CommandTimeout = 300;
-                cmd.Parameters.Add(
-                    "@ID_MAILBOXE",
-                    SqlDbType.Int).Value = id_mailboxe;
-
+                cmd.Parameters.Add("@ID_MAILBOXE", SqlDbType.Int).Value = id_mailboxe;
                 con.Open();
-
-                using (SqlDataReader reader =
-                    cmd.ExecuteReader(CommandBehavior.SingleRow))
+                using (SqlDataReader reader = cmd.ExecuteReader(CommandBehavior.SingleRow))
                 {
-                    if (!reader.Read())
-                    {
-                        return null;
-                    }
-
+                    if (!reader.Read()) return null;
                     return new AppleMailToSend
                     {
                         Id = Convert.ToInt32(reader["id"]),
                         Sujet = Convert.ToString(reader["sujet"]),
                         Body = Convert.ToString(reader["body"]),
                         AffecteA = Convert.ToString(reader["affecte_a"]),
-                        Fichier = reader["fichier"] == DBNull.Value
-                            ? null
-                            : (byte[])reader["fichier"]
+                        EnvoyerA = Convert.ToString(reader["envoyer_a"]),
+                        StatutEnvoi = Convert.ToString(reader["top_a_envoyer"]),
+                        Fichier = reader["fichier"] == DBNull.Value ? null : (byte[])reader["fichier"]
                     };
                 }
             }
@@ -1116,64 +1082,268 @@ WHERE id_mailboxe=@ID;";
             }
         }
 
+        private T ExecuteGraphWithRetry<T>(
+            Func<T> action,
+            string operation)
+        {
+            const int maximumAttempts = 3;
+            Exception lastException = null;
+            for (int attempt = 1; attempt <= maximumAttempts; attempt++)
+            {
+                try
+                {
+                    return action();
+                }
+                catch (Exception ex) when (IsTransientGraphError(ex))
+                {
+                    lastException = ex;
+                    if (attempt >= maximumAttempts)
+                        break;
+                    int delayMilliseconds = attempt * 5000;
+                    WriteToFile(
+                        "       Temporary Graph error during " + operation +
+                        ". Application attempt " + attempt + "/" +
+                        maximumAttempts + ". Retry in " +
+                        delayMilliseconds + " ms. Error : " +
+                        GetDetailedExceptionMessage(ex));
+                    System.Threading.Thread.Sleep(delayMilliseconds);
+                }
+            }
+            throw new InvalidOperationException(
+                "Graph operation failed after " + maximumAttempts +
+                " application attempt(s) : " + operation + " - " +
+                GetDetailedExceptionMessage(lastException),
+                lastException);
+        }
+
+        private static bool IsTransientGraphError(Exception exception)
+        {
+            Exception current = exception;
+            while (current != null)
+            {
+                if (current is HttpRequestException ||
+                    current is TimeoutException ||
+                    current is System.Threading.Tasks.TaskCanceledException)
+                    return true;
+
+                if (current is ApiException apiException)
+                {
+                    int status = apiException.ResponseStatusCode;
+                    if (status == 408 || status == 429 ||
+                        status == 500 || status == 502 ||
+                        status == 503 || status == 504)
+                        return true;
+                }
+
+                ODataError oDataError = current as ODataError;
+                string graphCode = oDataError?.Error?.Code ?? "";
+                if (graphCode.Equals("TooManyRequests", StringComparison.OrdinalIgnoreCase) ||
+                    graphCode.Equals("ErrorServerBusy", StringComparison.OrdinalIgnoreCase) ||
+                    graphCode.Equals("ServiceUnavailable", StringComparison.OrdinalIgnoreCase) ||
+                    graphCode.Equals("ApplicationThrottled", StringComparison.OrdinalIgnoreCase))
+                    return true;
+
+                string text = current.Message ?? "";
+                if (text.IndexOf("Too many retries performed", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    text.IndexOf("More than 3 retries encountered", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    text.IndexOf("TooManyRequests", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    text.IndexOf("ApplicationThrottled", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    text.IndexOf("temporarily unavailable", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    text.IndexOf("service unavailable", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    text.IndexOf("12002", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    text.IndexOf("timed out", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    text.IndexOf("operation was canceled", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    text.IndexOf("An error occurred while sending the request", StringComparison.OrdinalIgnoreCase) >= 0)
+                    return true;
+
+                current = current.InnerException;
+            }
+            return false;
+        }
+
+        private static string GetDetailedExceptionMessage(Exception exception)
+        {
+            if (exception == null)
+                return "Unknown error";
+
+            var details = new List<string>();
+            Exception current = exception;
+            while (current != null)
+            {
+                details.Add("Type=" + current.GetType().FullName);
+                if (!string.IsNullOrWhiteSpace(current.Message))
+                    details.Add("Message=" + current.Message);
+
+                ODataError oDataError = current as ODataError;
+                if (oDataError != null)
+                {
+                    if (!string.IsNullOrWhiteSpace(oDataError.Error?.Code))
+                        details.Add("GraphCode=" + oDataError.Error.Code);
+                    if (!string.IsNullOrWhiteSpace(oDataError.Error?.Message))
+                        details.Add("GraphMessage=" + oDataError.Error.Message);
+                }
+
+                if (current is ApiException apiException)
+                    details.Add("HttpStatus=" + apiException.ResponseStatusCode);
+
+                current = current.InnerException;
+            }
+
+            return string.Join(
+                " | ",
+                details.Where(value => !string.IsNullOrWhiteSpace(value))
+                    .Distinct(StringComparer.OrdinalIgnoreCase));
+        }
+
         private MessageCollectionResponse GetMessagesToProcess(string folderId)
         {
             int top;
             if (!int.TryParse(number_of_mails, out top) || top <= 0) top = 100;
             DateTime filter = dt_heure_filtre > new DateTime(1900, 1, 1) ? dt_heure_filtre : ParseStartDate();
-            return graphService.Users[sharedmailbox_name].MailFolders[folderId].Messages.GetAsync(c =>
-            {
-                c.QueryParameters.Top = top;
-                c.QueryParameters.Orderby = new[] { "receivedDateTime asc" };
-                c.QueryParameters.Filter = "receivedDateTime gt " + filter.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture);
-                c.QueryParameters.Select = new[] { "id", "subject", "receivedDateTime", "createdDateTime", "hasAttachments" };
-            }).GetAwaiter().GetResult();
+            WriteToFile(
+                "       Listing Graph messages" +
+                " - Mailbox : " + sharedmailbox_name +
+                " - Folder : " + sharedmailbox_folder_in +
+                " - Filter date : " +
+                filter.ToString("dd/MM/yyyy HH:mm:ss") +
+                " - Top : " + top);
+            return ExecuteGraphWithRetry(
+                () => graphService.Users[sharedmailbox_name]
+                    .MailFolders[folderId]
+                    .Messages.GetAsync(c =>
+                    {
+                        c.QueryParameters.Top = top;
+                        c.QueryParameters.Orderby = new[] { "receivedDateTime asc" };
+                        c.QueryParameters.Filter = "receivedDateTime gt " + filter.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture);
+                        c.QueryParameters.Select = new[] { "id", "subject", "receivedDateTime", "createdDateTime", "hasAttachments" };
+                    }).GetAwaiter().GetResult(),
+                "List messages for " + sharedmailbox_name);
         }
 
         private Message GetCompleteMessage(string id)
         {
-            return graphService.Users[sharedmailbox_name].Messages[id].GetAsync(c =>
-            {
-                c.QueryParameters.Select = new[] { "id", "subject", "body", "bodyPreview", "from", "toRecipients", "ccRecipients", "receivedDateTime", "createdDateTime", "conversationId", "hasAttachments" };
-            }).GetAwaiter().GetResult();
+            return ExecuteGraphWithRetry(
+                () => graphService.Users[sharedmailbox_name]
+                    .Messages[id]
+                    .GetAsync(c =>
+                    {
+                        c.QueryParameters.Select = new[]
+                        {
+                            "id", "subject", "body", "bodyPreview", "from",
+                            "toRecipients", "ccRecipients", "receivedDateTime",
+                            "createdDateTime", "conversationId", "hasAttachments"
+                        };
+                    })
+                    .GetAwaiter()
+                    .GetResult(),
+                "Get complete message " + id +
+                " for " + sharedmailbox_name);
         }
 
         private byte[] GetMimeContent(string id)
         {
-            using (Stream stream = graphService.Users[sharedmailbox_name].Messages[id].Content.GetAsync().GetAwaiter().GetResult())
-            using (MemoryStream memory = new MemoryStream())
-            {
-                stream.CopyTo(memory);
-                return memory.ToArray();
-            }
+            return ExecuteGraphWithRetry(
+                () =>
+                {
+                    using (Stream stream = graphService.Users[sharedmailbox_name]
+                        .Messages[id]
+                        .Content
+                        .GetAsync()
+                        .GetAwaiter()
+                        .GetResult())
+                    using (MemoryStream memory = new MemoryStream())
+                    {
+                        stream.CopyTo(memory);
+                        return memory.ToArray();
+                    }
+                },
+                "Get MIME content for message " + id +
+                " in " + sharedmailbox_name);
         }
 
         private MailFolder GetInputFolder()
         {
-            return string.Equals(sharedmailbox_folder_in, "Inbox", StringComparison.OrdinalIgnoreCase)
-                ? graphService.Users[sharedmailbox_name].MailFolders["inbox"].GetAsync().GetAwaiter().GetResult()
-                : GetChildFolderByName(sharedmailbox_folder_in);
+            if (string.Equals(
+                sharedmailbox_folder_in,
+                "Inbox",
+                StringComparison.OrdinalIgnoreCase))
+            {
+                return ExecuteGraphWithRetry(
+                    () => graphService.Users[sharedmailbox_name]
+                        .MailFolders["inbox"]
+                        .GetAsync()
+                        .GetAwaiter()
+                        .GetResult(),
+                    "Get input folder Inbox for " + sharedmailbox_name);
+            }
+
+            return GetChildFolderByName(sharedmailbox_folder_in);
         }
 
         private MailFolder GetChildFolderByName(string nameFolder)
         {
             string safe = (nameFolder ?? "").Replace("'", "''");
-            MailFolderCollectionResponse folders = graphService.Users[sharedmailbox_name].MailFolders["inbox"].ChildFolders
-                .GetAsync(c => c.QueryParameters.Filter = "displayName eq '" + safe + "'").GetAwaiter().GetResult();
+
+            MailFolderCollectionResponse folders = ExecuteGraphWithRetry(
+                () => graphService.Users[sharedmailbox_name]
+                    .MailFolders["inbox"]
+                    .ChildFolders
+                    .GetAsync(c =>
+                    {
+                        c.QueryParameters.Filter =
+                            "displayName eq '" + safe + "'";
+                    })
+                    .GetAwaiter()
+                    .GetResult(),
+                "Find folder " + nameFolder +
+                " for " + sharedmailbox_name);
+
             MailFolder folder = folders?.Value?.FirstOrDefault();
-            if (folder == null) throw new DirectoryNotFoundException("Folder not found : " + nameFolder);
+            if (folder == null)
+                throw new DirectoryNotFoundException(
+                    "Folder not found : " + nameFolder);
+
             return folder;
         }
 
         private void MarkEmailAsRead(string id)
         {
-            graphService.Users[sharedmailbox_name].Messages[id].PatchAsync(new Message { IsRead = true }).GetAwaiter().GetResult();
+            ExecuteGraphWithRetry(
+                () =>
+                {
+                    graphService.Users[sharedmailbox_name]
+                        .Messages[id]
+                        .PatchAsync(new Message { IsRead = true })
+                        .GetAwaiter()
+                        .GetResult();
+                    return true;
+                },
+                "Mark message as read " + id +
+                " in " + sharedmailbox_name);
         }
 
         private void MoveEmail(string id, string destinationId)
         {
-            var request = new Microsoft.Graph.Users.Item.Messages.Item.Move.MovePostRequestBody { DestinationId = destinationId };
-            graphService.Users[sharedmailbox_name].Messages[id].Move.PostAsync(request).GetAwaiter().GetResult();
+            ExecuteGraphWithRetry(
+                () =>
+                {
+                    var request =
+                        new Microsoft.Graph.Users.Item.Messages.Item.Move
+                            .MovePostRequestBody
+                        {
+                            DestinationId = destinationId
+                        };
+
+                    graphService.Users[sharedmailbox_name]
+                        .Messages[id]
+                        .Move
+                        .PostAsync(request)
+                        .GetAwaiter()
+                        .GetResult();
+                    return true;
+                },
+                "Move message " + id +
+                " in " + sharedmailbox_name);
         }
 
         private void SendTechnicalIssueMail(string method, string error, string type)
@@ -1245,10 +1415,197 @@ WHERE id_mailboxe=@ID;";
 
         private void WriteToFile(string message)
         {
-            if (string.IsNullOrWhiteSpace(logs_folder)) logs_folder = AppDomain.CurrentDomain.BaseDirectory;
-            Directory.CreateDirectory(logs_folder);
-            string file = Path.Combine(logs_folder, "IMCA_" + global_session_name + "_" + DateTime.Now.ToString("dd_MM_yyyy") + "_" + country + "_" + global_application_name + ".txt");
-            File.AppendAllText(file, DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + " - " + message + Environment.NewLine);
+            try
+            {
+                string targetLogsFolder = logs_folder;
+
+                if (string.IsNullOrWhiteSpace(targetLogsFolder))
+                {
+                    targetLogsFolder =
+                        AppDomain.CurrentDomain.BaseDirectory;
+                }
+
+                Directory.CreateDirectory(targetLogsFolder);
+
+                string logPath = Path.Combine(
+                    targetLogsFolder,
+                    "IMCA_" +
+                    global_session_name + "_" +
+                    DateTime.Now.ToString("dd_MM_yyyy") + "_" +
+                    country + "_" +
+                    global_application_name +
+                    ".txt");
+
+                string line =
+                    DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") +
+                    " - " +
+                    (message ?? "") +
+                    Environment.NewLine;
+
+                lock (logSyncRoot)
+                {
+                    WriteLogLineWithCrossProcessLock(logPath, line);
+                }
+            }
+            catch (Exception ex)
+            {
+                WriteEmergencyLog(
+                    "WriteToFile failure" +
+                    " - Error : " + ex.Message +
+                    " - Original message : " + (message ?? ""));
+            }
+        }
+
+        private static void WriteLogLineWithCrossProcessLock(
+            string logPath,
+            string line)
+        {
+            string mutexName =
+                "Local\\IMCA_APPLE_LOG_" +
+                GetStableLogNameHash(logPath);
+
+            using (var mutex =
+                new System.Threading.Mutex(false, mutexName))
+            {
+                bool lockTaken = false;
+
+                try
+                {
+                    try
+                    {
+                        lockTaken = mutex.WaitOne(
+                            TimeSpan.FromSeconds(10));
+                    }
+                    catch (System.Threading.AbandonedMutexException)
+                    {
+                        lockTaken = true;
+                    }
+
+                    if (!lockTaken)
+                    {
+                        throw new IOException(
+                            "Unable to acquire the log mutex within 10 seconds");
+                    }
+
+                    const int maxAttempts = 5;
+                    IOException lastWriteException = null;
+
+                    for (int attempt = 1;
+                         attempt <= maxAttempts;
+                         attempt++)
+                    {
+                        try
+                        {
+                            byte[] content = Encoding.UTF8.GetBytes(line);
+
+                            using (var stream = new FileStream(
+                                logPath,
+                                FileMode.Append,
+                                FileAccess.Write,
+                                FileShare.ReadWrite))
+                            {
+                                stream.Write(content, 0, content.Length);
+                                stream.Flush();
+                            }
+
+                            return;
+                        }
+                        catch (IOException ex)
+                        {
+                            lastWriteException = ex;
+
+                            if (attempt < maxAttempts)
+                            {
+                                System.Threading.Thread.Sleep(attempt * 100);
+                            }
+                        }
+                    }
+
+                    throw new IOException(
+                        "Unable to write the log file after " +
+                        maxAttempts +
+                        " attempts : " +
+                        logPath,
+                        lastWriteException);
+                }
+                finally
+                {
+                    if (lockTaken)
+                    {
+                        try
+                        {
+                            mutex.ReleaseMutex();
+                        }
+                        catch (ApplicationException)
+                        {
+                        }
+                    }
+                }
+            }
+        }
+
+        private void WriteEmergencyLog(string message)
+        {
+            try
+            {
+                string emergencyFolder =
+                    string.IsNullOrWhiteSpace(temp_folder)
+                        ? AppDomain.CurrentDomain.BaseDirectory
+                        : temp_folder;
+
+                Directory.CreateDirectory(emergencyFolder);
+
+                string emergencyFile = Path.Combine(
+                    emergencyFolder,
+                    "IMCA_LOG_FAILURE_" +
+                    global_application_name +
+                    "_ACTION_ID_" +
+                    System.Diagnostics.Process
+                        .GetCurrentProcess()
+                        .Id +
+                    "_" +
+                    DateTime.Now.ToString("dd_MM_yyyy") +
+                    ".txt");
+
+                string line =
+                    DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff") +
+                    " - " +
+                    (message ?? "") +
+                    Environment.NewLine;
+
+                byte[] content = Encoding.UTF8.GetBytes(line);
+
+                using (var stream = new FileStream(
+                    emergencyFile,
+                    FileMode.Append,
+                    FileAccess.Write,
+                    FileShare.ReadWrite))
+                {
+                    stream.Write(content, 0, content.Length);
+                    stream.Flush();
+                }
+            }
+            catch
+            {
+                // Last-resort protection: logging must never stop processing.
+            }
+        }
+
+        private static string GetStableLogNameHash(string value)
+        {
+            unchecked
+            {
+                uint hash = 2166136261;
+
+                foreach (char character in
+                    (value ?? "").ToUpperInvariant())
+                {
+                    hash ^= character;
+                    hash *= 16777619;
+                }
+
+                return hash.ToString("X8", CultureInfo.InvariantCulture);
+            }
         }
 
         private static string GetServicePath()
