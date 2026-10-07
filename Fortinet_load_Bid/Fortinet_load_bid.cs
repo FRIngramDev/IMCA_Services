@@ -2,15 +2,19 @@
 using ClosedXML.Excel;
 using Microsoft.Graph;
 using Microsoft.Graph.Models;
+using Microsoft.Graph.Models.ODataErrors;
+using Microsoft.Kiota.Abstractions;
 using Microsoft.VisualBasic;
 using Newtonsoft.Json;
 using System;
 using System.Collections.Generic;
 using System.Data;
 using System.Data.SqlClient;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Net;
+using System.Net.Http;
 using System.Net.Security;
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
@@ -44,6 +48,7 @@ namespace IMCA_Services
         private string Append_FC_Quote_ID_To_Bid_Number = "";
 
         private string global_session_name = "";
+        private static readonly object logSyncRoot = new object();
 
         public Fortinet_load_bid()
         {
@@ -681,7 +686,7 @@ namespace IMCA_Services
             return Fortinet_BID;
 
         }
-  
+
         private string create_fortinet_BID_in_COP_with_Graph(string postData, GraphServiceClient service, string BID_NBR_ERP = "", int nb_trials = 5)
         {
             int trials = 1;
@@ -763,7 +768,16 @@ namespace IMCA_Services
                             SaveToSentItems = true,
                         };
 
-                        service.Me.SendMail.PostAsync(requestBody);
+                        ExecuteGraphWithRetry(
+                            () =>
+                            {
+                                service.Me.SendMail
+                                    .PostAsync(requestBody)
+                                    .GetAwaiter()
+                                    .GetResult();
+                                return true;
+                            },
+                            "Send Fortinet API error email");
 
                     }
 
@@ -808,29 +822,309 @@ namespace IMCA_Services
 
             return GraphService;
         }
+        private T ExecuteGraphWithRetry<T>(
+            Func<T> action,
+            string operation)
+        {
+            const int maxAttempts = 3;
+            Exception lastException = null;
+
+            for (int attempt = 1; attempt <= maxAttempts; attempt++)
+            {
+                try
+                {
+                    return action();
+                }
+                catch (Exception ex) when (IsTransientGraphError(ex))
+                {
+                    lastException = ex;
+
+                    if (attempt >= maxAttempts)
+                    {
+                        break;
+                    }
+
+                    int delayMilliseconds = attempt * 5000;
+
+                    WriteToFile(
+                        "   Temporary Graph error during " + operation +
+                        " - Attempt : " + attempt + "/" + maxAttempts +
+                        " - Retry in : " + delayMilliseconds + " ms" +
+                        " - Details : " + GetDetailedExceptionMessage(ex));
+
+                    System.Threading.Thread.Sleep(delayMilliseconds);
+                }
+            }
+
+            throw new InvalidOperationException(
+                "Graph operation failed after " + maxAttempts +
+                " application attempt(s) : " + operation +
+                " - " + GetDetailedExceptionMessage(lastException),
+                lastException);
+        }
+
+        private static bool IsTransientGraphError(Exception exception)
+        {
+            Exception current = exception;
+
+            while (current != null)
+            {
+                if (current is HttpRequestException ||
+                    current is TimeoutException ||
+                    current is System.Threading.Tasks.TaskCanceledException)
+                {
+                    return true;
+                }
+
+                if (current is ApiException apiException)
+                {
+                    int status = apiException.ResponseStatusCode;
+
+                    if (status == 408 ||
+                        status == 429 ||
+                        status == 500 ||
+                        status == 502 ||
+                        status == 503 ||
+                        status == 504)
+                    {
+                        return true;
+                    }
+                }
+
+                ODataError graphError = current as ODataError;
+                string graphCode = graphError?.Error?.Code ?? "";
+
+                if (graphCode.Equals("TooManyRequests", StringComparison.OrdinalIgnoreCase) ||
+                    graphCode.Equals("ErrorServerBusy", StringComparison.OrdinalIgnoreCase) ||
+                    graphCode.Equals("ServiceUnavailable", StringComparison.OrdinalIgnoreCase) ||
+                    graphCode.Equals("ApplicationThrottled", StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+
+                string message = current.Message ?? "";
+
+                if (message.IndexOf("Too many retries performed", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    message.IndexOf("More than 3 retries encountered", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    message.IndexOf("temporarily unavailable", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    message.IndexOf("service unavailable", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    message.IndexOf("timed out", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    message.IndexOf("An error occurred while sending the request", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    return true;
+                }
+
+                current = current.InnerException;
+            }
+
+            return false;
+        }
+
+        private static string GetDetailedExceptionMessage(Exception exception)
+        {
+            if (exception == null)
+            {
+                return "Unknown error";
+            }
+
+            List<string> details = new List<string>();
+            Exception current = exception;
+
+            while (current != null)
+            {
+                details.Add("Type=" + current.GetType().FullName);
+
+                if (!string.IsNullOrWhiteSpace(current.Message))
+                {
+                    details.Add("Message=" + current.Message);
+                }
+
+                ODataError graphError = current as ODataError;
+
+                if (graphError != null)
+                {
+                    if (!string.IsNullOrWhiteSpace(graphError.Error?.Code))
+                    {
+                        details.Add("GraphCode=" + graphError.Error.Code);
+                    }
+
+                    if (!string.IsNullOrWhiteSpace(graphError.Error?.Message))
+                    {
+                        details.Add("GraphMessage=" + graphError.Error.Message);
+                    }
+                }
+
+                if (current is ApiException apiException)
+                {
+                    details.Add("HttpStatus=" + apiException.ResponseStatusCode);
+                }
+
+                current = current.InnerException;
+            }
+
+            return string.Join(
+                " | ",
+                details.Distinct(StringComparer.OrdinalIgnoreCase));
+        }
+
+        private static string EscapeODataString(string value)
+        {
+            return value == null ? "" : value.Replace("'", "''");
+        }
+
         public void WriteToFile(string message)
         {
-            if (!Directory.Exists(logs_folder))
+            try
             {
-                Directory.CreateDirectory(logs_folder);
-            }
-            string filepath = logs_folder + "\\IMCA_" + global_session_name + "_" + DateTime.Now.Date.ToString("dd_MM_yyyy") + "_" + pays + "_FORTINET_BID_TO_COP.txt";
+                string targetLogsFolder = logs_folder;
+                if (string.IsNullOrWhiteSpace(targetLogsFolder))
+                    targetLogsFolder = AppDomain.CurrentDomain.BaseDirectory;
 
-            if (!File.Exists(filepath))
-            {
-                using (StreamWriter fic = File.CreateText(filepath))
+                Directory.CreateDirectory(targetLogsFolder);
+
+                string logPath = Path.Combine(
+                    targetLogsFolder,
+                    "IMCA_" + global_session_name + "_" +
+                    DateTime.Now.ToString("dd_MM_yyyy") + "_" +
+                    pays + "_SBO IMPORT FORTINET_.txt");
+
+                string line = (message ?? "") + Environment.NewLine;
+
+                lock (logSyncRoot)
                 {
-                    fic.WriteLine(message);
+                    WriteLogLineWithCrossProcessLock(logPath, line);
                 }
             }
-            else
+            catch (Exception ex)
             {
-                using (StreamWriter fic = File.AppendText(filepath))
+                WriteEmergencyLog(
+                    "WriteToFile failure" +
+                    " - Error : " + ex.Message +
+                    " - Original message : " + (message ?? ""));
+            }
+        }
+
+        private static void WriteLogLineWithCrossProcessLock(
+            string logPath,
+            string line)
+        {
+            string mutexName =
+                "Local\\IMCA_FORTINET_LOG_" +
+                GetStableLogNameHash(logPath);
+
+            using (var mutex =
+                new System.Threading.Mutex(false, mutexName))
+            {
+                bool lockTaken = false;
+                try
                 {
-                    fic.WriteLine(message);
+                    try
+                    {
+                        lockTaken = mutex.WaitOne(TimeSpan.FromSeconds(10));
+                    }
+                    catch (System.Threading.AbandonedMutexException)
+                    {
+                        lockTaken = true;
+                    }
+
+                    if (!lockTaken)
+                        throw new IOException(
+                            "Unable to acquire the log mutex within 10 seconds");
+
+                    const int maxAttempts = 5;
+                    IOException lastWriteException = null;
+
+                    for (int attempt = 1; attempt <= maxAttempts; attempt++)
+                    {
+                        try
+                        {
+                            byte[] content = Encoding.UTF8.GetBytes(line);
+                            using (var stream = new FileStream(
+                                logPath,
+                                FileMode.Append,
+                                FileAccess.Write,
+                                FileShare.ReadWrite))
+                            {
+                                stream.Write(content, 0, content.Length);
+                                stream.Flush();
+                            }
+                            return;
+                        }
+                        catch (IOException ex)
+                        {
+                            lastWriteException = ex;
+                            if (attempt < maxAttempts)
+                                System.Threading.Thread.Sleep(attempt * 100);
+                        }
+                    }
+
+                    throw new IOException(
+                        "Unable to write the log file after " +
+                        maxAttempts + " attempts : " + logPath,
+                        lastWriteException);
+                }
+                finally
+                {
+                    if (lockTaken)
+                    {
+                        try { mutex.ReleaseMutex(); }
+                        catch (ApplicationException) { }
+                    }
                 }
             }
+        }
 
+        private void WriteEmergencyLog(string message)
+        {
+            try
+            {
+                string emergencyFolder =
+                    string.IsNullOrWhiteSpace(temp_folder)
+                        ? AppDomain.CurrentDomain.BaseDirectory
+                        : temp_folder;
+
+                Directory.CreateDirectory(emergencyFolder);
+
+                string emergencyFile = Path.Combine(
+                    emergencyFolder,
+                    "IMCA_LOG_FAILURE_FORTINET_LOAD_BID_ACTION_ID_" +
+                    System.Diagnostics.Process.GetCurrentProcess().Id +
+                    "_" + DateTime.Now.ToString("dd_MM_yyyy") + ".txt");
+
+                string line =
+                    DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff") +
+                    " - " + (message ?? "") + Environment.NewLine;
+
+                byte[] content = Encoding.UTF8.GetBytes(line);
+                using (var stream = new FileStream(
+                    emergencyFile,
+                    FileMode.Append,
+                    FileAccess.Write,
+                    FileShare.ReadWrite))
+                {
+                    stream.Write(content, 0, content.Length);
+                    stream.Flush();
+                }
+            }
+            catch
+            {
+                // Last-resort protection: logging must never stop processing.
+            }
+        }
+
+        private static string GetStableLogNameHash(string value)
+        {
+            unchecked
+            {
+                uint hash = 2166136261;
+                foreach (char character in
+                    (value ?? "").ToUpperInvariant())
+                {
+                    hash ^= character;
+                    hash *= 16777619;
+                }
+                return hash.ToString("X8", CultureInfo.InvariantCulture);
+            }
         }
         private DataTable ConvertHTMLTablesToDataSet(string HTML)
         {
@@ -1165,7 +1459,17 @@ namespace IMCA_Services
                     SaveToSentItems = true,
                 };
 
-                service.Users[sharedmailbox_name].SendMail.PostAsync(requestBody).GetAwaiter().GetResult();
+                ExecuteGraphWithRetry(
+                    () =>
+                    {
+                        service.Users[sharedmailbox_name]
+                            .SendMail
+                            .PostAsync(requestBody)
+                            .GetAwaiter()
+                            .GetResult();
+                        return true;
+                    },
+                    "Send Fortinet notification email");
 
             }
 
@@ -1236,7 +1540,17 @@ namespace IMCA_Services
                     SaveToSentItems = true
                 };
 
-                service.Users[sharedmailbox_name].SendMail.PostAsync(requestBody).GetAwaiter().GetResult();
+                ExecuteGraphWithRetry(
+                    () =>
+                    {
+                        service.Users[sharedmailbox_name]
+                            .SendMail
+                            .PostAsync(requestBody)
+                            .GetAwaiter()
+                            .GetResult();
+                        return true;
+                    },
+                    "Send Fortinet notification email");
             }
 
         }
@@ -1320,44 +1634,111 @@ namespace IMCA_Services
 
                         if (sharedmailbox_folder_in.ToUpper().Trim() != "INBOX")
                         {
-                            sharedmailbox_folder_id = GraphService.Users[sharedmailbox_name].MailFolders["inbox"].ChildFolders.GetAsync(x =>
-                            {
-                                x.QueryParameters.Filter = $"displayName eq '{sharedmailbox_folder_in}'";
-                            }).GetAwaiter().GetResult();
+                            sharedmailbox_folder_id = ExecuteGraphWithRetry(
+                                () => GraphService.Users[sharedmailbox_name]
+                                    .MailFolders["inbox"]
+                                    .ChildFolders
+                                    .GetAsync(x =>
+                                    {
+                                        x.QueryParameters.Filter =
+                                            $"displayName eq '{EscapeODataString(sharedmailbox_folder_in)}'";
+                                    })
+                                    .GetAwaiter()
+                                    .GetResult(),
+                                "Find Fortinet input folder");
                         }
 
                         // Get the Folder Id of sharedmailbox_folder_out
 
-                        sharedmailbox_folder_out_id = GraphService.Users[sharedmailbox_name].MailFolders["inbox"].ChildFolders.GetAsync(x =>
-                        {
-                            x.QueryParameters.Filter = $"displayName eq '{sharedmailbox_folder_out}'";
-                        }).GetAwaiter().GetResult();
+                        sharedmailbox_folder_out_id = ExecuteGraphWithRetry(
+                            () => GraphService.Users[sharedmailbox_name]
+                                .MailFolders["inbox"]
+                                .ChildFolders
+                                .GetAsync(x =>
+                                {
+                                    x.QueryParameters.Filter =
+                                        $"displayName eq '{EscapeODataString(sharedmailbox_folder_out)}'";
+                                })
+                                .GetAwaiter()
+                                .GetResult(),
+                            "Find Fortinet output folder");
 
                         // Get the Folder Id of sharedmailbox_folder_in
 
-                        Erreur_folder_id = GraphService.Users[sharedmailbox_name].MailFolders["inbox"].ChildFolders.GetAsync(x =>
-                        {
-                            x.QueryParameters.Filter = $"displayName eq 'Erreur'";
-                        }).GetAwaiter().GetResult();
+                        Erreur_folder_id = ExecuteGraphWithRetry(
+                            () => GraphService.Users[sharedmailbox_name]
+                                .MailFolders["inbox"]
+                                .ChildFolders
+                                .GetAsync(x =>
+                                {
+                                    x.QueryParameters.Filter =
+                                        "displayName eq 'Erreur'";
+                                })
+                                .GetAwaiter()
+                                .GetResult(),
+                            "Find Fortinet error folder");
 
                         // Get the emails from Folder Id
                         if (sharedmailbox_folder_in.ToUpper().Trim() != "INBOX")
                         {
-                            messages = GraphService.Users[sharedmailbox_name].MailFolders[sharedmailbox_folder_id.Value.FirstOrDefault().Id].Messages.GetAsync((config) =>
-                            {
-                                config.QueryParameters.Top = int.Parse(number_of_mails);
-                                config.QueryParameters.Filter = $"receivedDateTime gt {searchdate.ToString("yyyy-MM-dd")} and (from/emailAddress/address) eq '" + sender_email_adress + "' and contains(subject,'FTQ-')";
-                                config.QueryParameters.Orderby = new string[] { "receivedDateTime desc" };
-                            }).GetAwaiter().GetResult();
+                            string inputFolderId =
+                                sharedmailbox_folder_id.Value.FirstOrDefault()?.Id;
+
+                            WriteToFile(
+                                "   Listing Graph messages" +
+                                " - Mailbox : " + sharedmailbox_name +
+                                " - Folder : " + sharedmailbox_folder_in +
+                                " - Filter date : " + searchdate.ToString("yyyy-MM-dd") +
+                                " - Top : " + number_of_mails);
+
+                            messages = ExecuteGraphWithRetry(
+                                () => GraphService.Users[sharedmailbox_name]
+                                    .MailFolders[inputFolderId]
+                                    .Messages
+                                    .GetAsync(config =>
+                                    {
+                                        config.QueryParameters.Top =
+                                            int.Parse(number_of_mails);
+                                        config.QueryParameters.Filter =
+                                            $"receivedDateTime gt {searchdate:yyyy-MM-dd} " +
+                                            "and (from/emailAddress/address) eq '" +
+                                            EscapeODataString(sender_email_adress) +
+                                            "' and contains(subject,'FTQ-')";
+                                        config.QueryParameters.Orderby =
+                                            new string[] { "receivedDateTime desc" };
+                                    })
+                                    .GetAwaiter()
+                                    .GetResult(),
+                                "List Fortinet messages");
                         }
                         else
                         {
-                            messages = GraphService.Users[sharedmailbox_name].MailFolders["inbox"].Messages.GetAsync((config) =>
-                                {
-                                    config.QueryParameters.Top = int.Parse(number_of_mails);
-                                    config.QueryParameters.Filter = $"receivedDateTime gt {searchdate.ToString("yyyy-MM-dd")} and (from/emailAddress/address) eq '" + sender_email_adress + "' and contains(subject,'FTQ-')";
-                                    config.QueryParameters.Orderby = new string[] { "receivedDateTime desc" };
-                                }).GetAwaiter().GetResult();
+                            WriteToFile(
+                                "   Listing Graph messages" +
+                                " - Mailbox : " + sharedmailbox_name +
+                                " - Folder : Inbox" +
+                                " - Filter date : " + searchdate.ToString("yyyy-MM-dd") +
+                                " - Top : " + number_of_mails);
+
+                            messages = ExecuteGraphWithRetry(
+                                () => GraphService.Users[sharedmailbox_name]
+                                    .MailFolders["inbox"]
+                                    .Messages
+                                    .GetAsync(config =>
+                                    {
+                                        config.QueryParameters.Top =
+                                            int.Parse(number_of_mails);
+                                        config.QueryParameters.Filter =
+                                            $"receivedDateTime gt {searchdate:yyyy-MM-dd} " +
+                                            "and (from/emailAddress/address) eq '" +
+                                            EscapeODataString(sender_email_adress) +
+                                            "' and contains(subject,'FTQ-')";
+                                        config.QueryParameters.Orderby =
+                                            new string[] { "receivedDateTime desc" };
+                                    })
+                                    .GetAwaiter()
+                                    .GetResult(),
+                                "List Fortinet Inbox messages");
                         }
 
                         nb_mail = 0;
@@ -1373,7 +1754,14 @@ namespace IMCA_Services
                             {
                                 try
                                 {
-                                    var mimeContentStream = GraphService.Users[sharedmailbox_name].Messages[email.Id].Content.GetAsync().GetAwaiter().GetResult();
+                                    var mimeContentStream = ExecuteGraphWithRetry(
+                                        () => GraphService.Users[sharedmailbox_name]
+                                            .Messages[email.Id]
+                                            .Content
+                                            .GetAsync()
+                                            .GetAwaiter()
+                                            .GetResult(),
+                                        "Download Fortinet MIME content");
 
 
                                     string emlFileName = email_sharing_folder + "\\" + CleanFileName(email.Subject) + ".eml";
@@ -1480,7 +1868,18 @@ namespace IMCA_Services
                                         {
                                             DestinationId = Erreur_folder_id.Value[0].Id
                                         };
-                                        GraphService.Users[sharedmailbox_name].Messages[email.Id].Move.PostAsync(requestBody).GetAwaiter().GetResult(); ;
+                                        ExecuteGraphWithRetry(
+                                            () =>
+                                            {
+                                                GraphService.Users[sharedmailbox_name]
+                                                    .Messages[email.Id]
+                                                    .Move
+                                                    .PostAsync(requestBody)
+                                                    .GetAwaiter()
+                                                    .GetResult();
+                                                return true;
+                                            },
+                                            "Move Fortinet message to error folder");
                                     }
                                     else
                                     {
@@ -1489,7 +1888,18 @@ namespace IMCA_Services
                                         {
                                             DestinationId = sharedmailbox_folder_out_id.Value[0].Id
                                         };
-                                        GraphService.Users[sharedmailbox_name].Messages[email.Id].Move.PostAsync(requestBody).GetAwaiter().GetResult();
+                                        ExecuteGraphWithRetry(
+                                            () =>
+                                            {
+                                                GraphService.Users[sharedmailbox_name]
+                                                    .Messages[email.Id]
+                                                    .Move
+                                                    .PostAsync(requestBody)
+                                                    .GetAwaiter()
+                                                    .GetResult();
+                                                return true;
+                                            },
+                                            "Move Fortinet message");
                                     }
 
                                     nb_mail = nb_mail + 1;
@@ -1502,9 +1912,20 @@ namespace IMCA_Services
                                     {
                                         DestinationId = Erreur_folder_id.Value[0].Id
                                     };
-                                    GraphService.Users[sharedmailbox_name].Messages[email.Id].Move.PostAsync(requestBody).GetAwaiter().GetResult();
+                                    ExecuteGraphWithRetry(
+                                            () =>
+                                            {
+                                                GraphService.Users[sharedmailbox_name]
+                                                    .Messages[email.Id]
+                                                    .Move
+                                                    .PostAsync(requestBody)
+                                                    .GetAwaiter()
+                                                    .GetResult();
+                                                return true;
+                                            },
+                                            "Move Fortinet message");
 
-                                    WriteToFile("   Error : " + ex.Message + DateTime.Now.ToString("dd/MM/yyyy HH:mm:ss"));
+                                    WriteToFile("   Error : " + GetDetailedExceptionMessage(ex) + " at " + DateTime.Now.ToString("dd/MM/yyyy HH:mm:ss"));
                                 }
                             }
 
@@ -1527,7 +1948,7 @@ namespace IMCA_Services
                     {
                         if (debug.ToUpper() == "TRUE")
                         {
-                            WriteToFile("   Error get emails         : " + e.Message);
+                            WriteToFile("   Error get emails         : " + GetDetailedExceptionMessage(e));
                         }
                     }
                 }

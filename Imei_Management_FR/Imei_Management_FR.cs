@@ -1,5 +1,7 @@
 ﻿using Microsoft.Graph;
 using Microsoft.Graph.Models;
+using Microsoft.Graph.Models.ODataErrors;
+using Microsoft.Kiota.Abstractions;
 using Microsoft.VisualBasic.FileIO;
 using Newtonsoft.Json;
 using System;
@@ -9,6 +11,8 @@ using System.Data.SqlClient;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Net.Http;
+using System.Text;
 using System.Text.RegularExpressions;
 
 namespace IMEI_MANAGEMENT_FR
@@ -57,6 +61,7 @@ namespace IMEI_MANAGEMENT_FR
         private string sql_connexion_parameter_global = "";
 
         // ----- Microsoft Graph client -----
+        private static readonly object logSyncRoot = new object();
         private GraphServiceClient graphService = null;
 
         /// <summary>
@@ -250,12 +255,12 @@ namespace IMEI_MANAGEMENT_FR
                                 WriteToFile(
                                     "   Error reading mailbox " +
                                     sharedmailbox_name + " : " +
-                                    mailboxException.Message);
+                                    GetDetailedExceptionMessage(mailboxException));
 
                                 mailboxErrors.Add(
                                     new Exception(
                                         "Mailbox " + sharedmailbox_name +
-                                        " : " + mailboxException.Message,
+                                        " : " + GetDetailedExceptionMessage(mailboxException),
                                         mailboxException));
 
                                 if (!(mailboxException is
@@ -265,7 +270,7 @@ namespace IMEI_MANAGEMENT_FR
                                         nameof(Read_Email_with_Graph),
                                         "",
                                         sharedmailbox_name + " - " +
-                                        mailboxException.Message,
+                                        GetDetailedExceptionMessage(mailboxException),
                                         "MAILBOX PROCESSING");
                                 }
                             }
@@ -273,23 +278,25 @@ namespace IMEI_MANAGEMENT_FR
 
                         if (mailboxErrors.Count > 0)
                         {
-                            throw new AggregateException(
+                            WriteToFile(
+                                "Country processing completed with " +
                                 mailboxErrors.Count +
-                                " shared mailbox(es) could not be processed.",
-                                mailboxErrors);
+                                " mailbox technical error(s). " +
+                                "Errors were logged and alerted without stopping the IMCA action.");
                         }
                     }
                     catch (Exception e)
                     {
-                        WriteToFile("   Error get emails : " + e.Message);
-                        throw;
+                        WriteToFile(
+                            "   Error get emails : " +
+                            GetDetailedExceptionMessage(e));
                     }
                 }
             }
             catch (Exception ex)
             {
                 WriteToFile(
-                    "Global error Read_Email_with_Graph : " + ex.Message);
+                    "Global error Read_Email_with_Graph : " + GetDetailedExceptionMessage(ex));
                 throw;
             }
             finally
@@ -353,6 +360,29 @@ namespace IMEI_MANAGEMENT_FR
                                 WriteToFile(
                                     "       Subject : " + email.Subject +
                                     " at " + DateTime.Now.ToString("dd/MM/yyyy HH:mm:ss"));
+                            }
+
+                            // Ignore automatic absence replies before checking attachments.
+                            // This prevents out-of-office messages from generating false alerts.
+                            if (IsAutomaticReply(email))
+                            {
+                                WriteToFile(
+                                    "       Automatic reply ignored : " +
+                                    (email.Subject ?? "<no subject>") +
+                                    " - Sender : " + GetSenderAddress(email));
+
+                                MarkEmailAsRead(
+                                    graphService,
+                                    sharedmailbox_name,
+                                    email.Id);
+
+                                MoveEmail(
+                                    graphService,
+                                    sharedmailbox_name,
+                                    email.Id,
+                                    archiveFolder.Id);
+
+                                continue;
                             }
 
                             if (email.HasAttachments == true)
@@ -440,7 +470,7 @@ namespace IMEI_MANAGEMENT_FR
                         catch (Exception ex)
                         {
                             WriteToFile(
-                                "       Error processing email : " + ex.Message +
+                                "       Error processing email : " + GetDetailedExceptionMessage(ex) +
                                 " at " + DateTime.Now.ToString("dd/MM/yyyy HH:mm:ss"));
 
                             try
@@ -460,7 +490,7 @@ namespace IMEI_MANAGEMENT_FR
                             {
                                 WriteToFile(
                                     "       Error moving email to Erreur folder : " +
-                                    moveException.Message);
+                                    GetDetailedExceptionMessage(moveException));
                             }
                         }
 
@@ -1079,7 +1109,7 @@ namespace IMEI_MANAGEMENT_FR
             }
             catch (Exception mailEx)
             {
-                WriteToFile("Error sending " + type_error + " technical issue email : " + mailEx.Message);
+                WriteToFile("Error sending " + type_error + " technical issue email : " + GetDetailedExceptionMessage(mailEx));
             }
         }
 
@@ -1133,11 +1163,17 @@ namespace IMEI_MANAGEMENT_FR
                 SaveToSentItems = true
             };
 
-            graphService.Users[sharedmailbox_name]
-                .SendMail
-                .PostAsync(requestBody)
-                .GetAwaiter()
-                .GetResult();
+            ExecuteGraphWithRetry(
+                () =>
+                {
+                    graphService.Users[sharedmailbox_name]
+                        .SendMail
+                        .PostAsync(requestBody)
+                        .GetAwaiter()
+                        .GetResult();
+                    return true;
+                },
+                "Send IMEI technical email : " + subject);
         }
 
         private List<Recipient> BuildRecipients(string emails)
@@ -1170,16 +1206,93 @@ namespace IMEI_MANAGEMENT_FR
             return recipients;
         }
 
+        /// <summary>
+        /// Detects automatic replies, including out-of-office messages.
+        /// Header detection is preferred; subject matching is only a fallback.
+        /// </summary>
+        private bool IsAutomaticReply(Message email)
+        {
+            if (email == null)
+            {
+                return false;
+            }
+
+            if (email.InternetMessageHeaders != null)
+            {
+                foreach (InternetMessageHeader header in email.InternetMessageHeaders)
+                {
+                    string headerName = (header.Name ?? "").Trim();
+                    string headerValue = (header.Value ?? "").Trim();
+
+                    if (headerName.Equals(
+                            "Auto-Submitted",
+                            StringComparison.OrdinalIgnoreCase) &&
+                        !headerValue.Equals(
+                            "no",
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        return true;
+                    }
+
+                    if (headerName.Equals("X-Autoreply", StringComparison.OrdinalIgnoreCase) ||
+                        headerName.Equals("X-Auto-Response-Suppress", StringComparison.OrdinalIgnoreCase) ||
+                        headerName.Equals("X-Autorespond", StringComparison.OrdinalIgnoreCase) ||
+                        headerName.Equals("X-Autoresponder", StringComparison.OrdinalIgnoreCase))
+                    {
+                        return true;
+                    }
+
+                    if (headerName.Equals("Precedence", StringComparison.OrdinalIgnoreCase) &&
+                        (headerValue.Equals("auto_reply", StringComparison.OrdinalIgnoreCase) ||
+                         headerValue.Equals("auto-reply", StringComparison.OrdinalIgnoreCase)))
+                    {
+                        return true;
+                    }
+                }
+            }
+
+            string subject = (email.Subject ?? "").Trim();
+            string[] automaticReplySubjects =
+            {
+                "réponse automatique",
+                "reponse automatique",
+                "automatic reply",
+                "auto reply",
+                "out of office",
+                "hors du bureau",
+                "absence du bureau",
+                "abwesenheitsnotiz",
+                "risposta automatica",
+                "respuesta automática",
+                "respuesta automatica"
+            };
+
+            return automaticReplySubjects.Any(value =>
+                subject.IndexOf(value, StringComparison.OrdinalIgnoreCase) >= 0);
+        }
+
+        private static string GetSenderAddress(Message email)
+        {
+            if (email?.From?.EmailAddress == null)
+            {
+                return "<unknown sender>";
+            }
+
+            return email.From.EmailAddress.Address ?? "<unknown sender>";
+        }
+
         private List<string> DownloadCSVAttachmentsWithGraph(GraphServiceClient graphService, string mailbox, string messageId)
         {
             List<string> downloadedFiles = new List<string>();
 
-            AttachmentCollectionResponse attachments = graphService.Users[mailbox]
-                .Messages[messageId]
-                .Attachments
-                .GetAsync()
-                .GetAwaiter()
-                .GetResult();
+            AttachmentCollectionResponse attachments = ExecuteGraphWithRetry(
+                () => graphService.Users[mailbox]
+                    .Messages[messageId]
+                    .Attachments
+                    .GetAsync()
+                    .GetAwaiter()
+                    .GetResult(),
+                "Read IMEI message attachments");
 
             if (attachments?.Value == null)
             {
@@ -1216,73 +1329,100 @@ namespace IMEI_MANAGEMENT_FR
             return string.Join("_", fileName.Split(Path.GetInvalidFileNameChars())).Trim();
         }
 
-        private void MarkEmailAsRead(GraphServiceClient graphService, string mailbox, string messageId)
+        private void MarkEmailAsRead(
+            GraphServiceClient graphService,
+            string mailbox,
+            string messageId)
         {
-            Message messageUpdate = new Message
-            {
-                IsRead = true
-            };
-
-            graphService.Users[mailbox]
-                .Messages[messageId]
-                .PatchAsync(messageUpdate)
-                .GetAwaiter()
-                .GetResult();
+            ExecuteGraphWithRetry(
+                () =>
+                {
+                    graphService.Users[mailbox]
+                        .Messages[messageId]
+                        .PatchAsync(new Message { IsRead = true })
+                        .GetAwaiter()
+                        .GetResult();
+                    return true;
+                },
+                "Mark IMEI message as read");
         }
 
-        private void MoveEmail(GraphServiceClient graphService, string mailbox, string messageId, string destinationFolderId)
+        private void MoveEmail(
+            GraphServiceClient graphService,
+            string mailbox,
+            string messageId,
+            string destinationFolderId)
         {
-            var requestBody = new Microsoft.Graph.Users.Item.Messages.Item.Move.MovePostRequestBody
-            {
-                DestinationId = destinationFolderId
-            };
+            var requestBody =
+                new Microsoft.Graph.Users.Item.Messages.Item.Move
+                    .MovePostRequestBody
+                {
+                    DestinationId = destinationFolderId
+                };
 
-            graphService.Users[mailbox]
-                .Messages[messageId]
-                .Move
-                .PostAsync(requestBody)
-                .GetAwaiter()
-                .GetResult();
+            ExecuteGraphWithRetry(
+                () =>
+                {
+                    graphService.Users[mailbox]
+                        .Messages[messageId]
+                        .Move
+                        .PostAsync(requestBody)
+                        .GetAwaiter()
+                        .GetResult();
+                    return true;
+                },
+                "Move IMEI message");
         }
 
         private MessageCollectionResponse GetMessagesToProcess(
             GraphServiceClient graphService,
             string folderId)
         {
-            int topEmails = 10;
+            int topEmails;
 
-            if (!int.TryParse(number_of_mails, out topEmails))
+            if (!int.TryParse(number_of_mails, out topEmails) || topEmails <= 0)
             {
                 topEmails = 10;
             }
 
-            return graphService.Users[sharedmailbox_name]
-                .MailFolders[folderId]
-                .Messages
-                .GetAsync(config =>
-                {
-                    config.QueryParameters.Top = topEmails;
-                    config.QueryParameters.Orderby =
-                        new string[] { "receivedDateTime asc" };
-                    config.QueryParameters.Select = new string[]
-                    {
-                        "id",
-                        "subject",
-                        "from",
-                        "hasAttachments",
-                        "receivedDateTime",
-                        "isRead"
-                    };
+            string filter = BuildMessageFilter();
 
-                    string filter = BuildMessageFilter();
+            WriteToFile(
+                "   Listing Graph messages" +
+                " - Mailbox : " + sharedmailbox_name +
+                " - Folder : " + sharedmailbox_folder_in +
+                " - Filter : " +
+                (string.IsNullOrWhiteSpace(filter) ? "<none>" : filter) +
+                " - Top : " + topEmails);
 
-                    if (!string.IsNullOrWhiteSpace(filter))
+            return ExecuteGraphWithRetry(
+                () => graphService.Users[sharedmailbox_name]
+                    .MailFolders[folderId]
+                    .Messages
+                    .GetAsync(config =>
                     {
-                        config.QueryParameters.Filter = filter;
-                    }
-                })
-                .GetAwaiter()
-                .GetResult();
+                        config.QueryParameters.Top = topEmails;
+                        config.QueryParameters.Orderby =
+                            new string[] { "receivedDateTime asc" };
+                        config.QueryParameters.Select = new string[]
+                        {
+                            "id",
+                            "subject",
+                            "from",
+                            "hasAttachments",
+                            "receivedDateTime",
+                            "isRead",
+                            "internetMessageHeaders"
+                        };
+
+                        if (!string.IsNullOrWhiteSpace(filter))
+                        {
+                            config.QueryParameters.Filter = filter;
+                        }
+                    })
+                    .GetAwaiter()
+                    .GetResult(),
+                "List IMEI messages");
         }
 
         private string BuildMessageFilter()
@@ -1321,13 +1461,15 @@ namespace IMEI_MANAGEMENT_FR
 
         private MailFolder GetInputFolder(GraphServiceClient graphService)
         {
-            if (sharedmailbox_folder_in.ToUpper().Trim() == "INBOX")
+            if (sharedmailbox_folder_in.ToUpperInvariant().Trim() == "INBOX")
             {
-                return graphService.Users[sharedmailbox_name]
-                    .MailFolders["inbox"]
-                    .GetAsync()
-                    .GetAwaiter()
-                    .GetResult();
+                return ExecuteGraphWithRetry(
+                    () => graphService.Users[sharedmailbox_name]
+                        .MailFolders["inbox"]
+                        .GetAsync()
+                        .GetAwaiter()
+                        .GetResult(),
+                    "Read IMEI Inbox folder");
             }
 
             return GetChildFolderByName(
@@ -1343,25 +1485,169 @@ namespace IMEI_MANAGEMENT_FR
         {
             string safeFolderName = EscapeODataString(folderName);
 
-            MailFolderCollectionResponse folders = graphService.Users[mailbox]
-                .MailFolders["inbox"]
-                .ChildFolders
-                .GetAsync(config =>
-                {
-                    config.QueryParameters.Filter =
-                        $"displayName eq '{safeFolderName}'";
-                })
-                .GetAwaiter()
-                .GetResult();
+            MailFolderCollectionResponse folders = ExecuteGraphWithRetry(
+                () => graphService.Users[mailbox]
+                    .MailFolders["inbox"]
+                    .ChildFolders
+                    .GetAsync(config =>
+                    {
+                        config.QueryParameters.Filter =
+                            $"displayName eq '{safeFolderName}'";
+                    })
+                    .GetAwaiter()
+                    .GetResult(),
+                "Find IMEI folder " + folderName);
 
             if (folders == null ||
                 folders.Value == null ||
                 folders.Value.Count == 0)
             {
-                throw new Exception("Folder not found : " + folderName);
+                throw new DirectoryNotFoundException(
+                    "Folder not found under Inbox : " + folderName);
             }
 
             return folders.Value.First();
+        }
+
+        private T ExecuteGraphWithRetry<T>(
+            Func<T> action,
+            string operation)
+        {
+            const int maxAttempts = 3;
+            Exception lastException = null;
+
+            for (int attempt = 1; attempt <= maxAttempts; attempt++)
+            {
+                try
+                {
+                    return action();
+                }
+                catch (Exception ex) when (IsTransientGraphError(ex))
+                {
+                    lastException = ex;
+
+                    if (attempt >= maxAttempts)
+                    {
+                        break;
+                    }
+
+                    int delayMilliseconds = attempt * 5000;
+
+                    WriteToFile(
+                        "   Temporary Graph error during " + operation +
+                        " - Attempt : " + attempt + "/" + maxAttempts +
+                        " - Retry in : " + delayMilliseconds + " ms" +
+                        " - Details : " + GetDetailedExceptionMessage(ex));
+
+                    System.Threading.Thread.Sleep(delayMilliseconds);
+                }
+            }
+
+            throw new InvalidOperationException(
+                "Graph operation failed after " + maxAttempts +
+                " application attempt(s) : " + operation +
+                " - " + GetDetailedExceptionMessage(lastException),
+                lastException);
+        }
+
+        private static bool IsTransientGraphError(Exception exception)
+        {
+            Exception current = exception;
+
+            while (current != null)
+            {
+                if (current is HttpRequestException ||
+                    current is TimeoutException ||
+                    current is System.Threading.Tasks.TaskCanceledException)
+                {
+                    return true;
+                }
+
+                if (current is ApiException apiException)
+                {
+                    int status = apiException.ResponseStatusCode;
+
+                    if (status == 408 || status == 429 || status == 500 ||
+                        status == 502 || status == 503 || status == 504)
+                    {
+                        return true;
+                    }
+                }
+
+                ODataError graphError = current as ODataError;
+                string graphCode = graphError?.Error?.Code ?? "";
+
+                if (graphCode.Equals("TooManyRequests", StringComparison.OrdinalIgnoreCase) ||
+                    graphCode.Equals("ErrorServerBusy", StringComparison.OrdinalIgnoreCase) ||
+                    graphCode.Equals("ServiceUnavailable", StringComparison.OrdinalIgnoreCase) ||
+                    graphCode.Equals("ApplicationThrottled", StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+
+                string message = current.Message ?? "";
+
+                if (message.IndexOf("Too many retries performed", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    message.IndexOf("More than 3 retries encountered", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    message.IndexOf("temporarily unavailable", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    message.IndexOf("service unavailable", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    message.IndexOf("timed out", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    message.IndexOf("An error occurred while sending the request", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    return true;
+                }
+
+                current = current.InnerException;
+            }
+
+            return false;
+        }
+
+        private static string GetDetailedExceptionMessage(Exception exception)
+        {
+            if (exception == null)
+            {
+                return "Unknown error";
+            }
+
+            List<string> details = new List<string>();
+            Exception current = exception;
+
+            while (current != null)
+            {
+                details.Add("Type=" + current.GetType().FullName);
+
+                if (!string.IsNullOrWhiteSpace(current.Message))
+                {
+                    details.Add("Message=" + current.Message);
+                }
+
+                ODataError graphError = current as ODataError;
+
+                if (graphError != null)
+                {
+                    if (!string.IsNullOrWhiteSpace(graphError.Error?.Code))
+                    {
+                        details.Add("GraphCode=" + graphError.Error.Code);
+                    }
+
+                    if (!string.IsNullOrWhiteSpace(graphError.Error?.Message))
+                    {
+                        details.Add("GraphMessage=" + graphError.Error.Message);
+                    }
+                }
+
+                if (current is ApiException apiException)
+                {
+                    details.Add("HttpStatus=" + apiException.ResponseStatusCode);
+                }
+
+                current = current.InnerException;
+            }
+
+            return string.Join(
+                " | ",
+                details.Distinct(StringComparer.OrdinalIgnoreCase));
         }
 
         private void ValidateRequiredCountryParameters(Country p)
@@ -1466,26 +1752,160 @@ namespace IMEI_MANAGEMENT_FR
 
         private void WriteToFile(string message)
         {
-            if (string.IsNullOrWhiteSpace(logs_folder))
+            try
             {
-                logs_folder = AppDomain.CurrentDomain.BaseDirectory;
-            }
+                string targetLogsFolder = logs_folder;
+                if (string.IsNullOrWhiteSpace(targetLogsFolder))
+                    targetLogsFolder = AppDomain.CurrentDomain.BaseDirectory;
 
-            if (!Directory.Exists(logs_folder))
+                Directory.CreateDirectory(targetLogsFolder);
+
+                string logPath = Path.Combine(
+                    targetLogsFolder,
+                    "IMCA_" + global_session_name + "_" +
+                    DateTime.Now.ToString("dd_MM_yyyy") + "_" +
+                    country + "_" + global_application_name + ".txt");
+
+                string line =
+                    DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") +
+                    " - " + (message ?? "") + Environment.NewLine;
+
+                lock (logSyncRoot)
+                {
+                    WriteLogLineWithCrossProcessLock(logPath, line);
+                }
+            }
+            catch (Exception ex)
             {
-                Directory.CreateDirectory(logs_folder);
+                WriteEmergencyLog(
+                    "WriteToFile failure" +
+                    " - Error : " + ex.Message +
+                    " - Original message : " + (message ?? ""));
             }
+        }
 
-            string filePath = Path.Combine(
-                logs_folder,
-                "IMCA_" + global_session_name + "_" +
-                DateTime.Now.ToString("dd_MM_yyyy") + "_" +
-                country + "_" + global_application_name + ".txt");
+        private static void WriteLogLineWithCrossProcessLock(
+            string logPath,
+            string line)
+        {
+            string mutexName =
+                "Local\\IMCA_IMEI_LOG_" +
+                GetStableLogNameHash(logPath);
 
-            File.AppendAllText(
-                filePath,
-                DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") +
-                " - " + message + Environment.NewLine);
+            using (var mutex =
+                new System.Threading.Mutex(false, mutexName))
+            {
+                bool lockTaken = false;
+                try
+                {
+                    try
+                    {
+                        lockTaken = mutex.WaitOne(TimeSpan.FromSeconds(10));
+                    }
+                    catch (System.Threading.AbandonedMutexException)
+                    {
+                        lockTaken = true;
+                    }
+
+                    if (!lockTaken)
+                        throw new IOException(
+                            "Unable to acquire the log mutex within 10 seconds");
+
+                    const int maxAttempts = 5;
+                    IOException lastWriteException = null;
+
+                    for (int attempt = 1; attempt <= maxAttempts; attempt++)
+                    {
+                        try
+                        {
+                            byte[] content = Encoding.UTF8.GetBytes(line);
+                            using (var stream = new FileStream(
+                                logPath,
+                                FileMode.Append,
+                                FileAccess.Write,
+                                FileShare.ReadWrite))
+                            {
+                                stream.Write(content, 0, content.Length);
+                                stream.Flush();
+                            }
+                            return;
+                        }
+                        catch (IOException ex)
+                        {
+                            lastWriteException = ex;
+                            if (attempt < maxAttempts)
+                                System.Threading.Thread.Sleep(attempt * 100);
+                        }
+                    }
+
+                    throw new IOException(
+                        "Unable to write the log file after " +
+                        maxAttempts + " attempts : " + logPath,
+                        lastWriteException);
+                }
+                finally
+                {
+                    if (lockTaken)
+                    {
+                        try { mutex.ReleaseMutex(); }
+                        catch (ApplicationException) { }
+                    }
+                }
+            }
+        }
+
+        private void WriteEmergencyLog(string message)
+        {
+            try
+            {
+                string emergencyFolder =
+                    string.IsNullOrWhiteSpace(temp_folder)
+                        ? AppDomain.CurrentDomain.BaseDirectory
+                        : temp_folder;
+
+                Directory.CreateDirectory(emergencyFolder);
+
+                string emergencyFile = Path.Combine(
+                    emergencyFolder,
+                    "IMCA_LOG_FAILURE_" + global_application_name +
+                    "_ACTION_ID_" +
+                    System.Diagnostics.Process.GetCurrentProcess().Id +
+                    "_" + DateTime.Now.ToString("dd_MM_yyyy") + ".txt");
+
+                string line =
+                    DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff") +
+                    " - " + (message ?? "") + Environment.NewLine;
+
+                byte[] content = Encoding.UTF8.GetBytes(line);
+                using (var stream = new FileStream(
+                    emergencyFile,
+                    FileMode.Append,
+                    FileAccess.Write,
+                    FileShare.ReadWrite))
+                {
+                    stream.Write(content, 0, content.Length);
+                    stream.Flush();
+                }
+            }
+            catch
+            {
+                // Last-resort protection: logging must never stop processing.
+            }
+        }
+
+        private static string GetStableLogNameHash(string value)
+        {
+            unchecked
+            {
+                uint hash = 2166136261;
+                foreach (char character in
+                    (value ?? "").ToUpperInvariant())
+                {
+                    hash ^= character;
+                    hash *= 16777619;
+                }
+                return hash.ToString("X8", CultureInfo.InvariantCulture);
+            }
         }
 
         private string EscapeODataString(string value)

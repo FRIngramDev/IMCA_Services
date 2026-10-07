@@ -2,6 +2,7 @@
 using ExcelDataReader;
 using Microsoft.Graph;
 using Microsoft.Graph.Models;
+using Microsoft.Graph.Models.ODataErrors;
 using Microsoft.Kiota.Abstractions;
 using MimeKit;
 using Newtonsoft.Json;
@@ -26,6 +27,7 @@ namespace IMIT_EMAILS_MANAGEMENT_FR
         private const string imit_mailbox_fr = "IMIT_FR_4@ingrammicro.com";
         private const string imit_mailbox_es = "IMIT_ES@ingrammicro.com";
         private const string processedPropertyId = "String {B4A15BD8-83F0-4212-A932-4D9A14DF2889} Name IMCAProcessed";
+        private const string immutableIdPreference = "IdType=\"ImmutableId\"";
         private string country = "";
         private string name = "";
         private string active = "";
@@ -35,6 +37,7 @@ namespace IMIT_EMAILS_MANAGEMENT_FR
         private string sharedmailbox_folder_in = "Inbox";
         private string sharedmailbox_folder_out = "Archives";
         private string sharedmailbox_folder_error = "Erreur";
+
         private string sql_connexion_parameter_global = "";
         private string sql_connexion = "";
         private string sql_con_transporteur_parameter_global = "";
@@ -58,8 +61,6 @@ namespace IMIT_EMAILS_MANAGEMENT_FR
         private bool automaticIntegration;
         private bool currentMailboxIsImit;
         private List<MailboxDomainRule> currentDomainRules = new List<MailboxDomainRule>();
-        private string fr_graph_send_as_parameter_global = "";
-        private string fr_graph_send_as = "";
         private GraphServiceClient graphService;
 
         static IMIT_EMAILS_MANAGEMENT_FR()
@@ -89,8 +90,6 @@ namespace IMIT_EMAILS_MANAGEMENT_FR
             public string mail_fedex_service_client { get; set; } = "";
             public string path_macro_computacenter { get; set; } = "";
             public string path_fichier { get; set; } = "";
-            public string fr_graph_send_as_parameter_global { get; set; } = "";
-            public string fr_graph_send_as { get; set; } = "";
         }
 
         private sealed class MailboxConfiguration
@@ -209,10 +208,28 @@ namespace IMIT_EMAILS_MANAGEMENT_FR
                             }
                             catch (Exception ex)
                             {
-                                WriteLog("   Error reading mailbox " + mailboxAddress + " : " + ex.Message);
-                                countryErrors.Add(new Exception("Mailbox " + mailboxAddress + " : " + ex.Message, ex));
+                                string errorDetails =
+                                    GetDetailedExceptionMessage(ex);
+                                WriteLog(
+                                    "   Error reading mailbox" +
+                                    " - Mailbox : " + mailboxAddress +
+                                    " - Folder : " + GetCurrentInputFolderName() +
+                                    " - Details : " + errorDetails);
+                                countryErrors.Add(
+                                    new Exception(
+                                        "Mailbox " + mailboxAddress +
+                                        " - Folder " + GetCurrentInputFolderName() +
+                                        " : " + errorDetails,
+                                        ex));
                                 if (!(ex is TechnicalAlertAlreadySentException))
-                                    SendTechnicalAlert(nameof(Read_Email_with_Graph), mailboxAddress + " - " + ex.Message, "MAILBOX PROCESSING");
+                                {
+                                    SendTechnicalAlert(
+                                        nameof(Read_Email_with_Graph),
+                                        mailboxAddress +
+                                        " - Folder : " + GetCurrentInputFolderName() +
+                                        " - " + errorDetails,
+                                        "MAILBOX PROCESSING");
+                                }
                             }
                         }
 
@@ -233,7 +250,19 @@ namespace IMIT_EMAILS_MANAGEMENT_FR
                         }
 
                         if (countryErrors.Count > 0)
-                            throw new AggregateException(countryErrors.Count + " IMIT email processing error(s).", countryErrors);
+                        {
+                            WriteLog(
+                                "   Country processing completed with " +
+                                countryErrors.Count +
+                                " technical error(s). Errors were logged and " +
+                                "alerted without stopping the IMCA action.");
+                        }
+                        else
+                        {
+                            WriteLog(
+                                "   Country processing completed : " +
+                                country.ToUpperInvariant());
+                        }
                     }
                     finally
                     {
@@ -243,7 +272,9 @@ namespace IMIT_EMAILS_MANAGEMENT_FR
             }
             catch (Exception ex)
             {
-                WriteLog("Global error Read_Email_with_Graph : " + ex.Message);
+                WriteLog(
+                    "Global error Read_Email_with_Graph : " +
+                    GetDetailedExceptionMessage(ex));
                 throw;
             }
             finally
@@ -282,29 +313,26 @@ namespace IMIT_EMAILS_MANAGEMENT_FR
             sql_con_transporteur = string.IsNullOrWhiteSpace(sql_con_transporteur_parameter_global)
                 ? ""
                 : GetImcaParameter(imcaConnection, sql_con_transporteur_parameter_global);
-            fr_graph_send_as_parameter_global = item.fr_graph_send_as_parameter_global ?? "";
-            fr_graph_send_as = GetImcaParameter(imcaConnection, fr_graph_send_as_parameter_global);
         }
 
         private List<MailboxConfiguration> GetActiveMailboxes()
         {
             const string sql = @"
-                SELECT  m.id_mailboxe,
-                        m.nom_mailboxe,
-                        m.mailboxe,
-                        m.ordre,
-                        ISNULL(m.dt_heure_filtre,'19000101') AS dt_heure_filtre,
-                        ISNULL(m.raffraichissement_min,0) AS raffraichissement_min,
-                        ISNULL(m.date_dernier_raf,'19000101') AS date_dernier_raf,
-                        ISNULL(m.is_integration_auto,0) AS is_integration_auto,
-                        ISNULL(d.id_mailboxe_source,0) AS id_mailboxe_source,
-                        ISNULL(d.id_mailboxe_dest,0) AS id_mailboxe_dest,
-                        ISNULL(d.nom_domaine,'') AS nom_domaine
-                FROM dbo.T_SharedMailboxes AS m
-                LEFT JOIN dbo.T_SharedMailboxes_Domain AS d
-                    ON d.id_mailboxe_source=m.id_mailboxe
-                WHERE m.actif=1
-                ORDER BY m.ordre";
+SELECT  m.id_mailboxe,
+        m.nom_mailboxe,
+        m.mailboxe,
+        ISNULL(m.dt_heure_filtre,'19000101') AS dt_heure_filtre,
+        ISNULL(m.raffraichissement_min,0) AS raffraichissement_min,
+        ISNULL(m.date_dernier_raf,'19000101') AS date_dernier_raf,
+        ISNULL(m.is_integration_auto,0) AS is_integration_auto,
+        ISNULL(d.id_mailboxe_source,0) AS id_mailboxe_source,
+        ISNULL(d.id_mailboxe_dest,0) AS id_mailboxe_dest,
+        ISNULL(d.nom_domaine,'') AS nom_domaine
+FROM dbo.T_SharedMailboxes AS m
+LEFT JOIN dbo.T_SharedMailboxes_Domain AS d
+    ON d.id_mailboxe_source=m.id_mailboxe
+WHERE m.actif=1
+ORDER BY m.raffraichissement_min, m.id_mailboxe;";
 
             var byId = new Dictionary<int, MailboxConfiguration>();
             using (var connection = new SqlConnection(sql_connexion))
@@ -427,23 +455,40 @@ namespace IMIT_EMAILS_MANAGEMENT_FR
                     {
                         existing++;
                         WriteLog("       Email already present in T_contenu_email");
-                        MarkMessageAsProcessed(email.Id);
-                        if (IsCurrentCountryImitMailbox()) MarkAsRead(email.Id);
+                        TryMarkMessageAsProcessed(
+                            email.Id,
+                            IsCurrentCountryImitMailbox());
                         continue;
                     }
 
                     inserted++;
                     WriteLog("       Email inserted in T_contenu_email. ID : " + emailDatabaseId);
                     ProcessBusinessRules(email, emailDatabaseId);
-                    MarkMessageAsProcessed(email.Id);
-                    if (IsCurrentCountryImitMailbox())
+                    bool graphTrackingUpdated =
+                        TryMarkMessageAsProcessed(
+                            email.Id,
+                            IsCurrentCountryImitMailbox());
+
+                    if (IsCurrentCountryImitMailbox() &&
+                        graphTrackingUpdated)
                     {
-                        MarkAsRead(email.Id);
-                        WriteLog("       IMIT mailbox message marked as read");
+                        WriteLog(
+                            "       IMIT mailbox message marked as " +
+                            "processed and read");
                     }
                 }
                 catch (Exception ex)
                 {
+                    if (IsGraphObjectNotFound(ex))
+                    {
+                        WriteLog(
+                            "       Graph message is no longer available. " +
+                            "It may have been moved or deleted by another " +
+                            "process. Subject : " +
+                            (summary.Subject ?? "<no subject>"));
+                        continue;
+                    }
+
                     WriteLog("       Error processing email : " + ex.Message);
                     if (!(ex is TechnicalAlertAlreadySentException))
                         SendTechnicalAlert(nameof(ReadCurrentMailbox), mailboxAddress + " - Mail : " + (summary.Subject ?? "<no subject>") + " - " + ex.Message, "EMAIL PROCESSING");
@@ -489,8 +534,16 @@ namespace IMIT_EMAILS_MANAGEMENT_FR
             if (!int.TryParse(number_Of_Mails, out top) || top <= 0) top = 100;
             if (IsCurrentCountryImitMailbox() && top > 20) top = 20;
             DateTime date = mailboxFilterDate > new DateTime(1900, 1, 1) ? mailboxFilterDate : ParseStartDate();
-            return graphService.Users[mailboxAddress].MailFolders[folderId].Messages.GetAsync(config =>
+            WriteLog(
+                "       Listing Graph messages" +
+                " - Mailbox : " + mailboxAddress +
+                " - Folder : " + GetCurrentInputFolderName() +
+                " - Filter date : " +
+                date.ToString("dd/MM/yyyy HH:mm:ss") +
+                " - Top : " + top);
+            return ExecuteGraphWithRetry(() => graphService.Users[mailboxAddress].MailFolders[folderId].Messages.GetAsync(config =>
             {
+                AddImmutableIdHeader(config.Headers);
                 config.QueryParameters.Top = top;
                 config.QueryParameters.Orderby = new[] { "receivedDateTime asc" };
                 string filter = "receivedDateTime gt " + date.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.fffZ", CultureInfo.InvariantCulture);
@@ -501,25 +554,31 @@ namespace IMIT_EMAILS_MANAGEMENT_FR
                 {
                     "singleValueExtendedProperties($filter=id eq '" + EscapeODataString(processedPropertyId) + "')"
                 };
-            }).GetAwaiter().GetResult();
+            }).GetAwaiter().GetResult(), "List messages for " + mailboxAddress);
         }
 
         private Message GetCompleteMessage(string messageId)
         {
-            return graphService.Users[mailboxAddress].Messages[messageId].GetAsync(config =>
+            return ExecuteGraphWithRetry(() => graphService.Users[mailboxAddress].Messages[messageId].GetAsync(config =>
             {
-                config.Headers.Add("Prefer", "outlook.body-content-type=\"text\"");
+                config.Headers.Add(
+                    "Prefer",
+                    "outlook.body-content-type=\"text\", " +
+                    immutableIdPreference);
                 config.QueryParameters.Select = new[]
                 {
                     "id", "subject", "body", "bodyPreview", "from", "sender", "toRecipients", "ccRecipients",
                     "receivedDateTime", "createdDateTime", "conversationId", "internetMessageId", "hasAttachments", "webLink"
                 };
-            }).GetAwaiter().GetResult();
+            }).GetAwaiter().GetResult(), "Get complete message");
         }
 
         private byte[] GetMimeContent(string messageId)
         {
-            using (Stream input = graphService.Users[mailboxAddress].Messages[messageId].Content.GetAsync().GetAwaiter().GetResult())
+            using (Stream input = ExecuteGraphWithRetry(() => graphService.Users[mailboxAddress].Messages[messageId].Content.GetAsync(config =>
+            {
+                AddImmutableIdHeader(config.Headers);
+            }).GetAwaiter().GetResult(), "Get MIME content"))
             using (var output = new MemoryStream())
             {
                 input.CopyTo(output);
@@ -682,8 +741,7 @@ WHERE EwsID COLLATE Latin1_General_CS_AS=@EWSID AND id_mailboxe=@MAILBOX;";
                 string.IsNullOrWhiteSpace(email?.Subject) ? "Echange de mail" : email.Subject,
                 "robot_mail",
                 emailDatabaseId,
-                email?.WebLink,
-                false);
+                email?.WebLink);
 
             WriteLog("       Email linked to IMIT issue " + issueId + " with comment ID " + commentId);
             return true;
@@ -718,12 +776,10 @@ WHERE EwsID COLLATE Latin1_General_CS_AS=@EWSID AND id_mailboxe=@MAILBOX;";
 
         private bool EmailCommentLinkExists(int emailDatabaseId, int issueId)
         {
-            const string sql = @"SELECT TOP (1) c.id_comment
-FROM dbo.T_comment AS c
-INNER JOIN dbo.T_contenu_email AS e
-    ON e.id_comment=c.id_comment
-WHERE c.id_issue=@ISSUE_ID
-  AND e.id=@EMAIL_ID;";
+            const string sql = @"SELECT TOP (1) id_comment
+FROM dbo.T_comment
+WHERE id_issue=@ISSUE_ID
+  AND id_contenu_email=@EMAIL_ID;";
             using (var connection = new SqlConnection(sql_connexion))
             using (var command = new SqlCommand(sql, connection))
             {
@@ -1592,12 +1648,12 @@ WHERE CountryCode=@COUNTRY AND ReportMonth=@MONTH;";
 
         private void ForwardWithGraph(ForwardRequest request)
         {
-
+            const string sendingMailbox = imit_mailbox_fr;
             List<Recipient> recipients = BuildRecipients(request.To);
             if (recipients.Count == 0)
                 throw new InvalidOperationException("No valid recipient for T_contenu_email ID " + request.Id);
 
-            string requestedSender = string.IsNullOrWhiteSpace(request.From) ? fr_graph_send_as : request.From;
+            string requestedSender = string.IsNullOrWhiteSpace(request.From) ? sendingMailbox : request.From;
             Recipient senderRecipient = new Recipient
             {
                 EmailAddress = new EmailAddress
@@ -1632,7 +1688,7 @@ WHERE CountryCode=@COUNTRY AND ReportMonth=@MONTH;";
                 !subject.StartsWith("FW:", StringComparison.OrdinalIgnoreCase))
                 subject = "TR: " + subject;
 
-            WriteLog("       Forward ID " + request.Id + " - sending mailbox: " + fr_graph_send_as +
+            WriteLog("       Forward ID " + request.Id + " - sending mailbox: " + sendingMailbox +
                 " - original mailbox: " + request.SourceMailbox + " - requested sender: " + requestedSender);
 
             var message = new Message
@@ -1659,7 +1715,7 @@ WHERE CountryCode=@COUNTRY AND ReportMonth=@MONTH;";
                 Message = message,
                 SaveToSentItems = true
             };
-            graphService.Users[fr_graph_send_as].SendMail.PostAsync(sendRequest).GetAwaiter().GetResult();
+            graphService.Users[sendingMailbox].SendMail.PostAsync(sendRequest).GetAwaiter().GetResult();
         }
 
         private static MimeMessage LoadMimeMessage(byte[] mimeContent)
@@ -1745,12 +1801,18 @@ WHERE CountryCode=@COUNTRY AND ReportMonth=@MONTH;";
         {
             if (string.IsNullOrWhiteSpace(destinationFolder)) destinationFolder = tempFolder;
             Directory.CreateDirectory(destinationFolder);
-            AttachmentCollectionResponse response = graphService.Users[mailboxAddress].Messages[messageId].Attachments.GetAsync().GetAwaiter().GetResult();
+            AttachmentCollectionResponse response = ExecuteGraphWithRetry(() => graphService.Users[mailboxAddress].Messages[messageId].Attachments.GetAsync(config =>
+            {
+                AddImmutableIdHeader(config.Headers);
+            }).GetAwaiter().GetResult(), "List attachments for message");
             foreach (Microsoft.Graph.Models.Attachment item in response?.Value ?? new List<Microsoft.Graph.Models.Attachment>())
             {
                 if (!(item is FileAttachment file) || !(file.Name ?? "").StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) continue;
                 if (file.ContentBytes == null && !string.IsNullOrWhiteSpace(file.Id))
-                    file = graphService.Users[mailboxAddress].Messages[messageId].Attachments[file.Id].GetAsync().GetAwaiter().GetResult() as FileAttachment;
+                    file = ExecuteGraphWithRetry(() => graphService.Users[mailboxAddress].Messages[messageId].Attachments[file.Id].GetAsync(config =>
+                    {
+                        AddImmutableIdHeader(config.Headers);
+                    }).GetAwaiter().GetResult() as FileAttachment, "Download attachment " + (file.Name ?? file.Id));
                 if (file?.ContentBytes == null) throw new InvalidOperationException("Attachment content is empty : " + item.Name);
                 string path = Path.Combine(destinationFolder, CleanFileName(file.Name));
                 File.WriteAllBytes(path, file.ContentBytes);
@@ -1868,6 +1930,35 @@ WHERE CountryCode=@COUNTRY AND ReportMonth=@MONTH;";
             return null;
         }
 
+        private T ExecuteGraphWithRetry<T>(Func<T> action, string operation)
+        {
+            const int maximumAttempts = 3;
+            Exception lastException = null;
+            for (int attempt = 1; attempt <= maximumAttempts; attempt++)
+            {
+                try
+                {
+                    return action();
+                }
+                catch (Exception ex) when (IsTransientGraphError(ex))
+                {
+                    lastException = ex;
+                    if (attempt >= maximumAttempts) break;
+                    int delayMilliseconds = attempt * 5000;
+                    WriteLog(
+                        "       Temporary Graph error during " + operation +
+                        ". Application attempt " + attempt + "/" + maximumAttempts +
+                        ". Retry in " + delayMilliseconds + " ms. Error : " +
+                        GetInnermostExceptionMessage(ex));
+                    System.Threading.Thread.Sleep(delayMilliseconds);
+                }
+            }
+            throw new InvalidOperationException(
+                "Graph operation failed after " + maximumAttempts +
+                " application attempt(s) : " + operation + " - " +
+                GetInnermostExceptionMessage(lastException),
+                lastException);
+        }
         private T ExecuteGraphFolderCallWithRetry<T>(Func<T> action, string operation)
         {
             const int maximumAttempts = 3;
@@ -1878,11 +1969,11 @@ WHERE CountryCode=@COUNTRY AND ReportMonth=@MONTH;";
                 {
                     return action();
                 }
-                catch (Exception ex) when (IsTransientGraphFolderError(ex))
+                catch (Exception ex) when (IsTransientGraphError(ex))
                 {
                     lastException = ex;
                     if (attempt >= maximumAttempts) break;
-                    int delayMilliseconds = attempt * 2000;
+                    int delayMilliseconds = attempt * 5000;
                     WriteLog("       Temporary Graph folder error during " + operation +
                         ". Attempt " + attempt + "/" + maximumAttempts +
                         ". Retry in " + delayMilliseconds + " ms : " + GetInnermostExceptionMessage(ex));
@@ -1894,48 +1985,281 @@ WHERE CountryCode=@COUNTRY AND ReportMonth=@MONTH;";
                 " - " + GetInnermostExceptionMessage(lastException), lastException);
         }
 
-        private static bool IsTransientGraphFolderError(Exception exception)
+        private static bool IsTransientGraphError(Exception exception)
         {
             Exception current = exception;
             while (current != null)
             {
-                if (current is HttpRequestException || current is TimeoutException ||
-                    current is System.Threading.Tasks.TaskCanceledException) return true;
-
-                string message = current.Message ?? "";
-                if (message.IndexOf("12002", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                    message.IndexOf("timed out", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                    message.IndexOf("operation was canceled", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                    message.IndexOf("An error occurred while sending the request", StringComparison.OrdinalIgnoreCase) >= 0)
+                if (current is HttpRequestException ||
+                    current is TimeoutException ||
+                    current is System.Threading.Tasks.TaskCanceledException)
                     return true;
+
+                if (current is ApiException apiException)
+                {
+                    int status = apiException.ResponseStatusCode;
+                    if (status == 408 ||
+                        status == 429 ||
+                        status == 500 ||
+                        status == 502 ||
+                        status == 503 ||
+                        status == 504)
+                        return true;
+                }
+
+                ODataError oDataError = current as ODataError;
+                string graphCode = oDataError?.Error?.Code ?? "";
+                if (graphCode.Equals(
+                        "TooManyRequests",
+                        StringComparison.OrdinalIgnoreCase) ||
+                    graphCode.Equals(
+                        "ErrorServerBusy",
+                        StringComparison.OrdinalIgnoreCase) ||
+                    graphCode.Equals(
+                        "ServiceUnavailable",
+                        StringComparison.OrdinalIgnoreCase) ||
+                    graphCode.Equals(
+                        "ApplicationThrottled",
+                        StringComparison.OrdinalIgnoreCase))
+                    return true;
+
+                string text = current.Message ?? "";
+                if (text.IndexOf("Too many retries performed", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    text.IndexOf("More than 3 retries encountered", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    text.IndexOf("TooManyRequests", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    text.IndexOf("ApplicationThrottled", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    text.IndexOf("temporarily unavailable", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    text.IndexOf("service unavailable", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    text.IndexOf("12002", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    text.IndexOf("timed out", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    text.IndexOf("operation was canceled", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    text.IndexOf("An error occurred while sending the request", StringComparison.OrdinalIgnoreCase) >= 0)
+                    return true;
+
                 current = current.InnerException;
             }
             return false;
+        }
+        private static string GetDetailedExceptionMessage(Exception exception)
+        {
+            if (exception == null)
+                return "Unknown error";
+
+            var details = new List<string>();
+            Exception current = exception;
+            while (current != null)
+            {
+                details.Add(
+                    "Type=" + current.GetType().FullName);
+
+                if (!string.IsNullOrWhiteSpace(current.Message))
+                    details.Add("Message=" + current.Message);
+
+                ODataError oDataError = current as ODataError;
+                if (oDataError != null)
+                {
+                    if (!string.IsNullOrWhiteSpace(oDataError.Error?.Code))
+                        details.Add("GraphCode=" + oDataError.Error.Code);
+                    if (!string.IsNullOrWhiteSpace(oDataError.Error?.Message))
+                        details.Add("GraphMessage=" + oDataError.Error.Message);
+                }
+
+                if (current is ApiException apiException)
+                    details.Add("HttpStatus=" + apiException.ResponseStatusCode);
+
+                current = current.InnerException;
+            }
+
+            return string.Join(
+                " | ",
+                details.Where(value =>
+                        !string.IsNullOrWhiteSpace(value))
+                    .Distinct(StringComparer.OrdinalIgnoreCase));
+        }
+
+        private string GetCurrentInputFolderName()
+        {
+            return IsSpanishErmaMailbox()
+                ? "Notificaciones eRMA"
+                : sharedmailbox_folder_in;
         }
 
         private static string GetInnermostExceptionMessage(Exception exception)
         {
             if (exception == null) return "";
             Exception current = exception;
-            while (current.InnerException != null) current = current.InnerException;
-            return current.Message ?? "";
+            while (current.InnerException != null)
+                current = current.InnerException;
+
+            string message = current.Message ?? "";
+            if (!string.IsNullOrWhiteSpace(message))
+                return message;
+
+            ODataError oDataError = current as ODataError;
+            if (!string.IsNullOrWhiteSpace(oDataError?.Error?.Message))
+                return oDataError.Error.Message;
+            if (!string.IsNullOrWhiteSpace(oDataError?.Error?.Code))
+                return oDataError.Error.Code;
+
+            return current.GetType().FullName;
         }
 
-        private void MarkMessageAsProcessed(string messageId)
+        private bool TryMarkMessageAsProcessed(
+            string messageId,
+            bool markAsRead)
         {
-            var processedProperty = new SingleValueLegacyExtendedProperty
+            const int maximumAttempts = 3;
+            Exception lastException = null;
+
+            for (int attempt = 1; attempt <= maximumAttempts; attempt++)
             {
-                Id = processedPropertyId,
-                Value = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ", CultureInfo.InvariantCulture)
-            };
-            var update = new Message
-            {
-                SingleValueExtendedProperties = new List<SingleValueLegacyExtendedProperty>
+                try
                 {
-                    processedProperty
+                    var processedProperty =
+                        new SingleValueLegacyExtendedProperty
+                        {
+                            Id = processedPropertyId,
+                            Value = DateTime.UtcNow.ToString(
+                                "yyyy-MM-ddTHH:mm:ss.fffZ",
+                                CultureInfo.InvariantCulture)
+                        };
+
+                    var update = new Message
+                    {
+                        SingleValueExtendedProperties =
+                            new List<SingleValueLegacyExtendedProperty>
+                            {
+                                processedProperty
+                            }
+                    };
+
+                    if (markAsRead)
+                    {
+                        update.IsRead = true;
+                    }
+
+                    graphService.Users[mailboxAddress]
+                        .Messages[messageId]
+                        .PatchAsync(update, config =>
+                        {
+                            AddImmutableIdHeader(config.Headers);
+                        })
+                        .GetAwaiter()
+                        .GetResult();
+
+                    return true;
                 }
-            };
-            graphService.Users[mailboxAddress].Messages[messageId].PatchAsync(update).GetAwaiter().GetResult();
+                catch (Exception ex) when (IsChangeKeyConflict(ex))
+                {
+                    lastException = ex;
+                    if (attempt >= maximumAttempts) break;
+
+                    int delayMilliseconds = attempt * 500;
+                    WriteLog(
+                        "       Temporary Graph change-key conflict. " +
+                        "Attempt " + attempt + "/" + maximumAttempts +
+                        ". Retry in " + delayMilliseconds + " ms.");
+                    System.Threading.Thread.Sleep(delayMilliseconds);
+                }
+                catch (Exception ex) when (IsTransientGraphError(ex))
+                {
+                    lastException = ex;
+                    if (attempt >= maximumAttempts) break;
+                    int delayMilliseconds = attempt * 5000;
+                    WriteLog(
+                        "       Temporary Graph error while adding IMCAProcessed. " +
+                        "Application attempt " + attempt + "/" + maximumAttempts +
+                        ". Retry in " + delayMilliseconds + " ms. Error : " +
+                        GetInnermostExceptionMessage(ex));
+                    System.Threading.Thread.Sleep(delayMilliseconds);
+                }
+                catch (Exception ex) when (IsGraphObjectNotFound(ex))
+                {
+                    WriteLog(
+                        "       Warning: Graph message is no longer " +
+                        "available while adding IMCAProcessed. " +
+                        "Message ID : " + messageId +
+                        ". SQL processing is kept.");
+                    return false;
+                }
+                catch (Exception ex)
+                {
+                    lastException = ex;
+                    break;
+                }
+            }
+
+            string error = mailboxAddress +
+                " - Unable to add IMCAProcessed" +
+                (markAsRead ? " and mark the message as read" : "") +
+                ". Message ID: " + messageId + " - " +
+                GetInnermostExceptionMessage(lastException);
+
+            WriteLog("       Warning: " + error);
+            SendTechnicalAlert(
+                nameof(TryMarkMessageAsProcessed),
+                error,
+                "MESSAGE TRACKING");
+            return false;
+        }
+
+        private static bool IsChangeKeyConflict(Exception exception)
+        {
+            Exception current = exception;
+            while (current != null)
+            {
+                string message = current.Message ?? "";
+                if (message.IndexOf(
+                        "change key",
+                        StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    message.IndexOf(
+                        "ErrorIrresolvableConflict",
+                        StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    message.IndexOf(
+                        "PreconditionFailed",
+                        StringComparison.OrdinalIgnoreCase) >= 0)
+                    return true;
+
+                if (current is ApiException apiException &&
+                    (apiException.ResponseStatusCode == 409 ||
+                     apiException.ResponseStatusCode == 412))
+                    return true;
+
+                current = current.InnerException;
+            }
+            return false;
+        }
+
+        private static bool IsGraphObjectNotFound(Exception exception)
+        {
+            Exception current = exception;
+            while (current != null)
+            {
+                string message = current.Message ?? "";
+                if (message.IndexOf(
+                        "specified object was not found",
+                        StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    message.IndexOf(
+                        "not found in the store",
+                        StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    message.IndexOf(
+                        "failed to get the correct properties",
+                        StringComparison.OrdinalIgnoreCase) >= 0)
+                    return true;
+
+                if (current is ApiException apiException &&
+                    apiException.ResponseStatusCode == 404)
+                    return true;
+
+                current = current.InnerException;
+            }
+            return false;
+        }
+
+        private static void AddImmutableIdHeader(
+            RequestHeaders headers)
+        {
+            headers.Add("Prefer", immutableIdPreference);
         }
 
         private static bool IsMessageAlreadyProcessed(Message message)
@@ -1952,16 +2276,30 @@ WHERE CountryCode=@COUNTRY AND ReportMonth=@MONTH;";
 
         private void MarkAsRead(string messageId)
         {
-            graphService.Users[mailboxAddress].Messages[messageId].PatchAsync(new Message { IsRead = true }).GetAwaiter().GetResult();
+            ExecuteGraphWithRetry(() =>
+            {
+                graphService.Users[mailboxAddress].Messages[messageId].PatchAsync(
+                    new Message { IsRead = true },
+                    config => AddImmutableIdHeader(config.Headers))
+                    .GetAwaiter().GetResult();
+                return true;
+            }, "Mark message as read");
         }
 
         private void MoveMessage(string messageId, string destinationId)
         {
             var body = new Microsoft.Graph.Users.Item.Messages.Item.Move.MovePostRequestBody { DestinationId = destinationId };
-            graphService.Users[mailboxAddress].Messages[messageId].Move.PostAsync(body).GetAwaiter().GetResult();
+            ExecuteGraphWithRetry(() =>
+            {
+                graphService.Users[mailboxAddress].Messages[messageId].Move.PostAsync(
+                    body,
+                    config => AddImmutableIdHeader(config.Headers))
+                    .GetAwaiter().GetResult();
+                return true;
+            }, "Move message");
         }
 
-        private int InsertComment(int issueId, string comment, string commentName, int emailDatabaseId, string messageWebLink = "", bool linkCommentToEmail = true)
+        private int InsertComment(int issueId, string comment, string commentName, int emailDatabaseId, string messageWebLink = "")
         {
             int commentId;
             using (var connection = new SqlConnection(sql_connexion))
@@ -1973,7 +2311,7 @@ WHERE CountryCode=@COUNTRY AND ReportMonth=@MONTH;";
                 Add(command, "@comment", SqlDbType.VarChar, Truncate(comment, 2000), 2000);
                 Add(command, "@date_comment", SqlDbType.SmallDateTime, DateTime.Now);
                 Add(command, "@comment_name", SqlDbType.VarChar, Truncate(commentName, 50), 50);
-                Add(command, "@id_fichier", SqlDbType.Int, linkCommentToEmail ? (object)emailDatabaseId : DBNull.Value);
+                Add(command, "@id_fichier", SqlDbType.Int, emailDatabaseId);
                 SqlParameter output = command.Parameters.Add("@@num", SqlDbType.Int);
                 output.Direction = ParameterDirection.Output;
                 connection.Open();
@@ -1987,51 +2325,27 @@ WHERE CountryCode=@COUNTRY AND ReportMonth=@MONTH;";
             LinkEmailToComment(emailDatabaseId, commentId);
             LinkEmailAttachmentsToComment(emailDatabaseId, commentId);
 
+            // Le webLink est déjà demandé dans GetCompleteMessage().
+            // Aucun second appel Graph n'est effectué ici.
             if (string.IsNullOrWhiteSpace(messageWebLink))
-                messageWebLink = GetMessageWebLinkFromGraph(emailDatabaseId);
+            {
+                WriteLog(
+                    "       Warning: webLink was not returned with the " +
+                    "original Graph message for comment ID " +
+                    commentId +
+                    ". T_comment.fichier was not updated.");
+            }
+            else
+            {
+                UpdateCommentWebLink(commentId, messageWebLink);
+            }
 
-            UpdateCommentWebLink(commentId, messageWebLink);
-            WriteLog("       Email database ID " + emailDatabaseId + " linked to comment ID " + commentId + " for issue " + issueId);
+            WriteLog(
+                "       Email database ID " + emailDatabaseId +
+                " linked to comment ID " + commentId +
+                " for issue " + issueId);
+
             return commentId;
-        }
-
-        private string GetMessageWebLinkFromGraph(int emailDatabaseId)
-        {
-            const string sql = @"SELECT ISNULL(EwsID,'') AS GraphMessageId,
-       ISNULL(boite_mail,'') AS Mailbox
-FROM dbo.T_contenu_email
-WHERE id=@EMAIL_ID;";
-
-            string graphMessageId = "";
-            string sourceMailbox = "";
-            using (var connection = new SqlConnection(sql_connexion))
-            using (var command = new SqlCommand(sql, connection))
-            {
-                command.CommandTimeout = 300;
-                command.Parameters.Add("@EMAIL_ID", SqlDbType.Int).Value = emailDatabaseId;
-                connection.Open();
-                using (SqlDataReader reader = command.ExecuteReader(CommandBehavior.SingleRow))
-                {
-                    if (!reader.Read())
-                        throw new InvalidOperationException("T_contenu_email row not found while resolving webLink. ID : " + emailDatabaseId);
-
-                    graphMessageId = Convert.ToString(reader["GraphMessageId"]).Trim();
-                    sourceMailbox = Convert.ToString(reader["Mailbox"]).Trim();
-                }
-            }
-
-            if (string.IsNullOrWhiteSpace(graphMessageId) || string.IsNullOrWhiteSpace(sourceMailbox))
-            {
-                WriteLog("       Warning: Graph message ID or source mailbox is empty for email database ID " + emailDatabaseId + ".");
-                return "";
-            }
-
-            Message graphMessage = graphService.Users[sourceMailbox].Messages[graphMessageId].GetAsync(config =>
-            {
-                config.QueryParameters.Select = new[] { "webLink" };
-            }).GetAwaiter().GetResult();
-
-            return graphMessage?.WebLink ?? "";
         }
 
         private void UpdateCommentWebLink(int commentId, string messageWebLink)
@@ -2085,6 +2399,7 @@ IF @@ROWCOUNT=0 THROW 50001, 'T_contenu_email row not found while linking commen
             AttachmentCollectionResponse response = graphService.Users[mailboxAddress]
                 .Messages[graphMessageId].Attachments.GetAsync(config =>
                 {
+                    AddImmutableIdHeader(config.Headers);
                     config.QueryParameters.Top = 999;
                     config.QueryParameters.Select = new[] { "id", "name" };
                 }).GetAwaiter().GetResult();

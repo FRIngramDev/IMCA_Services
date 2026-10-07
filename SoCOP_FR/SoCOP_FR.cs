@@ -1,11 +1,14 @@
 ﻿using Microsoft.Graph;
 using Microsoft.Graph.Models;
+using Microsoft.Graph.Models.ODataErrors;
+using Microsoft.Kiota.Abstractions;
 using Newtonsoft.Json;
 using System;
 using System.Collections.Generic;
 using System.Data.SqlClient;
 using System.IO;
 using System.Linq;
+using System.Net.Http;
 using System.Text;
 using System.Threading.Tasks;
 
@@ -38,6 +41,7 @@ namespace SoCOP_FR
 
         private string sql_connexion_parameter_global = "";
 
+        private static readonly object logSyncRoot = new object();
         private GraphServiceClient graphService = null;
 
         public SoCOP_FR()
@@ -153,7 +157,7 @@ namespace SoCOP_FR
 
                         graphService = Connexion_Microsoft_Graph();
 
-                  
+
                         ValidateRequiredParameters();
 
                         if (!Directory.Exists(temp_folder))
@@ -161,7 +165,7 @@ namespace SoCOP_FR
                             Directory.CreateDirectory(temp_folder);
                         }
 
-                       // reste à coder
+                        // reste à coder
 
                         if (debug.ToUpper() == "TRUE")
                         {
@@ -195,7 +199,7 @@ namespace SoCOP_FR
                                         WriteToFile("       Subject : " + email.Subject + " at " + DateTime.Now.ToString("dd/MM/yyyy HH:mm:ss"));
                                     }
 
-                                    if (!string.IsNullOrWhiteSpace(email.Subject) && email.Subject.ToUpper().Contains("CISCO")==false && email.Subject.ToUpper().Contains("RE:") == false)
+                                    if (!string.IsNullOrWhiteSpace(email.Subject) && email.Subject.ToUpper().Contains("CISCO") == false && email.Subject.ToUpper().Contains("RE:") == false)
                                     {
                                         if (!string.IsNullOrWhiteSpace(email.From.EmailAddress.Address.ToString()) && email.From.EmailAddress.Address.ToString().ToLower().Trim() != "automail@ingrammicro.com")
                                         {
@@ -257,7 +261,7 @@ namespace SoCOP_FR
                                 }
                                 catch (Exception ex)
                                 {
-                                    WriteToFile("   Error processing email : " + ex.Message + " at " + DateTime.Now.ToString("dd/MM/yyyy HH:mm:ss"));
+                                    WriteToFile("   Error processing email : " + GetDetailedExceptionMessage(ex) + " at " + DateTime.Now.ToString("dd/MM/yyyy HH:mm:ss"));
 
 
                                     try
@@ -271,7 +275,7 @@ namespace SoCOP_FR
                                     }
                                     catch (Exception mailEx)
                                     {
-                                        WriteToFile("   Error sending alert email : " + mailEx.Message);
+                                        WriteToFile("   Error sending alert email : " + GetDetailedExceptionMessage(mailEx));
                                     }
 
                                     try
@@ -280,7 +284,7 @@ namespace SoCOP_FR
                                     }
                                     catch (Exception moveEx)
                                     {
-                                        WriteToFile("   Error moving email to Erreur folder : " + moveEx.Message);
+                                        WriteToFile("   Error moving email to Erreur folder : " + GetDetailedExceptionMessage(moveEx));
                                     }
                                 }
                             }
@@ -302,13 +306,13 @@ namespace SoCOP_FR
                     }
                     catch (Exception e)
                     {
-                        WriteToFile("   Error get emails : " + e.Message);
+                        WriteToFile("   Error get emails : " + GetDetailedExceptionMessage(e));
                     }
                 }
             }
             catch (Exception ex)
             {
-                WriteToFile("Global error Read_Email_with_Graph : " + ex.Message);
+                WriteToFile("Global error Read_Email_with_Graph : " + GetDetailedExceptionMessage(ex));
             }
             finally
             {
@@ -320,7 +324,7 @@ namespace SoCOP_FR
 
         private void UpdateT_deblocage_sales(string con, string num_bl, string Destinataires)
         {
-            string sql = @"INSERT INTO T_deblocage_sales(nom_user, date_demande, num_bl, type_demande, top_traite, email_demandeur) VALUES ('macro_socop', getdate(), @num_bl, 'AUTO', 'N', @email_demandeur)" ;
+            string sql = @"INSERT INTO T_deblocage_sales(nom_user, date_demande, num_bl, type_demande, top_traite, email_demandeur) VALUES ('macro_socop', getdate(), @num_bl, 'AUTO', 'N', @email_demandeur)";
 
             try
             {
@@ -384,7 +388,7 @@ namespace SoCOP_FR
             }
 
             List<Recipient> toRecipients = BuildRecipients(recipient);
-           // List<Recipient> ccRecipients = BuildRecipients(email_cc);
+            // List<Recipient> ccRecipients = BuildRecipients(email_cc);
 
             Message message = new Message
             {
@@ -409,11 +413,17 @@ namespace SoCOP_FR
                 SaveToSentItems = true
             };
 
-            graphService.Users[sharedmailbox_name]
-                .SendMail
-                .PostAsync(requestBody)
-                .GetAwaiter()
-                .GetResult();
+            ExecuteGraphWithRetry(
+                () =>
+                {
+                    graphService.Users[sharedmailbox_name]
+                        .SendMail
+                        .PostAsync(requestBody)
+                        .GetAwaiter()
+                        .GetResult();
+                    return true;
+                },
+                "Send SoCOP email : " + subject);
         }
 
 
@@ -447,71 +457,100 @@ namespace SoCOP_FR
             return recipients;
         }
 
-        private void MarkEmailAsRead(GraphServiceClient graphService, string mailbox, string messageId)
+        private void MarkEmailAsRead(
+            GraphServiceClient graphService,
+            string mailbox,
+            string messageId)
         {
-            Message messageUpdate = new Message
-            {
-                IsRead = true
-            };
-
-            graphService.Users[mailbox]
-                .Messages[messageId]
-                .PatchAsync(messageUpdate)
-                .GetAwaiter()
-                .GetResult();
+            ExecuteGraphWithRetry(
+                () =>
+                {
+                    graphService.Users[mailbox]
+                        .Messages[messageId]
+                        .PatchAsync(new Message { IsRead = true })
+                        .GetAwaiter()
+                        .GetResult();
+                    return true;
+                },
+                "Mark SoCOP message as read");
         }
 
-        private void MoveEmail(GraphServiceClient graphService, string mailbox, string messageId, string destinationFolderId)
+        private void MoveEmail(
+            GraphServiceClient graphService,
+            string mailbox,
+            string messageId,
+            string destinationFolderId)
         {
-            var requestBody = new Microsoft.Graph.Users.Item.Messages.Item.Move.MovePostRequestBody
-            {
-                DestinationId = destinationFolderId
-            };
+            var requestBody =
+                new Microsoft.Graph.Users.Item.Messages.Item.Move
+                    .MovePostRequestBody
+                {
+                    DestinationId = destinationFolderId
+                };
 
-            graphService.Users[mailbox]
-                .Messages[messageId]
-                .Move
-                .PostAsync(requestBody)
-                .GetAwaiter()
-                .GetResult();
+            ExecuteGraphWithRetry(
+                () =>
+                {
+                    graphService.Users[mailbox]
+                        .Messages[messageId]
+                        .Move
+                        .PostAsync(requestBody)
+                        .GetAwaiter()
+                        .GetResult();
+                    return true;
+                },
+                "Move SoCOP message");
         }
 
-        private MessageCollectionResponse GetMessagesToProcess(GraphServiceClient graphService, string folderId)
+        private MessageCollectionResponse GetMessagesToProcess(
+            GraphServiceClient graphService,
+            string folderId)
         {
-            int topEmails = 10;
+            int topEmails;
 
-            if (!int.TryParse(number_of_mails, out topEmails))
+            if (!int.TryParse(number_of_mails, out topEmails) || topEmails <= 0)
             {
                 topEmails = 10;
             }
 
-            return graphService.Users[sharedmailbox_name]
-                .MailFolders[folderId]
-                .Messages
-                .GetAsync(config =>
-                {
-                    config.QueryParameters.Top = topEmails;
-                    config.QueryParameters.Orderby = new string[] { "receivedDateTime asc" };
-                    config.QueryParameters.Select = new string[]
-                    {
-                        "id",
-                        "subject",
-                        "from",
-                        "hasAttachments",
-                        "receivedDateTime",
-                        "isRead",
-                        "ToRecipients"
-                    };
+            string filter = BuildMessageFilter();
 
-                    string filter = BuildMessageFilter();
+            WriteToFile(
+                "   Listing Graph messages" +
+                " - Mailbox : " + sharedmailbox_name +
+                " - Folder : " + sharedmailbox_folder_in +
+                " - Filter : " +
+                (string.IsNullOrWhiteSpace(filter) ? "<none>" : filter) +
+                " - Top : " + topEmails);
 
-                    if (!string.IsNullOrWhiteSpace(filter))
+            return ExecuteGraphWithRetry(
+                () => graphService.Users[sharedmailbox_name]
+                    .MailFolders[folderId]
+                    .Messages
+                    .GetAsync(config =>
                     {
-                        config.QueryParameters.Filter = filter;
-                    }
-                })
-                .GetAwaiter()
-                .GetResult();
+                        config.QueryParameters.Top = topEmails;
+                        config.QueryParameters.Orderby =
+                            new string[] { "receivedDateTime asc" };
+                        config.QueryParameters.Select = new string[]
+                        {
+                            "id",
+                            "subject",
+                            "from",
+                            "hasAttachments",
+                            "receivedDateTime",
+                            "isRead",
+                            "toRecipients"
+                        };
+
+                        if (!string.IsNullOrWhiteSpace(filter))
+                        {
+                            config.QueryParameters.Filter = filter;
+                        }
+                    })
+                    .GetAwaiter()
+                    .GetResult(),
+                "List SoCOP messages");
         }
 
         private string BuildMessageFilter()
@@ -544,38 +583,193 @@ namespace SoCOP_FR
 
         private MailFolder GetInputFolder(GraphServiceClient graphService)
         {
-            if (sharedmailbox_folder_in.ToUpper().Trim() == "INBOX")
+            if (sharedmailbox_folder_in.ToUpperInvariant().Trim() == "INBOX")
             {
-                return graphService.Users[sharedmailbox_name]
-                    .MailFolders["inbox"]
-                    .GetAsync()
-                    .GetAwaiter()
-                    .GetResult();
+                return ExecuteGraphWithRetry(
+                    () => graphService.Users[sharedmailbox_name]
+                        .MailFolders["inbox"]
+                        .GetAsync()
+                        .GetAwaiter()
+                        .GetResult(),
+                    "Read SoCOP Inbox folder");
             }
 
-            return GetChildFolderByName(graphService, sharedmailbox_name, sharedmailbox_folder_in);
+            return GetChildFolderByName(
+                graphService,
+                sharedmailbox_name,
+                sharedmailbox_folder_in);
         }
 
-        private MailFolder GetChildFolderByName(GraphServiceClient graphService, string mailbox, string folderName)
+        private MailFolder GetChildFolderByName(
+            GraphServiceClient graphService,
+            string mailbox,
+            string folderName)
         {
             string safeFolderName = EscapeODataString(folderName);
 
-            MailFolderCollectionResponse folders = graphService.Users[mailbox]
-                .MailFolders["inbox"]
-                .ChildFolders
-                .GetAsync(config =>
-                {
-                    config.QueryParameters.Filter = $"displayName eq '{safeFolderName}'";
-                })
-                .GetAwaiter()
-                .GetResult();
+            MailFolderCollectionResponse folders = ExecuteGraphWithRetry(
+                () => graphService.Users[mailbox]
+                    .MailFolders["inbox"]
+                    .ChildFolders
+                    .GetAsync(config =>
+                    {
+                        config.QueryParameters.Filter =
+                            $"displayName eq '{safeFolderName}'";
+                    })
+                    .GetAwaiter()
+                    .GetResult(),
+                "Find SoCOP folder " + folderName);
 
-            if (folders == null || folders.Value == null || folders.Value.Count == 0)
+            if (folders == null ||
+                folders.Value == null ||
+                folders.Value.Count == 0)
             {
-                throw new Exception("Folder not found : " + folderName);
+                throw new DirectoryNotFoundException(
+                    "Folder not found under Inbox : " + folderName);
             }
 
             return folders.Value.First();
+        }
+
+        private T ExecuteGraphWithRetry<T>(
+            Func<T> action,
+            string operation)
+        {
+            const int maxAttempts = 3;
+            Exception lastException = null;
+
+            for (int attempt = 1; attempt <= maxAttempts; attempt++)
+            {
+                try
+                {
+                    return action();
+                }
+                catch (Exception ex) when (IsTransientGraphError(ex))
+                {
+                    lastException = ex;
+
+                    if (attempt >= maxAttempts)
+                    {
+                        break;
+                    }
+
+                    int delayMilliseconds = attempt * 5000;
+
+                    WriteToFile(
+                        "   Temporary Graph error during " + operation +
+                        " - Attempt : " + attempt + "/" + maxAttempts +
+                        " - Retry in : " + delayMilliseconds + " ms" +
+                        " - Details : " + GetDetailedExceptionMessage(ex));
+
+                    System.Threading.Thread.Sleep(delayMilliseconds);
+                }
+            }
+
+            throw new InvalidOperationException(
+                "Graph operation failed after " + maxAttempts +
+                " application attempt(s) : " + operation +
+                " - " + GetDetailedExceptionMessage(lastException),
+                lastException);
+        }
+
+        private static bool IsTransientGraphError(Exception exception)
+        {
+            Exception current = exception;
+
+            while (current != null)
+            {
+                if (current is HttpRequestException ||
+                    current is TimeoutException ||
+                    current is TaskCanceledException)
+                {
+                    return true;
+                }
+
+                if (current is ApiException apiException)
+                {
+                    int status = apiException.ResponseStatusCode;
+
+                    if (status == 408 || status == 429 || status == 500 ||
+                        status == 502 || status == 503 || status == 504)
+                    {
+                        return true;
+                    }
+                }
+
+                ODataError graphError = current as ODataError;
+                string graphCode = graphError?.Error?.Code ?? "";
+
+                if (graphCode.Equals("TooManyRequests", StringComparison.OrdinalIgnoreCase) ||
+                    graphCode.Equals("ErrorServerBusy", StringComparison.OrdinalIgnoreCase) ||
+                    graphCode.Equals("ServiceUnavailable", StringComparison.OrdinalIgnoreCase) ||
+                    graphCode.Equals("ApplicationThrottled", StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+
+                string message = current.Message ?? "";
+
+                if (message.IndexOf("Too many retries performed", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    message.IndexOf("More than 3 retries encountered", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    message.IndexOf("temporarily unavailable", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    message.IndexOf("service unavailable", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    message.IndexOf("timed out", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    message.IndexOf("An error occurred while sending the request", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    return true;
+                }
+
+                current = current.InnerException;
+            }
+
+            return false;
+        }
+
+        private static string GetDetailedExceptionMessage(Exception exception)
+        {
+            if (exception == null)
+            {
+                return "Unknown error";
+            }
+
+            List<string> details = new List<string>();
+            Exception current = exception;
+
+            while (current != null)
+            {
+                details.Add("Type=" + current.GetType().FullName);
+
+                if (!string.IsNullOrWhiteSpace(current.Message))
+                {
+                    details.Add("Message=" + current.Message);
+                }
+
+                ODataError graphError = current as ODataError;
+
+                if (graphError != null)
+                {
+                    if (!string.IsNullOrWhiteSpace(graphError.Error?.Code))
+                    {
+                        details.Add("GraphCode=" + graphError.Error.Code);
+                    }
+
+                    if (!string.IsNullOrWhiteSpace(graphError.Error?.Message))
+                    {
+                        details.Add("GraphMessage=" + graphError.Error.Message);
+                    }
+                }
+
+                if (current is ApiException apiException)
+                {
+                    details.Add("HttpStatus=" + apiException.ResponseStatusCode);
+                }
+
+                current = current.InnerException;
+            }
+
+            return string.Join(
+                " | ",
+                details.Distinct(StringComparer.OrdinalIgnoreCase));
         }
 
         private string EscapeODataString(string value)
@@ -664,25 +858,160 @@ namespace SoCOP_FR
 
         private void WriteToFile(string message)
         {
-            if (string.IsNullOrWhiteSpace(logs_folder))
+            try
             {
-                logs_folder = AppDomain.CurrentDomain.BaseDirectory;
-            }
+                string targetLogsFolder = logs_folder;
+                if (string.IsNullOrWhiteSpace(targetLogsFolder))
+                    targetLogsFolder = AppDomain.CurrentDomain.BaseDirectory;
 
-            if (!Directory.Exists(logs_folder))
+                Directory.CreateDirectory(targetLogsFolder);
+
+                string logPath = Path.Combine(
+                    targetLogsFolder,
+                    "IMCA_" + global_session_name + "_" +
+                    DateTime.Now.ToString("dd_MM_yyyy") + "_" +
+                    country + "_" + global_application_name + ".txt");
+
+                string line =
+                    DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") +
+                    " - " + (message ?? "") + Environment.NewLine;
+
+                lock (logSyncRoot)
+                {
+                    WriteLogLineWithCrossProcessLock(logPath, line);
+                }
+            }
+            catch (Exception ex)
             {
-                Directory.CreateDirectory(logs_folder);
+                WriteEmergencyLog(
+                    "WriteToFile failure" +
+                    " - Error : " + ex.Message +
+                    " - Original message : " + (message ?? ""));
             }
+        }
 
-            string filePath = Path.Combine(
-                logs_folder,
-                "IMCA_" + global_session_name + "_" + DateTime.Now.ToString("dd_MM_yyyy") + "_" + country + "_" + global_application_name + ".txt"
-            );
+        private static void WriteLogLineWithCrossProcessLock(
+            string logPath,
+            string line)
+        {
+            string mutexName =
+                "Local\\IMCA_SOCOP_LOG_" +
+                GetStableLogNameHash(logPath);
 
-            File.AppendAllText(
-                filePath,
-                DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + " - " + message + Environment.NewLine
-            );
+            using (var mutex =
+                new System.Threading.Mutex(false, mutexName))
+            {
+                bool lockTaken = false;
+                try
+                {
+                    try
+                    {
+                        lockTaken = mutex.WaitOne(TimeSpan.FromSeconds(10));
+                    }
+                    catch (System.Threading.AbandonedMutexException)
+                    {
+                        lockTaken = true;
+                    }
+
+                    if (!lockTaken)
+                        throw new IOException(
+                            "Unable to acquire the log mutex within 10 seconds");
+
+                    const int maxAttempts = 5;
+                    IOException lastWriteException = null;
+
+                    for (int attempt = 1; attempt <= maxAttempts; attempt++)
+                    {
+                        try
+                        {
+                            byte[] content = Encoding.UTF8.GetBytes(line);
+                            using (var stream = new FileStream(
+                                logPath,
+                                FileMode.Append,
+                                FileAccess.Write,
+                                FileShare.ReadWrite))
+                            {
+                                stream.Write(content, 0, content.Length);
+                                stream.Flush();
+                            }
+                            return;
+                        }
+                        catch (IOException ex)
+                        {
+                            lastWriteException = ex;
+                            if (attempt < maxAttempts)
+                                System.Threading.Thread.Sleep(attempt * 100);
+                        }
+                    }
+
+                    throw new IOException(
+                        "Unable to write the log file after " +
+                        maxAttempts + " attempts : " + logPath,
+                        lastWriteException);
+                }
+                finally
+                {
+                    if (lockTaken)
+                    {
+                        try { mutex.ReleaseMutex(); }
+                        catch (ApplicationException) { }
+                    }
+                }
+            }
+        }
+
+        private void WriteEmergencyLog(string message)
+        {
+            try
+            {
+                string emergencyFolder =
+                    string.IsNullOrWhiteSpace(temp_folder)
+                        ? AppDomain.CurrentDomain.BaseDirectory
+                        : temp_folder;
+
+                Directory.CreateDirectory(emergencyFolder);
+
+                string emergencyFile = Path.Combine(
+                    emergencyFolder,
+                    "IMCA_LOG_FAILURE_" + global_application_name +
+                    "_ACTION_ID_" +
+                    System.Diagnostics.Process.GetCurrentProcess().Id +
+                    "_" + DateTime.Now.ToString("dd_MM_yyyy") + ".txt");
+
+                string line =
+                    DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff") +
+                    " - " + (message ?? "") + Environment.NewLine;
+
+                byte[] content = Encoding.UTF8.GetBytes(line);
+                using (var stream = new FileStream(
+                    emergencyFile,
+                    FileMode.Append,
+                    FileAccess.Write,
+                    FileShare.ReadWrite))
+                {
+                    stream.Write(content, 0, content.Length);
+                    stream.Flush();
+                }
+            }
+            catch
+            {
+                // Last-resort protection: logging must never stop processing.
+            }
+        }
+
+        private static string GetStableLogNameHash(string value)
+        {
+            unchecked
+            {
+                uint hash = 2166136261;
+                foreach (char character in
+                    (value ?? "").ToUpperInvariant())
+                {
+                    hash ^= character;
+                    hash *= 16777619;
+                }
+                return hash.ToString("X8", System.Globalization.CultureInfo.InvariantCulture);
+            }
         }
 
         public void setParamCountry(string country)
