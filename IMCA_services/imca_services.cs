@@ -1824,28 +1824,93 @@ WHERE SK_VALID=0 AND PARAMETER=@PARAMETER";
         }
 
         // Best-effort database update. SQL outages are logged locally and never mask the original error.
-        private void TryMarkActionAsError(long actionId, long functionId, Exception exception)
+        private void TryMarkActionAsError(
+            long actionId,
+            long functionId,
+            Exception exception)
         {
-            const string sql = @"UPDATE [IMCA_BACKOFFICE].[dbo].[PCM_TAB_IMCA_ACTION]
-SET TODO_BY=@TODO_BY, ERROR=@ERROR_NUMBER, ERROR_TEXT=@ERROR_MSG WHERE ID=@ID";
-            if (actionId <= 0) return;
+            const string sql = @"
+UPDATE [IMCA_BACKOFFICE].[dbo].[PCM_TAB_IMCA_ACTION]
+SET TODO_BY = @TODO_BY,
+    ERROR = @ERROR_NUMBER,
+    ERROR_TEXT = @ERROR_MSG
+WHERE ID = @ID";
+
+            if (actionId <= 0)
+            {
+                return;
+            }
+
             try
             {
+                // Recherche de l'exception réelle.
+                // MethodInfo.Invoke encapsule généralement l'erreur du programme
+                // dans une TargetInvocationException.
+                Exception rootException = exception;
+
+                while (rootException != null &&
+                       rootException.InnerException != null)
+                {
+                    rootException = rootException.InnerException;
+                }
+
+                if (rootException == null)
+                {
+                    rootException = exception;
+                }
+
+                int errorNumber = 0;
+
+                if (rootException is SqlException sqlException)
+                {
+                    errorNumber = sqlException.Number;
+                }
+                else if (rootException is OracleException oracleException)
+                {
+                    errorNumber = oracleException.Number;
+                }
+
+                string errorMessage =
+                    "FUNCTION_ID=" + functionId +
+                    " - TYPE=" + rootException.GetType().FullName +
+                    " - ERROR MSG=" + rootException.Message;
+
                 using (SqlConnection connection = new SqlConnection(sql_con))
                 using (SqlCommand command = new SqlCommand(sql, connection))
                 {
                     command.CommandTimeout = 300;
-                    command.Parameters.Add("@TODO_BY", SqlDbType.VarChar, 100).Value = "ERROR_" + session_name.ToUpperInvariant();
-                    command.Parameters.Add("@ID", SqlDbType.BigInt).Value = actionId;
-                    command.Parameters.Add("@ERROR_NUMBER", SqlDbType.Int).Value = exception is SqlException sqlException ? sqlException.Number : 0;
-                    command.Parameters.Add("@ERROR_MSG", SqlDbType.NVarChar, 1024).Value = Strings.Left("FUNCTION_ID=" + functionId + " - ERROR MSG=" + exception.Message, 1024);
+
+                    command.Parameters.Add(
+                        "@TODO_BY",
+                        SqlDbType.VarChar,
+                        100).Value =
+                        "ERROR_" + session_name.ToUpperInvariant();
+
+                    command.Parameters.Add(
+                        "@ID",
+                        SqlDbType.BigInt).Value = actionId;
+
+                    command.Parameters.Add(
+                        "@ERROR_NUMBER",
+                        SqlDbType.Int).Value = errorNumber;
+
+                    command.Parameters.Add(
+                        "@ERROR_MSG",
+                        SqlDbType.NVarChar,
+                        1024).Value =
+                        Strings.Left(errorMessage, 1024);
+
                     connection.Open();
                     command.ExecuteNonQuery();
                 }
             }
             catch (Exception logException)
             {
-                LogDatabaseError(nameof(TryMarkActionAsError), sql, logException, actionId);
+                LogDatabaseError(
+                    nameof(TryMarkActionAsError),
+                    sql,
+                    logException,
+                    actionId);
             }
         }
 
