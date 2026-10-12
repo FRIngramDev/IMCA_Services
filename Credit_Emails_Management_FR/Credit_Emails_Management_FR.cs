@@ -2,6 +2,7 @@
 using Microsoft.Graph.Models;
 using Microsoft.Kiota.Abstractions;
 using Newtonsoft.Json;
+using Oracle.ManagedDataAccess.Client;
 using ClosedXML.Excel;
 using System;
 using System.Collections.Generic;
@@ -36,6 +37,7 @@ namespace CREDIT_EMAILS_MANAGEMENT_FR
         private string sql_connexion_parameter_global = "", sql_connexion = "";
         private string sql_gestion_cdes_parameter_global = "", sql_gestion_cdes = "";
         private string sql_dss_copie_parameter_global = "", sql_dss_copie = "";
+        private string oracle_ods_parameter_global = "", oracle_ods = "";
         private string sql_creation_compte_parameter_global = "", sql_creation_compte = "";
         private string email_in_case_of_technical_issue_parameter_global = "", email_in_case_of_technical_issue = "";
         private string fr_graph_send_as_parameter_global = "", fr_graph_send_as = "";
@@ -84,6 +86,7 @@ namespace CREDIT_EMAILS_MANAGEMENT_FR
             public string sql_gestion_cdes_parameter_global { get; set; } = "";
 
             public string sql_dss_copie_parameter_global { get; set; } = "";
+            public string oracle_ods_parameter_global { get; set; } = "";
             public string sql_creation_compte_parameter_global { get; set; } = "";
 
             public string email_in_case_of_technical_issue_parameter_global { get; set; } = "";
@@ -320,6 +323,7 @@ namespace CREDIT_EMAILS_MANAGEMENT_FR
             sql_connexion_parameter_global = i.sql_connexion_parameter_global ?? "";
             sql_gestion_cdes_parameter_global = i.sql_gestion_cdes_parameter_global ?? "";
             sql_dss_copie_parameter_global = i.sql_dss_copie_parameter_global ?? "";
+            oracle_ods_parameter_global = i.oracle_ods_parameter_global ?? "";
             sql_creation_compte_parameter_global = i.sql_creation_compte_parameter_global ?? "";
             email_in_case_of_technical_issue_parameter_global = i.email_in_case_of_technical_issue_parameter_global ?? "";
             fr_graph_send_as_parameter_global = i.fr_graph_send_as_parameter_global ?? "";
@@ -345,6 +349,7 @@ namespace CREDIT_EMAILS_MANAGEMENT_FR
             sql_connexion = GetImcaParameter(imca, sql_connexion_parameter_global);
             sql_gestion_cdes = GetImcaParameter(imca, sql_gestion_cdes_parameter_global);
             sql_dss_copie = GetImcaParameter(imca, sql_dss_copie_parameter_global);
+            oracle_ods = GetImcaParameter(imca, oracle_ods_parameter_global);
             sql_creation_compte = GetImcaParameter(imca, sql_creation_compte_parameter_global);
             email_in_case_of_technical_issue = GetImcaParameter(imca, email_in_case_of_technical_issue_parameter_global);
             fr_graph_send_as = GetImcaParameter(imca, fr_graph_send_as_parameter_global);
@@ -2425,16 +2430,104 @@ WHERE MailboxId = @MAILBOX_ID
 
         private string FindDeliveryInGestionCdes(string customer, string order)
         {
-            const string sql = @"SELECT TOP (1) CAST(o.BR_NBR AS varchar)+CAST(o.ORDR_NBR AS varchar)+CAST(o.DIST_NBR AS varchar)+CAST(o.SHIP_NBR AS varchar) FROM OPENQUERY(DWHP_IMT,'SELECT s.BR_NBR,s.ORDR_NBR,s.DIST_NBR,s.SHIP_NBR,h.BILL_CUST_NBR,h.CUST_ORDR_NBR FROM DSSDATA.UVW_ORDERHEADFR h INNER JOIN DSSDATA.UVW_ORDERSHIPFR s ON h.BR_NBR=s.BR_NBR AND h.ORDR_NBR=s.ORDR_NBR AND h.ORDR_DATE=s.ORDR_DT') o WHERE o.BILL_CUST_NBR=@C AND o.BR_NBR='21' AND(o.CUST_ORDR_NBR=@O OR CAST(o.BR_NBR AS varchar)+CAST(o.ORDR_NBR AS varchar)=@O);";
-            return ExecuteScalarString(sql_gestion_cdes, sql, new SqlParameter("@C", SqlDbType.VarChar, 10)
+            if (string.IsNullOrWhiteSpace(oracle_ods))
             {
-                Value = Right(customer, 6)
+                throw new InvalidOperationException(
+                    "Oracle ODS connection string is empty");
             }
-            , new SqlParameter("@O", SqlDbType.VarChar, 50)
+
+            string customerNumber = Right(customer, 6);
+            string orderNumber = (order ?? "").Trim();
+
+            const string sql = @"
+SELECT delivery_number
+FROM
+(
+    SELECT TO_CHAR(s.BR_NBR)
+           || TO_CHAR(s.ORDR_NBR)
+           || TO_CHAR(s.DIST_NBR)
+           || TO_CHAR(s.SHIP_NBR) AS delivery_number
+    FROM DSSDATA.UVW_ORDERHEADFR h
+    INNER JOIN DSSDATA.UVW_ORDERSHIPFR s
+        ON h.BR_NBR = s.BR_NBR
+       AND h.ORDR_NBR = s.ORDR_NBR
+       AND h.ORDR_DATE = s.ORDR_DT
+    WHERE h.BILL_CUST_NBR = :CUSTOMER
+      AND s.BR_NBR = '21'
+      AND
+      (
+          h.CUST_ORDR_NBR = :ORDER_NUMBER
+          OR TO_CHAR(s.BR_NBR) || TO_CHAR(s.ORDR_NBR) = :ORDER_NUMBER
+      )
+)
+WHERE ROWNUM = 1";
+
+            DateTime startedAt = DateTime.Now;
+            WriteLog(
+                "       Starting direct Oracle delivery lookup" +
+                " - Customer : " + customerNumber +
+                " - Order : " + orderNumber);
+
+            try
             {
-                Value = order ?? ""
+                using (var connection = new OracleConnection(oracle_ods))
+                using (var command = new OracleCommand(sql, connection))
+                {
+                    command.BindByName = true;
+                    command.CommandTimeout = 60;
+                    command.Parameters.Add(
+                        "CUSTOMER",
+                        OracleDbType.Varchar2,
+                        customerNumber,
+                        ParameterDirection.Input);
+                    command.Parameters.Add(
+                        "ORDER_NUMBER",
+                        OracleDbType.Varchar2,
+                        orderNumber,
+                        ParameterDirection.Input);
+
+                    connection.Open();
+                    object result = command.ExecuteScalar();
+                    string deliveryNumber =
+                        result == null || result == DBNull.Value
+                            ? ""
+                            : Convert.ToString(
+                                result,
+                                CultureInfo.InvariantCulture).Trim();
+
+                    WriteLog(
+                        "       Direct Oracle delivery lookup completed" +
+                        " - Customer : " + customerNumber +
+                        " - Order : " + orderNumber +
+                        " - Result : " +
+                        (string.IsNullOrWhiteSpace(deliveryNumber)
+                            ? "<not found>"
+                            : deliveryNumber) +
+                        " - Duration : " +
+                        Math.Round(
+                            (DateTime.Now - startedAt).TotalMilliseconds) +
+                        " ms");
+
+                    return deliveryNumber;
+                }
             }
-            );
+            catch (OracleException ex)
+            {
+                WriteLog(
+                    "       Direct Oracle delivery lookup error" +
+                    " - Customer : " + customerNumber +
+                    " - Order : " + orderNumber +
+                    " - Oracle error number : " + ex.Number +
+                    " - Error : " + ex.Message);
+
+                throw new InvalidOperationException(
+                    "Direct Oracle delivery lookup failed" +
+                    " - Customer : " + customerNumber +
+                    " - Order : " + orderNumber +
+                    " - Oracle error number : " + ex.Number +
+                    " - Error : " + ex.Message,
+                    ex);
+            }
         }
 
         private string FindInvoiceInDss(string customer, string order)
@@ -2883,6 +2976,7 @@ WHERE MailboxId = @MAILBOX_ID
             if (string.IsNullOrWhiteSpace(sql_connexion) ||
                 string.IsNullOrWhiteSpace(sql_gestion_cdes) ||
                 string.IsNullOrWhiteSpace(sql_dss_copie) ||
+                string.IsNullOrWhiteSpace(oracle_ods) ||
                 string.IsNullOrWhiteSpace(sql_creation_compte) ||
                 string.IsNullOrWhiteSpace(email_in_case_of_technical_issue) ||
                 string.IsNullOrWhiteSpace(fr_graph_send_as) ||

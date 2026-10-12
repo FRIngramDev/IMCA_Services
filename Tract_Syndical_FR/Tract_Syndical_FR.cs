@@ -228,13 +228,7 @@ namespace TRACT_SYNDICAL_FR
 
                     try
                     {
-                        WriteToFile(
-                            name.ToUpper() + "(" + country.ToUpper() + ")" +
-                            " at " + DateTime.Now.ToString("dd/MM/yyyy HH:mm:ss"));
 
-                        WriteToFile(
-                            "   Debug Parameter is set to " + debug.ToUpper() +
-                            " at " + DateTime.Now.ToString("dd/MM/yyyy HH:mm:ss"));
 
                         ValidateRequiredCountryParameters(p);
                         graphService = Connexion_Microsoft_Graph();
@@ -467,14 +461,19 @@ namespace TRACT_SYNDICAL_FR
                 }
 
                 WriteToFile(
-                    "Graph technical sender mailbox : " +
-                    fr_graph_send_as);
+                    name.ToUpperInvariant() +
+                    "(" + country.ToUpperInvariant() + ")" +
+                    " at " + DateTime.Now.ToString("dd/MM/yyyy HH:mm:ss"));
+
+                WriteToFile(
+                    "   Debug Parameter is set to " +
+                    debug.ToUpperInvariant());
 
                 // Initialise Graph uniquement pour pouvoir envoyer une alerte technique.
                 graphService = Connexion_Microsoft_Graph();
 
                 WriteToFile(
-                    "Starting French AD tract subscription synchronization");
+                    "   Starting French AD tract subscription synchronization");
 
                 bool synchronizationCompleted = false;
                 PrincipalServerDownException lastServerException = null;
@@ -492,7 +491,7 @@ namespace TRACT_SYNDICAL_FR
                         try
                         {
                             WriteToFile(
-                                "Trying Active Directory server " +
+                                "       Trying Active Directory server " +
                                 domainController +
                                 " - Attempt " + attempt + "/" +
                                 maximumAttemptsPerDomainController);
@@ -511,7 +510,7 @@ namespace TRACT_SYNDICAL_FR
                                     context.ConnectedServer;
 
                                 WriteToFile(
-                                    "Connected to Active Directory server : " +
+                                    "       Connected to Active Directory server : " +
                                     connectedServer);
 
                                 using (UserPrincipal searchTemplate =
@@ -572,7 +571,7 @@ namespace TRACT_SYNDICAL_FR
                             synchronizationCompleted = true;
 
                             WriteToFile(
-                                "Active Directory synchronization completed " +
+                                "   Active Directory synchronization completed " +
                                 "using server : " + domainController);
 
                             break;
@@ -582,7 +581,7 @@ namespace TRACT_SYNDICAL_FR
                             lastServerException = ex;
 
                             WriteToFile(
-                                "Active Directory server unavailable : " +
+                                "       Active Directory server unavailable : " +
                                 domainController +
                                 " - Attempt " + attempt + "/" +
                                 maximumAttemptsPerDomainController +
@@ -619,7 +618,7 @@ namespace TRACT_SYNDICAL_FR
                     }
 
                     WriteToFile(
-                        "French AD tract subscription synchronization " +
+                        "   French AD tract subscription synchronization " +
                         "skipped. " + errorMessage);
 
                     SendTechnicalIssueMail(
@@ -635,13 +634,13 @@ namespace TRACT_SYNDICAL_FR
                 }
 
                 WriteToFile(
-                    "French AD tract subscription synchronization completed");
+                    "   French AD tract subscription synchronization completed");
                 WriteToFile(
-                    "   Users read               : " + usersRead);
+                    "       Users read               : " + usersRead);
                 WriteToFile(
-                    "   Valid users              : " + validUsers);
+                    "       Valid users              : " + validUsers);
                 WriteToFile(
-                    "   Subscriptions inserted   : " +
+                    "       Subscriptions inserted   : " +
                     subscriptionsInserted);
             }
             catch (Exception ex)
@@ -694,19 +693,18 @@ namespace TRACT_SYNDICAL_FR
                 if (debug.ToUpper() == "TRUE")
                 {
                     WriteToFile(
-                        "   Connexion to " + sharedmailbox_name +
-                        " at " + DateTime.Now.ToString("dd/MM/yyyy HH:mm:ss"));
+                        "       Connexion to " + sharedmailbox_name);
                     WriteToFile(
-                        "   Sharedmailbox_folder_in  : " +
+                        "       Sharedmailbox_folder_in  : " +
                         sharedmailbox_folder_in);
                     WriteToFile(
-                        "   Sharedmailbox_folder_out : " +
+                        "       Sharedmailbox_folder_out : " +
                         sharedmailbox_folder_out);
                     WriteToFile(
-                        "   Response mailbox          : " +
+                        "       Response mailbox          : " +
                         mailboxe_reponse);
                     WriteToFile(
-                        "   Extracting the " + number_of_mails +
+                        "       Extracting the " + number_of_mails +
                         " oldest messages");
                 }
 
@@ -723,9 +721,8 @@ namespace TRACT_SYNDICAL_FR
                     if (debug.ToUpper() == "TRUE")
                     {
                         WriteToFile(
-                            "   " + messages.Value.Count +
-                            " Email(s) found at " +
-                            DateTime.Now.ToString("dd/MM/yyyy HH:mm:ss"));
+                            "       Email(s) found : " +
+                            messages.Value.Count);
                     }
 
                     foreach (Message emailSummary in messages.Value)
@@ -737,9 +734,8 @@ namespace TRACT_SYNDICAL_FR
                             if (debug.ToUpper() == "TRUE")
                             {
                                 WriteToFile(
-                                    "       Subject : " + email.Subject +
-                                    " at " +
-                                    DateTime.Now.ToString("dd/MM/yyyy HH:mm:ss"));
+                                "           Subject : " +
+                                (email.Subject ?? "<no subject>"));
                             }
 
                             ProcessTractEmail(graphService, email);
@@ -761,9 +757,8 @@ namespace TRACT_SYNDICAL_FR
                         catch (Exception ex)
                         {
                             WriteToFile(
-                                "       Error processing email : " + GetDetailedExceptionMessage(ex) +
-                                " at " +
-                                DateTime.Now.ToString("dd/MM/yyyy HH:mm:ss"));
+                            "           Error processing email : " +
+                            GetDetailedExceptionMessage(ex));
 
                             if (!(ex is TechnicalAlertAlreadySentException))
                             {
@@ -801,9 +796,8 @@ namespace TRACT_SYNDICAL_FR
                     if (debug.ToUpper() == "TRUE")
                     {
                         WriteToFile(
-                            "       " + nb_mail +
-                            " Email(s) have been processed at " +
-                            DateTime.Now.ToString("dd/MM/yyyy HH:mm:ss"));
+                            "       Mailbox summary - Emails processed : " +
+                            nb_mail);
                     }
                 }
                 else if (debug.ToUpper() == "TRUE")
@@ -1694,7 +1688,7 @@ namespace TRACT_SYNDICAL_FR
             string filter = BuildMessageFilter();
 
             WriteToFile(
-                "   Listing Graph messages" +
+                "       Listing Graph messages" +
                 " - Mailbox : " + sharedmailbox_name +
                 " - Folder : " + sharedmailbox_folder_in +
                 " - Filter : " +
