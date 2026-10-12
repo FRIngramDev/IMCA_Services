@@ -3,6 +3,7 @@ using Microsoft.Graph.Models;
 using Microsoft.Kiota.Abstractions;
 using Microsoft.VisualBasic.FileIO;
 using Newtonsoft.Json;
+using Oracle.ManagedDataAccess.Client;
 using System;
 using System.Collections.Generic;
 using System.Data;
@@ -14,6 +15,7 @@ using System.Net;
 using System.Net.Http;
 using System.Text;
 using System.Text.RegularExpressions;
+using System.Xml;
 
 namespace ECONOCOM_AIRBUS_MANAGEMENT_FR
 {
@@ -36,6 +38,18 @@ namespace ECONOCOM_AIRBUS_MANAGEMENT_FR
         private string imeiConfigurationParameterGlobal = "IMEI_MANAGEMENT_FR";
         private string appleImeiTableName = "dbo.IMEI_APPLE";
         private List<string> sendFilesHours = new List<string>();
+        private string oracleOdsParameterGlobal = "DWHP_IMT";
+        private string oracleOdsConnection = "";
+        private string imXmlOrderStatusUrlParameterGlobal = "ECONOCOM_IMXML_ORDER_STATUS_URL_FR";
+        private string imXmlOrderStatusTemplateParameterGlobal = "ECONOCOM_IMXML_ORDER_STATUS_TEMPLATE_FR";
+        private string imXmlOrderStatusUrl = "", imXmlOrderStatusTemplate = "";
+        private string imXmlOrderDetailUrlParameterGlobal = "ECONOCOM_IMXML_ORDER_DETAIL_URL_FR";
+        private string imXmlOrderDetailTemplateParameterGlobal = "ECONOCOM_IMXML_ORDER_DETAIL_TEMPLATE_FR";
+        private string imXmlOrderDetailUrl = "", imXmlOrderDetailTemplate = "";
+        private string imXmlOrderTrackingUrlParameterGlobal = "ECONOCOM_IMXML_ORDER_TRACKING_URL_FR";
+        private string imXmlOrderTrackingTemplateParameterGlobal = "ECONOCOM_IMXML_ORDER_TRACKING_TEMPLATE_FR";
+        private string imXmlOrderTrackingUrl = "", imXmlOrderTrackingTemplate = "";
+        private int delaiRefreshBlTracking = 180;
         private string imcaConnection = "";
         private List<ImeiSource> imeiSources = new List<ImeiSource>();
         private string logsFolder = "", tempFolder = "", sessionName = "";
@@ -67,6 +81,14 @@ namespace ECONOCOM_AIRBUS_MANAGEMENT_FR
             public string imei_configuration_parameter_global { get; set; } = "IMEI_MANAGEMENT_FR";
             public string apple_imei_table_name { get; set; } = "dbo.IMEI_APPLE";
             public List<string> send_files_hours { get; set; } = new List<string>();
+            public string oracle_ods_parameter_global { get; set; } = "DWHP_IMT";
+            public string imxml_order_status_url_parameter_global { get; set; } = "ECONOCOM_IMXML_ORDER_STATUS_URL_FR";
+            public string imxml_order_status_template_parameter_global { get; set; } = "ECONOCOM_IMXML_ORDER_STATUS_TEMPLATE_FR";
+            public string imxml_order_detail_url_parameter_global { get; set; } = "ECONOCOM_IMXML_ORDER_DETAIL_URL_FR";
+            public string imxml_order_detail_template_parameter_global { get; set; } = "ECONOCOM_IMXML_ORDER_DETAIL_TEMPLATE_FR";
+            public string imxml_order_tracking_url_parameter_global { get; set; } = "ECONOCOM_IMXML_ORDER_TRACKING_URL_FR";
+            public string imxml_order_tracking_template_parameter_global { get; set; } = "ECONOCOM_IMXML_ORDER_TRACKING_TEMPLATE_FR";
+            public int Delai_Refresh_BL_Tracking { get; set; } = 180;
         }
         private sealed class ImeiJsonFile
         {
@@ -113,6 +135,73 @@ namespace ECONOCOM_AIRBUS_MANAGEMENT_FR
             public string Subject = "";
             public string Body = "";
         }
+        private sealed class BlStatusCandidate
+        {
+            public int BlId;
+            public string CustomerPo = "";
+            public string BlNumber = "";
+            public string CustomerNumber = "";
+        }
+        private sealed class BlStatusLookup
+        {
+            public BlStatusCandidate Candidate;
+            public string OrderKey = "";
+            public string ShipmentKey = "";
+        }
+        private sealed class BlCountryCandidate
+        {
+            public int BlId;
+            public string BlNumber = "";
+            public string CustomerPo = "";
+            public string CustomerNumber = "";
+        }
+        private sealed class ImXmlOrderDetailResult
+        {
+            public bool Success;
+            public bool OrderNotFound;
+            public string Message = "";
+            public string DebugResponse = "";
+            public string CountryCode = "";
+            public string ZipCode = "";
+        }
+        private sealed class BlTrackingCandidate
+        {
+            public int BlId;
+            public int FileId;
+            public string BlNumber = "";
+            public string CustomerPo = "";
+            public string CustomerNumber = "";
+        }
+        private enum TrackingOutcome
+        {
+            Success,
+            NotFound,
+            NoPackage,
+            InvalidResponse,
+            ImXmlError,
+            InvalidShipDate,
+            TechnicalError
+        }
+        private sealed class ImXmlTrackingResult
+        {
+            public bool Success;
+            public TrackingOutcome Outcome = TrackingOutcome.NotFound;
+            public string Message = "";
+            public string DebugResponse = "";
+            public string TrackingNumber = "";
+            public string CarrierCode = "";
+            public DateTime? ShipDate;
+        }
+        private sealed class CarrierMapping
+        {
+            public string CarrierCode = "";
+            public string CarrierName = "";
+        }
+        private sealed class PurchaseOrderCandidate { public int Id; public string Po = "", EndUserRef = "", Customer = ""; }
+        private sealed class BlInformation { public string Number = "", Status = ""; }
+        private sealed class ImXmlCredentials { public string Login = "", Password = ""; }
+        private sealed class ImXmlOrderStatusResult { public bool Success; public string Message = "", DebugResponse = ""; public List<BlInformation> BlList = new List<BlInformation>(); }
+        private enum BlUpsertResult { Inserted, Updated, Unchanged }
         private sealed class SharedMailbox
         {
             public int Id; public string Name = "", Address = ""; public DateTime? FilterDate, LastRefresh;
@@ -144,6 +233,7 @@ namespace ECONOCOM_AIRBUS_MANAGEMENT_FR
         {
             public bool IsValid, IsDuplicate; public string ErrorType = "", Message = "";
             public List<string> MissingBundles = new List<string>();
+            public List<string> UnexpectedColumns = new List<string>();
             public List<CsvFileValidation> Files = new List<CsvFileValidation>();
         }
 
@@ -152,9 +242,10 @@ namespace ECONOCOM_AIRBUS_MANAGEMENT_FR
             {
                 { "order_number", new[] { "Order_Number" } },
                 { "order_reference", new[] { "Order_Reference" } },
-                { "bundle", new[] { "Bundle", "Product_Bundle" } },
-                { "end_user_first_name", new[] { "EndUser_First_Name" } },
-                { "end_user_last_name", new[] { "EndUser_First_Last_Name", "EndUser_Last_Name" } },
+                { "product_type", new[] { "Product_Type", "Bundle", "Product_Bundle" } },
+                { "product_code", new[] { "Product_Code", "Supplier_Product_Ref" } },
+                { "end_user_first_name", new[] { "EndUser_FirstName", "EndUser_First_Name" } },
+                { "end_user_last_name", new[] { "EndUser_LastName", "EndUser_Last_Name", "EndUser_First_Last_Name" } },
                 { "end_user_email", new[] { "EndUser_eMail_Address", "EndUser_Email_Address" } },
                 { "end_user_id", new[] { "UserID", "EndUser_ID" } },
                 { "label_content", new[] { "Label_Content" } },
@@ -197,6 +288,1646 @@ namespace ECONOCOM_AIRBUS_MANAGEMENT_FR
                 }
             }
             finally { graph = null; }
+        }
+
+        public void Update_BL_Status_ODS(string sql_con, string logs, string tmp_folder, string session_name)
+        {
+            imcaConnection = sql_con; string root = GetServicePath();
+            logsFolder = Path.Combine(root, logs ?? ""); tempFolder = Path.Combine(root, tmp_folder ?? ""); sessionName = session_name ?? "";
+            Directory.CreateDirectory(logsFolder); Directory.CreateDirectory(tempFolder);
+            JsonFile cfg = JsonConvert.DeserializeObject<JsonFile>(GetParameter(sql_con, ApplicationName) ?? "");
+            if (cfg?.countries == null || cfg.countries.Count == 0) throw new InvalidOperationException(ApplicationName + " parameters are empty or invalid");
+            foreach (Country item in cfg.countries)
+            {
+                Apply(item, sql_con); if (!IsTrue(item.active)) continue; ValidateUpdateBlOdsConfiguration();
+                try
+                {
+                    List<BlStatusCandidate> candidates = LoadBlStatusCandidates();
+                    int foundOds = 0, voided = 0, foundDss = 0, invoiced = 0, unchanged = 0, invalid = 0;
+                    WriteLog("   BL status candidate(s) : " + candidates.Count + " - Refresh delay : " + delaiRefreshBlTracking + " day(s)");
+                    List<BlStatusLookup> validCandidates =
+                        BuildValidBlStatusLookups(candidates, ref invalid);
+
+                    Dictionary<string, string> odsStatuses;
+                    using (var oracle = new OracleConnection(oracleOdsConnection))
+                    {
+                        oracle.Open();
+                        WriteLog("   Direct Oracle ODS connection established");
+                        odsStatuses = LoadBlStatusesFromOracle(
+                            oracle,
+                            validCandidates);
+                    }
+
+                    List<BlStatusLookup> dssCandidates =
+                        validCandidates
+                            .Where(candidate =>
+                                !odsStatuses.TryGetValue(
+                                    BuildBlStatusKey(
+                                        candidate.OrderKey,
+                                        candidate.ShipmentKey),
+                                    out string status) ||
+                                string.IsNullOrWhiteSpace(status))
+                            .ToList();
+
+                    Dictionary<string, string> dssInvoices =
+                        LoadLatestInvoicesFromDss(dssCandidates);
+
+                    WriteLog(
+                        "   Grouped status lookup completed" +
+                        " - Valid BL : " + validCandidates.Count +
+                        " - ODS result(s) : " +
+                        odsStatuses.Count(pair =>
+                            !string.IsNullOrWhiteSpace(pair.Value)) +
+                        " - DSS fallback candidate(s) : " +
+                        dssCandidates.Count +
+                        " - DSS invoice(s) : " + dssInvoices.Count);
+
+                    foreach (BlStatusLookup lookup in validCandidates)
+                    {
+                        BlStatusCandidate candidate = lookup.Candidate;
+                        string odsKey = BuildBlStatusKey(
+                            lookup.OrderKey,
+                            lookup.ShipmentKey);
+
+                        odsStatuses.TryGetValue(
+                            odsKey,
+                            out string status);
+
+                        status = status ?? "";
+
+                        if (!string.IsNullOrWhiteSpace(status))
+                        {
+                            foundOds++;
+
+                            if (status.Equals(
+                                    "VOIDED",
+                                    StringComparison.OrdinalIgnoreCase))
+                            {
+                                UpdateBlStatus(candidate, "VOIDED");
+                                voided++;
+                            }
+                            else
+                            {
+                                unchanged++;
+                            }
+
+                            continue;
+                        }
+
+                        dssInvoices.TryGetValue(
+                            BuildDssInvoiceKey(
+                                candidate.CustomerNumber,
+                                lookup.OrderKey),
+                            out string invoice);
+
+                        invoice = invoice ?? "";
+
+                        if (!string.IsNullOrWhiteSpace(invoice))
+                        {
+                            UpdateBlStatus(candidate, "INVOICED");
+                            foundDss++;
+                            invoiced++;
+
+                            WriteLog(
+                                "       BL updated from grouped DSS fallback" +
+                                " - BL : " + candidate.BlNumber +
+                                " - Invoice : " + invoice +
+                                " - Status : INVOICED");
+                        }
+                        else
+                        {
+                            unchanged++;
+                        }
+                    }
+                    WriteLog("   Update_BL_Status_ODS summary - Candidates : " + candidates.Count + " - Found ODS : " + foundOds + " - VOIDED : " + voided + " - Found DSS : " + foundDss + " - INVOICED : " + invoiced + " - Unchanged : " + unchanged + " - Invalid : " + invalid);
+                }
+                catch (Exception ex) { WriteLog("   Update_BL_Status_ODS error - " + Details(ex)); SendTechnicalAlert(nameof(Update_BL_Status_ODS), Details(ex)); }
+            }
+        }
+        private void ValidateUpdateBlOdsConfiguration()
+        { var m = new List<string>(); if (string.IsNullOrWhiteSpace(sqlGestion)) m.Add("sqlGestion"); if (string.IsNullOrWhiteSpace(sqlDss)) m.Add("sqlDss"); if (string.IsNullOrWhiteSpace(oracleOdsConnection)) m.Add("oracleOdsConnection"); if (m.Count > 0) throw new InvalidOperationException("Update_BL_Status_ODS configuration incomplete : " + string.Join(", ", m)); }
+        private List<BlStatusCandidate> LoadBlStatusCandidates()
+        {
+            const string sql = @"SELECT DISTINCT bl.id_bl,ISNULL(cp.cust_po,'') cust_po,ISNULL(bl.num_bl,'') num_bl,ISNULL(m.cust_nbr,'') cust_nbr
+FROM dbo.T_suivi_commande_end_user_cust_po cp JOIN dbo.T_suivi_commande_end_user_fichier f ON cp.id_fichier=f.id_fichier
+JOIN dbo.T_suivi_commande_end_user_mail m ON f.id_mail=m.id_mail JOIN dbo.T_suivi_commande_end_user_BL bl ON cp.cust_po=bl.cust_po
+WHERE DATEDIFF(DAY,m.date_mail,GETDATE())<=@DELAI AND cp.ouvert=1 AND cp.cde_annule<>1 AND cp.cust_po IS NOT NULL AND bl.num_bl IS NOT NULL
+AND (bl.status_bl IS NULL OR bl.status_bl NOT IN ('INVOICED','FORCED BILLED','BILLING ERROR','VOIDED')) ORDER BY bl.id_bl;";
+            var rlt = new List<BlStatusCandidate>(); using (var cn = new SqlConnection(sqlGestion)) using (var cmd = new SqlCommand(sql, cn)) { cmd.CommandTimeout = 300; cmd.Parameters.Add("@DELAI", SqlDbType.Int).Value = delaiRefreshBlTracking; cn.Open(); using (var r = cmd.ExecuteReader()) while (r.Read()) rlt.Add(new BlStatusCandidate { BlId = Convert.ToInt32(r["id_bl"]), CustomerPo = Convert.ToString(r["cust_po"]).Trim(), BlNumber = Convert.ToString(r["num_bl"]).Trim(), CustomerNumber = Convert.ToString(r["cust_nbr"]).Trim() }); }
+            return rlt;
+        }
+        private static bool TrySplitBlNumber(string blNumber, out string orderKey, out string shipmentKey)
+        {
+            orderKey = ""; shipmentKey = ""; string normalized = (blNumber ?? "").Trim().Replace(" ", ""); if (string.IsNullOrWhiteSpace(normalized)) return false;
+            string[] parts = normalized.Split(new[] { '-' }, StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length >= 2) { orderKey = parts[0].Trim(); shipmentKey = parts[parts.Length - 1].Trim(); }
+            else { if (normalized.Length < 9) return false; orderKey = normalized.Substring(0, normalized.Length - 2); shipmentKey = normalized.Substring(normalized.Length - 2, 2); }
+            return Regex.IsMatch(orderKey, @"^[A-Za-z0-9]+$") && Regex.IsMatch(shipmentKey, @"^[0-9]{2}$");
+        }
+        private List<BlStatusLookup> BuildValidBlStatusLookups(
+            List<BlStatusCandidate> candidates,
+            ref int invalid)
+        {
+            var result = new List<BlStatusLookup>();
+
+            foreach (BlStatusCandidate candidate in
+                candidates ?? new List<BlStatusCandidate>())
+            {
+                if (!TrySplitBlNumber(
+                        candidate.BlNumber,
+                        out string orderKey,
+                        out string shipmentKey))
+                {
+                    invalid++;
+                    WriteLog(
+                        "       Invalid BL number" +
+                        " - ID : " + candidate.BlId +
+                        " - BL : " + candidate.BlNumber);
+                    continue;
+                }
+
+                result.Add(new BlStatusLookup
+                {
+                    Candidate = candidate,
+                    OrderKey = orderKey,
+                    ShipmentKey = shipmentKey
+                });
+            }
+
+            return result;
+        }
+
+        private static string BuildBlStatusKey(
+            string orderKey,
+            string shipmentKey)
+        {
+            return (orderKey ?? "").Trim().ToUpperInvariant() +
+                   "|" +
+                   (shipmentKey ?? "").Trim().ToUpperInvariant();
+        }
+
+        private static string BuildDssInvoiceKey(
+            string customerNumber,
+            string orderKey)
+        {
+            return (customerNumber ?? "").Trim().ToUpperInvariant() +
+                   "|" +
+                   (orderKey ?? "").Trim().ToUpperInvariant();
+        }
+
+        private static Dictionary<string, string>
+            LoadBlStatusesFromOracle(
+                OracleConnection connection,
+                List<BlStatusLookup> candidates)
+        {
+            var result = new Dictionary<string, string>(
+                StringComparer.OrdinalIgnoreCase);
+
+            List<BlStatusLookup> uniqueCandidates =
+                (candidates ?? new List<BlStatusLookup>())
+                    .GroupBy(
+                        candidate => BuildBlStatusKey(
+                            candidate.OrderKey,
+                            candidate.ShipmentKey),
+                        StringComparer.OrdinalIgnoreCase)
+                    .Select(group => group.First())
+                    .ToList();
+
+            const int batchSize = 100;
+
+            for (int offset = 0;
+                 offset < uniqueCandidates.Count;
+                 offset += batchSize)
+            {
+                List<BlStatusLookup> batch =
+                    uniqueCandidates
+                        .Skip(offset)
+                        .Take(batchSize)
+                        .ToList();
+
+                var requestedRows = new List<string>();
+
+                using (var command = connection.CreateCommand())
+                {
+                    command.BindByName = true;
+                    command.CommandTimeout = 300;
+
+                    command.Parameters.Add(
+                        "BILL_CUST_NBR",
+                        OracleDbType.Varchar2,
+                        "203530",
+                        ParameterDirection.Input);
+                    command.Parameters.Add(
+                        "BR_NBR",
+                        OracleDbType.Varchar2,
+                        "21",
+                        ParameterDirection.Input);
+
+                    for (int index = 0;
+                         index < batch.Count;
+                         index++)
+                    {
+                        string orderParameter =
+                            "ORDER_KEY_" + index;
+                        string shipmentParameter =
+                            "SHIPMENT_KEY_" + index;
+
+                        requestedRows.Add(
+                            "SELECT :" + orderParameter +
+                            " AS ORDER_KEY, :" + shipmentParameter +
+                            " AS SHIPMENT_KEY FROM DUAL");
+
+                        command.Parameters.Add(
+                            orderParameter,
+                            OracleDbType.Varchar2,
+                            batch[index].OrderKey,
+                            ParameterDirection.Input);
+                        command.Parameters.Add(
+                            shipmentParameter,
+                            OracleDbType.Varchar2,
+                            batch[index].ShipmentKey,
+                            ParameterDirection.Input);
+                    }
+
+                    command.CommandText = @"
+WITH REQUESTED_BL AS
+(
+    " + string.Join(
+        Environment.NewLine + " UNION ALL " +
+        Environment.NewLine,
+        requestedRows) + @"
+),
+ODS_STATUS_RANKED AS
+(
+    SELECT TO_CHAR(OS.BR_NBR) ||
+           TO_CHAR(OS.ORDR_NBR) AS ORDER_KEY,
+           TO_CHAR(OS.DIST_NBR) ||
+           TO_CHAR(OS.SHIP_NBR) AS SHIPMENT_KEY,
+           OS.SHIP_STUS,
+           ROW_NUMBER() OVER
+           (
+               PARTITION BY TO_CHAR(OS.BR_NBR) || TO_CHAR(OS.ORDR_NBR),
+                            TO_CHAR(OS.DIST_NBR) || TO_CHAR(OS.SHIP_NBR)
+               ORDER BY OH.ORDR_DATE DESC
+           ) AS ROW_NUMBER_VALUE
+    FROM DSSDATA.UVW_ORDERHEADFR OH
+    INNER JOIN DSSDATA.UVW_ORDERSHIPFR OS
+        ON OH.BR_NBR = OS.BR_NBR
+       AND OH.ORDR_NBR = OS.ORDR_NBR
+       AND OH.ORDR_DATE = OS.ORDR_DT
+    INNER JOIN REQUESTED_BL REQUESTED
+        ON REQUESTED.ORDER_KEY =
+           TO_CHAR(OS.BR_NBR) || TO_CHAR(OS.ORDR_NBR)
+       AND REQUESTED.SHIPMENT_KEY =
+           TO_CHAR(OS.DIST_NBR) || TO_CHAR(OS.SHIP_NBR)
+    WHERE TO_CHAR(OH.BILL_CUST_NBR) = :BILL_CUST_NBR
+      AND TO_CHAR(OS.BR_NBR) = :BR_NBR
+),
+ODS_STATUS AS
+(
+    SELECT ORDER_KEY,
+           SHIPMENT_KEY,
+           SHIP_STUS
+    FROM ODS_STATUS_RANKED
+    WHERE ROW_NUMBER_VALUE = 1
+)
+SELECT REQUESTED.ORDER_KEY,
+       REQUESTED.SHIPMENT_KEY,
+       ODS_STATUS.SHIP_STUS
+FROM REQUESTED_BL REQUESTED
+LEFT JOIN ODS_STATUS
+    ON ODS_STATUS.ORDER_KEY = REQUESTED.ORDER_KEY
+   AND ODS_STATUS.SHIPMENT_KEY = REQUESTED.SHIPMENT_KEY";
+
+                    using (OracleDataReader reader =
+                        command.ExecuteReader())
+                    {
+                        while (reader.Read())
+                        {
+                            string orderKey =
+                                Convert.ToString(
+                                    reader["ORDER_KEY"]).Trim();
+                            string shipmentKey =
+                                Convert.ToString(
+                                    reader["SHIPMENT_KEY"]).Trim();
+                            string status =
+                                reader["SHIP_STUS"] == DBNull.Value
+                                    ? ""
+                                    : Convert.ToString(
+                                        reader["SHIP_STUS"]).Trim();
+
+                            result[BuildBlStatusKey(
+                                orderKey,
+                                shipmentKey)] = status;
+                        }
+                    }
+                }
+            }
+
+            return result;
+        }
+
+        private Dictionary<string, string>
+            LoadLatestInvoicesFromDss(
+                List<BlStatusLookup> candidates)
+        {
+            var result = new Dictionary<string, string>(
+                StringComparer.OrdinalIgnoreCase);
+
+            List<BlStatusLookup> uniqueCandidates =
+                (candidates ?? new List<BlStatusLookup>())
+                    .GroupBy(
+                        candidate => BuildDssInvoiceKey(
+                            candidate.Candidate.CustomerNumber,
+                            candidate.OrderKey),
+                        StringComparer.OrdinalIgnoreCase)
+                    .Select(group => group.First())
+                    .ToList();
+
+            const int batchSize = 500;
+
+            for (int offset = 0;
+                 offset < uniqueCandidates.Count;
+                 offset += batchSize)
+            {
+                List<BlStatusLookup> batch =
+                    uniqueCandidates
+                        .Skip(offset)
+                        .Take(batchSize)
+                        .ToList();
+
+                var requestedRows = new List<string>();
+
+                using (var connection = new SqlConnection(sqlDss))
+                using (var command = connection.CreateCommand())
+                {
+                    command.CommandTimeout = 300;
+
+                    for (int index = 0;
+                         index < batch.Count;
+                         index++)
+                    {
+                        string customerParameter =
+                            "@CUSTOMER_" + index;
+                        string orderParameter =
+                            "@ORDER_" + index;
+
+                        requestedRows.Add(
+                            "SELECT " + customerParameter +
+                            " AS CUSTOMER_NUMBER, " + orderParameter +
+                            " AS ORDER_KEY");
+
+                        command.Parameters.Add(P(
+                            customerParameter,
+                            SqlDbType.VarChar,
+                            batch[index].Candidate.CustomerNumber,
+                            50));
+                        command.Parameters.Add(P(
+                            orderParameter,
+                            SqlDbType.VarChar,
+                            batch[index].OrderKey,
+                            50));
+                    }
+
+                    command.CommandText = @"
+WITH REQUESTED AS
+(
+    " + string.Join(
+        Environment.NewLine + " UNION ALL " +
+        Environment.NewLine,
+        requestedRows) + @"
+),
+LATEST_INVOICE AS
+(
+    SELECT REQUESTED.CUSTOMER_NUMBER,
+           REQUESTED.ORDER_KEY,
+           ISNULL(HEADER.invoice_nbr, '') AS invoice_nbr,
+           ROW_NUMBER() OVER
+           (
+               PARTITION BY REQUESTED.CUSTOMER_NUMBER,
+                            REQUESTED.ORDER_KEY
+               ORDER BY HEADER.invoice_date DESC,
+                        HEADER.invoice_nbr DESC
+           ) AS row_number
+    FROM REQUESTED
+    LEFT JOIN dbo.shipment_header HEADER
+        ON HEADER.order_nbr = REQUESTED.ORDER_KEY
+       AND HEADER.branch_customer_nbr =
+           REQUESTED.CUSTOMER_NUMBER
+       AND HEADER.invoice_date > DATEADD(year, -2, GETDATE())
+)
+SELECT CUSTOMER_NUMBER,
+       ORDER_KEY,
+       invoice_nbr
+FROM LATEST_INVOICE
+WHERE row_number = 1;";
+
+                    connection.Open();
+
+                    using (SqlDataReader reader =
+                        command.ExecuteReader())
+                    {
+                        while (reader.Read())
+                        {
+                            string customerNumber =
+                                Convert.ToString(
+                                    reader["CUSTOMER_NUMBER"]).Trim();
+                            string orderKey =
+                                Convert.ToString(
+                                    reader["ORDER_KEY"]).Trim();
+                            string invoice =
+                                Convert.ToString(
+                                    reader["invoice_nbr"]).Trim();
+
+                            if (!string.IsNullOrWhiteSpace(invoice))
+                            {
+                                result[BuildDssInvoiceKey(
+                                    customerNumber,
+                                    orderKey)] = invoice;
+                            }
+                        }
+                    }
+                }
+            }
+
+            return result;
+        }
+        private void UpdateBlStatus(BlStatusCandidate c, string status)
+        { ExecuteNonQuery(sqlGestion, "UPDATE dbo.T_suivi_commande_end_user_BL SET status_bl=@S WHERE id_bl=@ID AND cust_po=@PO AND num_bl=@BL;", P("@S", SqlDbType.VarChar, status, 100), new SqlParameter("@ID", SqlDbType.Int) { Value = c.BlId }, P("@PO", SqlDbType.VarChar, c.CustomerPo, 500), P("@BL", SqlDbType.VarChar, c.BlNumber, 500)); }
+
+        public void Search_BL_Numbers(string sql_con, string logs, string tmp_folder, string session_name)
+        {
+            imcaConnection = sql_con; string root = GetServicePath(); logsFolder = Path.Combine(root, logs ?? ""); tempFolder = Path.Combine(root, tmp_folder ?? ""); sessionName = session_name ?? "";
+            Directory.CreateDirectory(logsFolder); Directory.CreateDirectory(tempFolder);
+            JsonFile cfg = JsonConvert.DeserializeObject<JsonFile>(GetParameter(sql_con, ApplicationName) ?? "");
+            if (cfg?.countries == null || cfg.countries.Count == 0) throw new InvalidOperationException(ApplicationName + " parameters are empty or invalid");
+            foreach (Country item in cfg.countries)
+            {
+                Apply(item, sql_con); if (!IsTrue(item.active)) continue; ValidateSearchBlConfiguration(); OracleConnection oracle = null;
+                try
+                {
+                    List<PurchaseOrderCandidate> candidates = LoadPurchaseOrdersForBlSearch();
+                    int poFound = 0, poMissing = 0, ok = 0, errors = 0, noBl = 0, inserted = 0, updated = 0, unchanged = 0, invalidClosed = 0;
+                    WriteLog("   Search BL candidate(s) : " + candidates.Count + " - Refresh delay : " + delaiRefreshBlTracking + " day(s)");
+                    foreach (var c in candidates)
+                    {
+                        try
+                        {
+                            string po = c.Po;
+                            if (string.IsNullOrWhiteSpace(po) && c.Customer == "21203530")
+                            {
+                                if (oracle == null) { oracle = new OracleConnection(oracleOdsConnection); oracle.Open(); WriteLog("   Direct Oracle ODS connection established for Customer PO lookup"); }
+                                po = FindCustomerPoFromOracle(oracle, c.EndUserRef);
+                                if (string.IsNullOrWhiteSpace(po)) { poMissing++; continue; }
+                                ExecuteNonQuery(sqlGestion, "UPDATE dbo.T_suivi_commande_end_user_cust_po SET cust_po=@P WHERE id_cust_po=@I;", P("@P", SqlDbType.VarChar, po, 500), new SqlParameter("@I", SqlDbType.Int) { Value = c.Id }); poFound++;
+                            }
+                            if (string.IsNullOrWhiteSpace(po)) { poMissing++; continue; }
+                            int requestId = InsertImXmlRequest(c.Customer, "Order Status : recherche num BL", po);
+                            ImXmlOrderStatusResult r;
+                            try { r = ExecuteImXmlOrderStatus(po, c.Customer, requestId); } catch (Exception ex) { r = new ImXmlOrderStatusResult { Message = "IMXML technical error : " + Details(ex) }; }
+                            UpdateImXmlRequest(requestId, r.Message);
+                            if (!r.Success) { errors++; WriteLog("   IMXML Order Status error - Customer PO : " + po + " - Message : " + r.Message); if (IsTrue(debug) && !string.IsNullOrWhiteSpace(r.DebugResponse)) WriteLog("   IMXML response - Customer PO : " + po + " - Content : " + r.DebugResponse); if ((r.Message ?? "").IndexOf("Customer Purchase Order is invalid", StringComparison.OrdinalIgnoreCase) >= 0) { CloseCustomerPo(c.Id); invalidClosed++; } continue; }
+                            ok++; if (r.BlList.Count == 0) { noBl++; continue; }
+                            foreach (var bl in r.BlList) { var u = UpsertBlFromImXml(po, c.Customer, bl); if (u == BlUpsertResult.Inserted) inserted++; else if (u == BlUpsertResult.Updated) updated++; else unchanged++; }
+                        }
+                        catch (Exception ex) { errors++; WriteLog("   Search BL error - Customer PO ID : " + c.Id + " - " + Details(ex)); }
+                    }
+                    WriteLog(
+                        "   Search_BL_Numbers summary" +
+                        " - Candidates : " + candidates.Count +
+                        " - Customer PO found in ODS : " + poFound +
+                        " - Customer PO not found : " + poMissing +
+                        " - IMXML success : " + ok +
+                        " - IMXML errors : " + errors +
+                        " - No BL : " + noBl);
+                    WriteLog(
+                        "   Search_BL_Numbers BL summary" +
+                        " - Inserted : " + inserted +
+                        " - Updated : " + updated +
+                        " - Unchanged : " + unchanged +
+                        " - Invalid PO closed : " + invalidClosed);
+                }
+                catch (Exception ex) { WriteLog("   Search_BL_Numbers error - " + Details(ex)); SendTechnicalAlert(nameof(Search_BL_Numbers), Details(ex)); }
+                finally { oracle?.Dispose(); }
+            }
+        }
+        private void ValidateSearchBlConfiguration() { var m = new List<string>(); if (string.IsNullOrWhiteSpace(sqlGestion)) m.Add("sqlGestion"); if (string.IsNullOrWhiteSpace(oracleOdsConnection)) m.Add("oracleOdsConnection"); if (string.IsNullOrWhiteSpace(imXmlOrderStatusUrl)) m.Add("imXmlOrderStatusUrl"); if (string.IsNullOrWhiteSpace(imXmlOrderStatusTemplate)) m.Add("imXmlOrderStatusTemplate"); if (m.Count > 0) throw new InvalidOperationException("Search_BL_Numbers configuration incomplete : " + string.Join(", ", m)); imXmlOrderStatusUrl = ValidateHttpUrl(imXmlOrderStatusUrl, imXmlOrderStatusUrlParameterGlobal); var d = new XmlDocument(); d.LoadXml(imXmlOrderStatusTemplate); string[] required = { "//*[local-name()='OrderStatusRequest']/*[local-name()='Version']", "//*[local-name()='TransactionHeader']/*[local-name()='SenderID']", "//*[local-name()='TransactionHeader']/*[local-name()='ReceiverID']", "//*[local-name()='TransactionHeader']/*[local-name()='CountryCode']", "//*[local-name()='TransactionHeader']/*[local-name()='LoginID']", "//*[local-name()='TransactionHeader']/*[local-name()='Password']", "//*[local-name()='TransactionHeader']/*[local-name()='TransactionID']", "//*[local-name()='OrderHeaderInfo']/*[local-name()='CustomerPO']" }; foreach (string xpath in required) if (d.SelectSingleNode(xpath) == null) throw new InvalidOperationException("Required node missing from IMXML template : " + xpath); }
+        private List<PurchaseOrderCandidate> LoadPurchaseOrdersForBlSearch()
+        {
+            const string q = @"
+SELECT DISTINCT
+       cp.id_cust_po,
+       ISNULL(cp.cust_po, '') AS cust_po,
+       ISNULL(cp.end_user_order_ref, '') AS end_user_order_ref,
+       ISNULL(m.cust_nbr, '') AS cust_nbr
+FROM dbo.T_suivi_commande_end_user_cust_po cp
+INNER JOIN dbo.T_suivi_commande_end_user_fichier f
+    ON f.id_fichier = cp.id_fichier
+INNER JOIN dbo.T_suivi_commande_end_user_mail m
+    ON m.id_mail = f.id_mail
+WHERE DATEDIFF(DAY, m.date_mail, GETDATE()) <= @D
+  AND cp.ouvert = 1
+  AND ISNULL(cp.cde_annule, 0) <> 1
+  AND
+  (
+      NOT EXISTS
+      (
+          SELECT 1
+          FROM dbo.T_suivi_commande_end_user_BL bl
+          WHERE bl.cust_po = cp.cust_po
+      )
+      OR EXISTS
+      (
+          SELECT 1
+          FROM dbo.T_suivi_commande_end_user_BL bl
+          WHERE bl.cust_po = cp.cust_po
+            AND
+            (
+                bl.status_bl IS NULL
+                OR bl.status_bl NOT IN
+                (
+                    'INVOICED',
+                    'FORCED BILLED',
+                    'BILLING ERROR',
+                    'VOIDED'
+                )
+            )
+      )
+      OR NOT EXISTS
+      (
+          SELECT 1
+          FROM dbo.T_suivi_commande_end_user_BL bl_billed
+          WHERE bl_billed.cust_po = cp.cust_po
+            AND bl_billed.status_bl IN
+            (
+                'INVOICED',
+                'FORCED BILLED'
+            )
+      )
+  )
+ORDER BY cp.id_cust_po;";
+
+            var candidates = new List<PurchaseOrderCandidate>();
+
+            using (var connection = new SqlConnection(sqlGestion))
+            using (var command = new SqlCommand(q, connection))
+            {
+                command.CommandTimeout = 300;
+                command.Parameters.Add("@D", SqlDbType.Int).Value = delaiRefreshBlTracking;
+                connection.Open();
+
+                using (var reader = command.ExecuteReader())
+                {
+                    while (reader.Read())
+                    {
+                        candidates.Add(new PurchaseOrderCandidate
+                        {
+                            Id = Convert.ToInt32(reader["id_cust_po"]),
+                            Po = Convert.ToString(reader["cust_po"]).Trim(),
+                            EndUserRef = Convert.ToString(reader["end_user_order_ref"]).Trim(),
+                            Customer = Convert.ToString(reader["cust_nbr"]).Trim()
+                        });
+                    }
+                }
+            }
+
+            return candidates;
+        }
+        private static string FindCustomerPoFromOracle(OracleConnection cn, string e) { if (string.IsNullOrWhiteSpace(e)) return ""; const string q = @"SELECT CUST_ORDR_NBR FROM (SELECT TRIM(CUST_ORDR_NBR) CUST_ORDR_NBR FROM DSSDATA.UVW_ORDERHEADFR WHERE TRIM(EU_PO_NBR)=:E AND TO_CHAR(BILL_CUST_NBR)=:C AND CUST_ORDR_NBR IS NOT NULL ORDER BY CUST_ORDR_NBR DESC) WHERE ROWNUM=1"; using (var cmd = new OracleCommand(q, cn)) { cmd.BindByName = true; cmd.Parameters.Add("E", OracleDbType.Varchar2, e, ParameterDirection.Input); cmd.Parameters.Add("C", OracleDbType.Varchar2, "203530", ParameterDirection.Input); object v = cmd.ExecuteScalar(); return v == null || v == DBNull.Value ? "" : Convert.ToString(v).Trim(); } }
+        private ImXmlCredentials LoadImXmlCredentials(string c) { using (var cn = new SqlConnection(sqlGestion)) using (var cmd = new SqlCommand("SELECT TOP(1) ISNULL(imXml_login_user,''),ISNULL(imXml_mdp,'') FROM dbo.T_suivi_commande_end_user_client_config WHERE cust_nbr=@C", cn)) { cmd.Parameters.Add(P("@C", SqlDbType.VarChar, c, 100)); cn.Open(); using (var r = cmd.ExecuteReader()) { if (!r.Read()) throw new InvalidOperationException("No IMXML configuration found for customer " + c); return new ImXmlCredentials { Login = Convert.ToString(r[0]).Trim(), Password = Convert.ToString(r[1]).Trim() }; } } }
+        private ImXmlOrderStatusResult ExecuteImXmlOrderStatus(string po, string customer, int requestId) { var request = BuildImXmlOrderStatusRequest(po, requestId, LoadImXmlCredentials(customer)); if (IsTrue(debug)) WriteLog("   IMXML Order Status request - Customer PO : " + po); return ParseImXmlOrderStatusResponse(PostImXmlRequest(request, imXmlOrderStatusUrl)); }
+        private XmlDocument BuildImXmlOrderStatusRequest(string po, int id, ImXmlCredentials c) { var d = new XmlDocument(); d.LoadXml(imXmlOrderStatusTemplate); SetNode(d, "//*[local-name()='LoginID']", c.Login); SetNode(d, "//*[local-name()='Password']", c.Password); SetNode(d, "//*[local-name()='TransactionID']", id.ToString(CultureInfo.InvariantCulture)); SetNode(d, "//*[local-name()='CustomerPO']", po); return d; }
+        private static void SetNode(XmlDocument d, string x, string v) { XmlNode n = d.SelectSingleNode(x); if (n == null) throw new InvalidOperationException("Required IMXML template node not found : " + x); n.InnerText = v ?? ""; }
+        private string PostImXmlRequest(XmlDocument d, string requestUrl) { Encoding encoding = Encoding.GetEncoding("iso-8859-1"); byte[] b = encoding.GetBytes(d.OuterXml); ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12; var h = WebRequest.CreateHttp(requestUrl); h.Method = "POST"; h.ContentType = "text/xml; charset=iso-8859-1"; h.ContentLength = b.Length; h.Timeout = 300000; h.ReadWriteTimeout = 300000; using (var o = h.GetRequestStream()) o.Write(b, 0, b.Length); using (var r = (HttpWebResponse)h.GetResponse()) using (var i = r.GetResponseStream()) using (var sr = new StreamReader(i ?? Stream.Null, encoding, true)) return sr.ReadToEnd(); }
+        private static ImXmlOrderStatusResult ParseImXmlOrderStatusResponse(string text) { var z = new ImXmlOrderStatusResult(); if (string.IsNullOrWhiteSpace(text)) { z.Message = "Empty IMXML response"; return z; } var d = new XmlDocument(); try { d.LoadXml(text); } catch (Exception ex) { z.Message = "Invalid IMXML response : " + Truncate(ex.Message, 150); z.DebugResponse = Truncate(Regex.Replace(text ?? "", @"\s+", " ").Trim(), 500); return z; } XmlNode root = d.SelectSingleNode("//*[local-name()='OrderStatusResponse']"); if (root == null) { string rootName = d.DocumentElement == null ? "none" : d.DocumentElement.LocalName; z.Message = "Unexpected IMXML response - Root : " + rootName; z.DebugResponse = Truncate(Regex.Replace(d.OuterXml ?? "", @"\s+", " ").Trim(), 500); return z; } string er = (root.SelectSingleNode(".//*[local-name()='ErrorStatus']")?.InnerText ?? "").Trim(); if (er != "") { z.Message = Truncate(er, 250); return z; } foreach (XmlNode o in root.SelectNodes(".//*[local-name()='OrderInfo']")) { string n = (o.SelectSingleNode("./*[local-name()='BranchOrderNumber']")?.InnerText ?? "").Trim(); foreach (XmlNode x in o.SelectNodes("./*[local-name()='OrderSuffix']")) { if (!string.IsNullOrWhiteSpace(x.SelectSingleNode("./*[local-name()='InvoiceDate']")?.InnerText)) continue; string id = x.Attributes?["ID"]?.Value ?? ""; if (id != "") z.BlList.Add(new BlInformation { Number = n + "-" + id, Status = (x.SelectSingleNode("./*[local-name()='OrderStatus']")?.InnerText ?? "").Trim() }); } } z.Success = true; z.Message = z.BlList.Count == 0 ? "Requête OK - aucun BL trouvé" : "Requête OK - " + z.BlList.Count + " BL trouvé(s)"; return z; }
+        private int InsertImXmlRequest(string c, string t, string p) => ScalarInt(sqlGestion, "INSERT INTO dbo.T_suivi_commande_end_user_imXml_request(cust_nbr,request_type,request_date,cust_po) VALUES(@C,@T,GETDATE(),@P);SELECT CONVERT(int,SCOPE_IDENTITY());", P("@C", SqlDbType.VarChar, c, 100), P("@T", SqlDbType.VarChar, t, 500), P("@P", SqlDbType.VarChar, p, 500));
+        private void UpdateImXmlRequest(int id, string m) => ExecuteNonQuery(sqlGestion, "UPDATE dbo.T_suivi_commande_end_user_imXml_request SET cmt=@M WHERE id_request=@I", P("@M", SqlDbType.VarChar, Truncate(m, 250), 250), new SqlParameter("@I", SqlDbType.Int) { Value = id });
+        private static bool IsFinalBlStatus(string s) => new[] { "INVOICED", "FORCED BILLED", "BILLING ERROR", "VOIDED" }.Contains((s ?? "").Trim(), StringComparer.OrdinalIgnoreCase);
+        private BlUpsertResult UpsertBlFromImXml(string po, string customer, BlInformation bl) { using (var cn = new SqlConnection(sqlGestion)) { cn.Open(); using (var tx = cn.BeginTransaction(IsolationLevel.Serializable)) { int id = 0; string current = ""; using (var cmd = new SqlCommand("SELECT TOP(1) id_bl,ISNULL(status_bl,'') FROM dbo.T_suivi_commande_end_user_BL WITH(UPDLOCK,HOLDLOCK) WHERE cust_po=@P AND num_bl=@B", cn, tx)) { cmd.Parameters.Add(P("@P", SqlDbType.VarChar, po, 500)); cmd.Parameters.Add(P("@B", SqlDbType.VarChar, bl.Number, 100)); using (var r = cmd.ExecuteReader()) if (r.Read()) { id = Convert.ToInt32(r[0]); current = Convert.ToString(r[1]); } } if (id == 0) { using (var cmd = new SqlCommand("INSERT INTO dbo.T_suivi_commande_end_user_BL(cust_po,num_bl,status_bl,cust_nbr) VALUES(@P,@B,@S,@C)", cn, tx)) { cmd.Parameters.Add(P("@P", SqlDbType.VarChar, po, 500)); cmd.Parameters.Add(P("@B", SqlDbType.VarChar, bl.Number, 100)); cmd.Parameters.Add(P("@S", SqlDbType.VarChar, bl.Status, 100)); cmd.Parameters.Add(P("@C", SqlDbType.VarChar, customer, 100)); cmd.ExecuteNonQuery(); } tx.Commit(); return BlUpsertResult.Inserted; } if (!IsFinalBlStatus(current) && !string.Equals(current, bl.Status, StringComparison.OrdinalIgnoreCase)) { using (var cmd = new SqlCommand("UPDATE dbo.T_suivi_commande_end_user_BL SET status_bl=@S WHERE id_bl=@I", cn, tx)) { cmd.Parameters.Add(P("@S", SqlDbType.VarChar, bl.Status, 100)); cmd.Parameters.Add("@I", SqlDbType.Int).Value = id; cmd.ExecuteNonQuery(); } tx.Commit(); return BlUpsertResult.Updated; } tx.Commit(); return BlUpsertResult.Unchanged; } } }
+        public void Close_Completed_Orders(
+            string sql_con,
+            string logs,
+            string tmp_folder,
+            string session_name)
+        {
+            imcaConnection = sql_con;
+            string root = GetServicePath();
+            logsFolder = Path.Combine(root, logs ?? "");
+            tempFolder = Path.Combine(root, tmp_folder ?? "");
+            sessionName = session_name ?? "";
+
+            Directory.CreateDirectory(logsFolder);
+            Directory.CreateDirectory(tempFolder);
+
+            JsonFile configuration =
+                JsonConvert.DeserializeObject<JsonFile>(
+                    GetParameter(sql_con, ApplicationName) ?? "");
+
+            if (configuration?.countries == null ||
+                configuration.countries.Count == 0)
+            {
+                throw new InvalidOperationException(
+                    ApplicationName +
+                    " parameters are empty or invalid");
+            }
+
+            foreach (Country item in configuration.countries)
+            {
+                Apply(item, sql_con);
+
+                if (!IsTrue(item.active))
+                {
+                    continue;
+                }
+
+                try
+                {
+                    ValidateCloseOrdersConfiguration();
+
+                    int examined;
+                    int closed = CloseCompletedCustomerPos(
+                        out examined);
+
+                    WriteLog(
+                        "   Close_Completed_Orders summary" +
+                        " - Open orders examined : " + examined +
+                        " - Orders closed : " + closed +
+                        " - Orders left open : " +
+                        (examined - closed));
+                }
+                catch (Exception ex)
+                {
+                    WriteLog(
+                        "   Close_Completed_Orders error - " +
+                        Details(ex));
+
+                    SendTechnicalAlert(
+                        nameof(Close_Completed_Orders),
+                        Details(ex));
+                }
+            }
+        }
+
+        private void ValidateCloseOrdersConfiguration()
+        {
+            if (string.IsNullOrWhiteSpace(sqlGestion))
+            {
+                throw new InvalidOperationException(
+                    "Close_Completed_Orders configuration " +
+                    "incomplete : sqlGestion");
+            }
+        }
+
+        private int CloseCompletedCustomerPos(out int examined)
+        {
+            const string selectSql = @"
+SELECT DISTINCT
+       cp.id_cust_po,
+       ISNULL(cp.cust_po, '') AS cust_po
+FROM dbo.T_suivi_commande_end_user_cust_po cp
+INNER JOIN dbo.T_suivi_commande_end_user_fichier f
+    ON f.id_fichier = cp.id_fichier
+INNER JOIN dbo.T_suivi_commande_end_user_mail m
+    ON m.id_mail = f.id_mail
+WHERE cp.ouvert = 1
+  AND ISNULL(cp.cde_annule, 0) = 0
+  AND cp.cust_po IS NOT NULL
+  AND LTRIM(RTRIM(cp.cust_po)) <> ''
+  AND DATEDIFF(DAY, m.date_mail, GETDATE()) <= @DELAI
+ORDER BY cp.id_cust_po;";
+
+            var candidates = new List<Tuple<int, string>>();
+
+            using (var connection = new SqlConnection(sqlGestion))
+            using (var command = new SqlCommand(
+                selectSql,
+                connection))
+            {
+                command.CommandTimeout = 300;
+                command.Parameters.Add(
+                    "@DELAI",
+                    SqlDbType.Int).Value =
+                    delaiRefreshBlTracking;
+
+                connection.Open();
+
+                using (SqlDataReader reader =
+                    command.ExecuteReader())
+                {
+                    while (reader.Read())
+                    {
+                        candidates.Add(
+                            Tuple.Create(
+                                Convert.ToInt32(
+                                    reader["id_cust_po"]),
+                                Convert.ToString(
+                                    reader["cust_po"]).Trim()));
+                    }
+                }
+            }
+
+            examined = candidates.Count;
+            int closed = 0;
+
+            foreach (Tuple<int, string> candidate in candidates)
+            {
+                if (!CanCloseCustomerPo(
+                        candidate.Item1,
+                        candidate.Item2))
+                {
+                    continue;
+                }
+
+                CloseCustomerPo(candidate.Item1);
+                closed++;
+
+                WriteLog(
+                    "       Customer PO closed" +
+                    " - ID : " + candidate.Item1 +
+                    " - Customer PO : " + candidate.Item2);
+            }
+
+            return closed;
+        }
+
+        private bool CanCloseCustomerPo(int id, string po)
+        {
+            int incomplete = ScalarInt(
+                sqlGestion,
+                @"SELECT COUNT(*)
+FROM dbo.T_suivi_commande_end_user_cust_po_line
+WHERE id_cust_po = @I
+  AND
+  (
+      (serial_number IS NULL OR LTRIM(RTRIM(serial_number)) = '')
+      AND
+      (IMEI1 IS NULL OR LTRIM(RTRIM(IMEI1)) = '')
+  );",
+                new SqlParameter("@I", SqlDbType.Int) { Value = id });
+
+            if (incomplete > 0)
+                return false;
+
+            const string sql = @"
+SELECT
+    COUNT(*) AS total_bl,
+    SUM(
+        CASE
+            WHEN status_bl IN ('INVOICED', 'FORCED BILLED') THEN 1
+            ELSE 0
+        END
+    ) AS billed_bl,
+    SUM(
+        CASE
+            WHEN ISNULL(status_bl, '') NOT IN
+                 ('INVOICED', 'FORCED BILLED', 'BILLING ERROR', 'VOIDED') THEN 1
+            ELSE 0
+        END
+    ) AS non_final_bl
+FROM dbo.T_suivi_commande_end_user_BL
+WHERE cust_po = @P;";
+
+            using (var connection = new SqlConnection(sqlGestion))
+            using (var command = new SqlCommand(sql, connection))
+            {
+                command.CommandTimeout = 300;
+                command.Parameters.Add(P("@P", SqlDbType.VarChar, po, 500));
+                connection.Open();
+
+                using (var reader = command.ExecuteReader())
+                {
+                    if (!reader.Read())
+                        return false;
+
+                    int totalBl = reader["total_bl"] == DBNull.Value
+                        ? 0
+                        : Convert.ToInt32(reader["total_bl"]);
+                    int billedBl = reader["billed_bl"] == DBNull.Value
+                        ? 0
+                        : Convert.ToInt32(reader["billed_bl"]);
+                    int nonFinalBl = reader["non_final_bl"] == DBNull.Value
+                        ? 0
+                        : Convert.ToInt32(reader["non_final_bl"]);
+
+                    return totalBl > 0 && billedBl > 0 && nonFinalBl == 0;
+                }
+            }
+        }
+        private void CloseCustomerPo(int id) => ExecuteNonQuery(sqlGestion, "UPDATE dbo.T_suivi_commande_end_user_cust_po SET ouvert=0 WHERE id_cust_po=@I", new SqlParameter("@I", SqlDbType.Int) { Value = id });
+
+        public void Update_BL_Country_Codes(string sql_con, string logs, string tmp_folder, string session_name)
+        {
+            imcaConnection = sql_con; string root = GetServicePath();
+            logsFolder = Path.Combine(root, logs ?? ""); tempFolder = Path.Combine(root, tmp_folder ?? ""); sessionName = session_name ?? "";
+            Directory.CreateDirectory(logsFolder); Directory.CreateDirectory(tempFolder);
+            JsonFile cfg = JsonConvert.DeserializeObject<JsonFile>(GetParameter(sql_con, ApplicationName) ?? "");
+            if (cfg?.countries == null || cfg.countries.Count == 0) throw new InvalidOperationException(ApplicationName + " parameters are empty or invalid");
+            foreach (Country item in cfg.countries)
+            {
+                Apply(item, sql_con); if (!IsTrue(item.active)) continue; ValidateCountryCodeConfiguration();
+                try
+                {
+                    List<BlCountryCandidate> candidates = LoadBlCountryCandidates();
+                    int imXmlSuccess = 0, dssSuccess = 0, notFound = 0, errors = 0;
+                    WriteLog("   BL country code candidate(s) : " + candidates.Count + " - Refresh delay : " + delaiRefreshBlTracking + " day(s)");
+                    foreach (BlCountryCandidate candidate in candidates)
+                    {
+                        try
+                        {
+                            if (!TryGetOrderNumber(candidate.BlNumber, out string orderNumber)) { errors++; WriteLog("       Invalid BL number - ID : " + candidate.BlId + " - BL : " + candidate.BlNumber); continue; }
+                            int requestId = InsertImXmlRequest(candidate.CustomerNumber, "Order Detail : recherche code pays", candidate.CustomerPo);
+                            ImXmlOrderDetailResult result;
+                            try { result = ExecuteImXmlOrderDetail(candidate.CustomerPo, candidate.CustomerNumber, requestId, orderNumber); }
+                            catch (Exception ex) { result = new ImXmlOrderDetailResult { Message = "IMXML technical error : " + Details(ex) }; }
+                            UpdateImXmlRequest(requestId, result.Message);
+                            if (result.Success && !string.IsNullOrWhiteSpace(result.CountryCode))
+                            {
+                                UpdateBlCountryCode(candidate.BlId, result.CountryCode, result.ZipCode); imXmlSuccess++;
+                                WriteLog("       BL country code updated from IMXML - BL : " + candidate.BlNumber + " - Country : " + result.CountryCode + " - Zip code : " + result.ZipCode); continue;
+                            }
+                            if (result.OrderNotFound)
+                            {
+                                string dssCountryCode = FindCountryCodeInDss(candidate.CustomerNumber, orderNumber, candidate.CustomerPo);
+                                if (!string.IsNullOrWhiteSpace(dssCountryCode)) { UpdateBlCountryCode(candidate.BlId, dssCountryCode, null); dssSuccess++; WriteLog("       BL country code updated from DSS - BL : " + candidate.BlNumber + " - Country : " + dssCountryCode); }
+                                else { notFound++; WriteLog("       BL country code not found in DSS - BL : " + candidate.BlNumber + " - Customer PO : " + candidate.CustomerPo); }
+                                continue;
+                            }
+                            errors++; WriteLog("       IMXML Order Detail error - BL : " + candidate.BlNumber + " - Customer PO : " + candidate.CustomerPo + " - Message : " + result.Message);
+                            if (IsTrue(debug) && !string.IsNullOrWhiteSpace(result.DebugResponse)) WriteLog("       IMXML Order Detail response - BL : " + candidate.BlNumber + " - Content : " + result.DebugResponse);
+                        }
+                        catch (Exception ex) { errors++; WriteLog("       BL country code processing error - BL ID : " + candidate.BlId + " - BL : " + candidate.BlNumber + " - " + Details(ex)); }
+                    }
+                    WriteLog("   Update_BL_Country_Codes summary - Candidates : " + candidates.Count + " - Updated from IMXML : " + imXmlSuccess + " - Updated from DSS : " + dssSuccess + " - Not found : " + notFound + " - Errors : " + errors);
+                }
+                catch (Exception ex) { WriteLog("   Update_BL_Country_Codes error - " + Details(ex)); SendTechnicalAlert(nameof(Update_BL_Country_Codes), Details(ex)); }
+            }
+        }
+        private void ValidateCountryCodeConfiguration()
+        {
+            var missing = new List<string>();
+            if (string.IsNullOrWhiteSpace(sqlGestion)) missing.Add("sqlGestion"); if (string.IsNullOrWhiteSpace(sqlDss)) missing.Add("sqlDss");
+            if (string.IsNullOrWhiteSpace(imXmlOrderDetailUrl)) missing.Add("imXmlOrderDetailUrl"); if (string.IsNullOrWhiteSpace(imXmlOrderDetailTemplate)) missing.Add("imXmlOrderDetailTemplate");
+            if (missing.Count > 0) throw new InvalidOperationException("Update_BL_Country_Codes configuration incomplete : " + string.Join(", ", missing));
+            imXmlOrderDetailUrl = ValidateHttpUrl(imXmlOrderDetailUrl, imXmlOrderDetailUrlParameterGlobal);
+            var d = new XmlDocument(); d.LoadXml(imXmlOrderDetailTemplate);
+            string[] required = { "/*[local-name()='OrderDetailRequest']", "/*[local-name()='OrderDetailRequest']/*[local-name()='Version']", "//*[local-name()='TransactionHeader']/*[local-name()='SenderID']", "//*[local-name()='TransactionHeader']/*[local-name()='ReceiverID']", "//*[local-name()='TransactionHeader']/*[local-name()='CountryCode']", "//*[local-name()='TransactionHeader']/*[local-name()='LoginID']", "//*[local-name()='TransactionHeader']/*[local-name()='Password']", "//*[local-name()='TransactionHeader']/*[local-name()='TransactionID']", "//*[local-name()='OrderHeaderInfo']/*[local-name()='BranchOrderNumber']", "//*[local-name()='OrderHeaderInfo']/*[local-name()='CustomerPO']" };
+            foreach (string xpath in required) if (d.SelectSingleNode(xpath) == null) throw new InvalidOperationException("Required node missing from IMXML Order Detail template : " + xpath);
+        }
+        private List<BlCountryCandidate> LoadBlCountryCandidates()
+        {
+            const string sql = @"SELECT DISTINCT bl.id_bl,ISNULL(bl.num_bl,'') num_bl,ISNULL(bl.cust_po,'') cust_po,ISNULL(bl.cust_nbr,ISNULL(m.cust_nbr,'')) cust_nbr
+FROM dbo.T_suivi_commande_end_user_BL bl JOIN dbo.T_suivi_commande_end_user_cust_po cp ON cp.cust_po=bl.cust_po
+JOIN dbo.T_suivi_commande_end_user_fichier f ON f.id_fichier=cp.id_fichier JOIN dbo.T_suivi_commande_end_user_mail m ON m.id_mail=f.id_mail
+WHERE (bl.code_pays IS NULL OR LTRIM(RTRIM(bl.code_pays))='') AND ISNULL(cp.cde_annule,0)=0 AND bl.num_bl IS NOT NULL AND LTRIM(RTRIM(bl.num_bl))<>''
+AND cp.cust_po IS NOT NULL AND LTRIM(RTRIM(cp.cust_po))<>'' AND DATEDIFF(DAY,m.date_mail,GETDATE())<=@DELAI ORDER BY bl.id_bl;";
+            var result = new List<BlCountryCandidate>();
+            using (var cn = new SqlConnection(sqlGestion)) using (var cmd = new SqlCommand(sql, cn)) { cmd.CommandTimeout = 300; cmd.Parameters.Add("@DELAI", SqlDbType.Int).Value = delaiRefreshBlTracking; cn.Open(); using (var r = cmd.ExecuteReader()) while (r.Read()) result.Add(new BlCountryCandidate { BlId = Convert.ToInt32(r["id_bl"]), BlNumber = Convert.ToString(r["num_bl"]).Trim(), CustomerPo = Convert.ToString(r["cust_po"]).Trim(), CustomerNumber = Convert.ToString(r["cust_nbr"]).Trim() }); }
+            return result;
+        }
+        private static bool TryGetOrderNumber(string blNumber, out string orderNumber)
+        {
+            orderNumber = ""; string normalized = (blNumber ?? "").Trim().Replace(" ", ""); if (string.IsNullOrWhiteSpace(normalized)) return false;
+            string[] parts = normalized.Split(new[] { '-' }, StringSplitOptions.RemoveEmptyEntries); orderNumber = parts.Length > 0 ? parts[0].Trim() : normalized;
+            return Regex.IsMatch(orderNumber, @"^[A-Za-z0-9]+$");
+        }
+        private ImXmlOrderDetailResult ExecuteImXmlOrderDetail(string customerPo, string customerNumber, int requestId, string branchOrderNumber)
+        {
+            XmlDocument request = BuildImXmlOrderDetailRequest(customerPo, requestId, branchOrderNumber, LoadImXmlCredentials(customerNumber));
+            if (IsTrue(debug)) WriteLog("       IMXML Order Detail request - Customer PO : " + customerPo + " - Branch order number : " + branchOrderNumber);
+            return ParseImXmlOrderDetailResponse(PostImXmlRequest(request, imXmlOrderDetailUrl));
+        }
+        private XmlDocument BuildImXmlOrderDetailRequest(string customerPo, int requestId, string branchOrderNumber, ImXmlCredentials credentials)
+        {
+            var d = new XmlDocument(); d.LoadXml(imXmlOrderDetailTemplate); SetNode(d, "//*[local-name()='LoginID']", credentials.Login); SetNode(d, "//*[local-name()='Password']", credentials.Password);
+            SetNode(d, "//*[local-name()='TransactionID']", requestId.ToString(CultureInfo.InvariantCulture)); SetNode(d, "//*[local-name()='BranchOrderNumber']", branchOrderNumber); SetNode(d, "//*[local-name()='CustomerPO']", customerPo); return d;
+        }
+        private static ImXmlOrderDetailResult ParseImXmlOrderDetailResponse(string text)
+        {
+            var z = new ImXmlOrderDetailResult(); if (string.IsNullOrWhiteSpace(text)) { z.Message = "Empty IMXML response"; return z; }
+            var d = new XmlDocument(); try { d.LoadXml(text); } catch (Exception ex) { z.Message = "Invalid IMXML response : " + Truncate(ex.Message, 150); z.DebugResponse = Truncate(Regex.Replace(text ?? "", @"\s+", " ").Trim(), 500); return z; }
+            XmlNode root = d.SelectSingleNode("//*[local-name()='OrderDetailResponse']");
+            if (root == null) { string rootName = d.DocumentElement == null ? "none" : d.DocumentElement.LocalName; z.Message = "Unexpected IMXML response - Root : " + rootName; z.DebugResponse = Truncate(Regex.Replace(d.OuterXml ?? "", @"\s+", " ").Trim(), 500); return z; }
+            string error = (root.SelectSingleNode(".//*[local-name()='ErrorStatus']")?.InnerText ?? "").Trim();
+            if (error != "") { z.Message = Truncate(error, 250); z.OrderNotFound = error.IndexOf("Order Not Found", StringComparison.OrdinalIgnoreCase) >= 0; return z; }
+            XmlNode suffix = root.SelectSingleNode(".//*[local-name()='OrderInformation']/*[local-name()='OrderSuffix']"); if (suffix == null) { z.Message = "No OrderSuffix found in IMXML response"; return z; }
+            z.CountryCode = (suffix.SelectSingleNode(".//*[local-name()='ShipToInformation']/*[local-name()='ShipToCountryCode']")?.InnerText ?? "").Trim();
+            z.ZipCode = (suffix.SelectSingleNode(".//*[local-name()='ShipToInformation']/*[local-name()='ShipToPostalCode']")?.InnerText ?? "").Trim();
+            if (string.IsNullOrWhiteSpace(z.CountryCode)) { z.Message = "Country code missing from IMXML response"; return z; }
+            z.Success = true; z.Message = "Requête OK"; return z;
+        }
+        private void UpdateBlCountryCode(int blId, string countryCode, string zipCode)
+        {
+            var zip = new SqlParameter("@ZIP", SqlDbType.VarChar, 50) { Value = string.IsNullOrWhiteSpace(zipCode) ? (object)DBNull.Value : zipCode.Trim() };
+            ExecuteNonQuery(sqlGestion, "UPDATE dbo.T_suivi_commande_end_user_BL SET code_pays=@COUNTRY,zip_code=CASE WHEN @ZIP IS NULL THEN zip_code ELSE @ZIP END WHERE id_bl=@ID;", P("@COUNTRY", SqlDbType.VarChar, countryCode?.Trim() ?? "", 10), zip, new SqlParameter("@ID", SqlDbType.Int) { Value = blId });
+        }
+        private string FindCountryCodeInDss(string customerNumber, string orderNumber, string customerPo)
+        {
+            const string sql = @"SELECT TOP(1) ISNULL(a.Dest_Country,'') FROM dbo.Shipment_Address a WHERE a.Br_Invoice_Nbr=(SELECT TOP(1) h.invoice_nbr FROM dbo.shipment_header h WHERE h.order_nbr=@ORDER AND h.branch_customer_nbr=@CUSTOMER AND LTRIM(RTRIM(h.CustPoNbr))=@PO ORDER BY h.invoice_date DESC);";
+            return ScalarString(sqlDss, sql, P("@ORDER", SqlDbType.VarChar, orderNumber ?? "", 50), P("@CUSTOMER", SqlDbType.VarChar, customerNumber ?? "", 50), P("@PO", SqlDbType.VarChar, customerPo ?? "", 500));
+        }
+        public void Update_BL_Tracking(string sql_con, string logs, string tmp_folder, string session_name)
+        {
+            imcaConnection = sql_con;
+            string root = GetServicePath();
+            logsFolder = Path.Combine(root, logs ?? "");
+            tempFolder = Path.Combine(root, tmp_folder ?? "");
+            sessionName = session_name ?? "";
+            Directory.CreateDirectory(logsFolder);
+            Directory.CreateDirectory(tempFolder);
+
+            JsonFile cfg = JsonConvert.DeserializeObject<JsonFile>(
+                GetParameter(sql_con, ApplicationName) ?? "");
+            if (cfg?.countries == null || cfg.countries.Count == 0)
+                throw new InvalidOperationException(
+                    ApplicationName + " parameters are empty or invalid");
+
+            foreach (Country item in cfg.countries)
+            {
+                Apply(item, sql_con);
+                if (!IsTrue(item.active)) continue;
+
+                try
+                {
+                    ValidateTrackingConfiguration();
+                    List<BlTrackingCandidate> candidates = LoadBlTrackingCandidates();
+                    int updated = 0;
+                    int notFound = 0;
+                    int noPackage = 0;
+                    int invalidResponse = 0;
+                    int imXmlErrors = 0;
+                    int invalidShipDate = 0;
+                    int technicalErrors = 0;
+                    int processingErrors = 0;
+
+                    WriteLog(
+                        "   BL tracking candidate(s) : " + candidates.Count +
+                        " - Refresh delay : " + delaiRefreshBlTracking + " day(s)");
+
+                    foreach (BlTrackingCandidate candidate in candidates)
+                    {
+                        try
+                        {
+                            if (!TrySplitTrackingBlNumber(
+                                    candidate.BlNumber,
+                                    out string branchOrderNumber,
+                                    out string suffixNumber))
+                            {
+                                processingErrors++;
+                                WriteLog(
+                                    "       Invalid BL number for tracking" +
+                                    " - BL ID : " + candidate.BlId +
+                                    " - BL : " + candidate.BlNumber);
+                                continue;
+                            }
+
+                            string invoiceNumber = FindTrackingInvoiceInDss(
+                                branchOrderNumber,
+                                candidate.CustomerPo,
+                                candidate.CustomerNumber);
+
+                            int requestId = InsertImXmlRequest(
+                                candidate.CustomerNumber,
+                                "Order Tracking",
+                                candidate.CustomerPo);
+
+                            ImXmlTrackingResult result;
+                            try
+                            {
+                                result = ExecuteImXmlOrderTracking(
+                                    candidate.CustomerPo,
+                                    candidate.CustomerNumber,
+                                    requestId,
+                                    branchOrderNumber,
+                                    suffixNumber,
+                                    invoiceNumber);
+                            }
+                            catch (Exception ex)
+                            {
+                                result = new ImXmlTrackingResult
+                                {
+                                    Outcome = TrackingOutcome.TechnicalError,
+                                    Message = "IMXML technical error : " + Details(ex)
+                                };
+                            }
+
+                            UpdateImXmlRequest(requestId, result.Message);
+
+                            if (!result.Success)
+                            {
+                                switch (result.Outcome)
+                                {
+                                    case TrackingOutcome.NoPackage:
+                                        noPackage++;
+                                        break;
+                                    case TrackingOutcome.InvalidResponse:
+                                        invalidResponse++;
+                                        break;
+                                    case TrackingOutcome.ImXmlError:
+                                        imXmlErrors++;
+                                        break;
+                                    case TrackingOutcome.InvalidShipDate:
+                                        invalidShipDate++;
+                                        break;
+                                    case TrackingOutcome.TechnicalError:
+                                        technicalErrors++;
+                                        break;
+                                    default:
+                                        notFound++;
+                                        break;
+                                }
+
+                                WriteLog(
+                                    "       BL tracking not updated" +
+                                    " - Outcome : " + result.Outcome +
+                                    " - BL : " + candidate.BlNumber +
+                                    " - Invoice : " + invoiceNumber +
+                                    " - Message : " + result.Message);
+                                if (IsTrue(debug) &&
+                                    !string.IsNullOrWhiteSpace(result.DebugResponse))
+                                {
+                                    WriteLog(
+                                        "       IMXML Order Tracking response" +
+                                        " - BL : " + candidate.BlNumber +
+                                        " - Content : " + result.DebugResponse);
+                                }
+                                continue;
+                            }
+
+                            CarrierMapping mapping = FindCarrierMapping(
+                                result.CarrierCode);
+
+                            UpdateBlTrackingAndFlagFile(
+                                candidate.BlId,
+                                candidate.FileId,
+                                result,
+                                mapping);
+                            updated++;
+
+                            WriteLog(
+                                "       BL tracking updated" +
+                                " - BL : " + candidate.BlNumber +
+                                " - Tracking : " + result.TrackingNumber +
+                                " - Carrier impulse : " + result.CarrierCode +
+                                " - Carrier mapped : " + mapping.CarrierCode +
+                                " - Carrier name : " + mapping.CarrierName);
+                        }
+                        catch (Exception ex)
+                        {
+                            processingErrors++;
+                            WriteLog(
+                                "       BL tracking processing error" +
+                                " - BL ID : " + candidate.BlId +
+                                " - BL : " + candidate.BlNumber +
+                                " - " + Details(ex));
+                        }
+                    }
+
+                    WriteLog(
+                        "   Update_BL_Tracking summary" +
+                        " - Candidates : " + candidates.Count +
+                        " - Updated : " + updated +
+                        " - Not found : " + notFound +
+                        " - No package : " + noPackage +
+                        " - Invalid response : " + invalidResponse +
+                        " - IMXML errors : " + imXmlErrors +
+                        " - Invalid ship date : " + invalidShipDate +
+                        " - Technical errors : " + technicalErrors +
+                        " - Processing errors : " + processingErrors);
+                }
+                catch (Exception ex)
+                {
+                    WriteLog("   Update_BL_Tracking error - " + Details(ex));
+                    SendTechnicalAlert(nameof(Update_BL_Tracking), Details(ex));
+                }
+            }
+        }
+
+        private void ValidateTrackingConfiguration()
+        {
+            var missing = new List<string>();
+            if (string.IsNullOrWhiteSpace(sqlGestion)) missing.Add("sqlGestion");
+            if (string.IsNullOrWhiteSpace(sqlDss)) missing.Add("sqlDss");
+            if (string.IsNullOrWhiteSpace(imXmlOrderTrackingUrl)) missing.Add("imXmlOrderTrackingUrl");
+            if (string.IsNullOrWhiteSpace(imXmlOrderTrackingTemplate)) missing.Add("imXmlOrderTrackingTemplate");
+            if (missing.Count > 0)
+                throw new InvalidOperationException(
+                    "Update_BL_Tracking configuration incomplete : " +
+                    string.Join(", ", missing));
+
+            imXmlOrderTrackingUrl = ValidateHttpUrl(
+                imXmlOrderTrackingUrl,
+                imXmlOrderTrackingUrlParameterGlobal);
+
+            var document = new XmlDocument();
+            document.LoadXml(imXmlOrderTrackingTemplate);
+            string[] required =
+            {
+                "/*[local-name()='OrderTrackingRequest']",
+                "/*[local-name()='OrderTrackingRequest']/*[local-name()='Version']",
+                "//*[local-name()='TransactionHeader']/*[local-name()='SenderID']",
+                "//*[local-name()='TransactionHeader']/*[local-name()='ReceiverID']",
+                "//*[local-name()='TransactionHeader']/*[local-name()='CountryCode']",
+                "//*[local-name()='TransactionHeader']/*[local-name()='LoginID']",
+                "//*[local-name()='TransactionHeader']/*[local-name()='Password']",
+                "//*[local-name()='TransactionHeader']/*[local-name()='TransactionID']",
+                "//*[local-name()='TrackingRequestHeader']/*[local-name()='CustomerPO']"
+            };
+            foreach (string xpath in required)
+                if (document.SelectSingleNode(xpath) == null)
+                    throw new InvalidOperationException(
+                        "Required node missing from IMXML Order Tracking template : " + xpath);
+        }
+
+        private List<BlTrackingCandidate> LoadBlTrackingCandidates()
+        {
+            const string sql = @"
+WITH TrackingSource AS
+(
+    SELECT
+        bl.id_bl,
+        cp.id_fichier,
+        ISNULL(bl.num_bl, '') AS num_bl,
+        ISNULL(bl.cust_po, '') AS cust_po,
+        ISNULL(bl.cust_nbr, ISNULL(m.cust_nbr, '')) AS cust_nbr,
+        RIGHT(REPLACE(LTRIM(RTRIM(bl.num_bl)), ' ', ''), 2) AS bl_suffix,
+        ROW_NUMBER() OVER
+        (
+            PARTITION BY
+                bl.cust_po,
+                RIGHT(REPLACE(LTRIM(RTRIM(bl.num_bl)), ' ', ''), 2)
+            ORDER BY
+                bl.id_bl,
+                cp.id_fichier DESC
+        ) AS suffix_row_number
+    FROM dbo.T_suivi_commande_end_user_BL bl
+    INNER JOIN dbo.T_suivi_commande_end_user_cust_po cp
+        ON cp.cust_po = bl.cust_po
+    INNER JOIN dbo.T_suivi_commande_end_user_fichier f
+        ON f.id_fichier = cp.id_fichier
+    INNER JOIN dbo.T_suivi_commande_end_user_mail m
+        ON m.id_mail = f.id_mail
+    WHERE bl.status_bl IN
+          (
+              'INVOICED',
+              'FORCED BILLED',
+              'BILLING ERROR'
+          )
+      AND cp.ouvert = 1
+      AND ISNULL(cp.cde_annule, 0) = 0
+      AND DATEDIFF(DAY, m.date_mail, GETDATE()) <= @DELAI
+      AND bl.num_bl IS NOT NULL
+      AND LTRIM(RTRIM(bl.num_bl)) <> ''
+      AND cp.cust_po IS NOT NULL
+      AND LTRIM(RTRIM(cp.cust_po)) <> ''
+      AND RIGHT(
+              REPLACE(LTRIM(RTRIM(bl.num_bl)), ' ', ''),
+              2
+          ) IN ('11', '12')
+      AND LTRIM(RTRIM(ISNULL(bl.track_id, ''))) = ''
+      AND LTRIM(RTRIM(ISNULL(bl.num_suivi_transporteur, ''))) = ''
+      AND NOT EXISTS
+      (
+          SELECT 1
+          FROM dbo.T_suivi_commande_end_user_BL tracked_bl
+          WHERE tracked_bl.cust_po = bl.cust_po
+            AND tracked_bl.status_bl IN
+                (
+                    'INVOICED',
+                    'FORCED BILLED',
+                    'BILLING ERROR'
+                )
+            AND RIGHT(
+                    REPLACE(
+                        LTRIM(RTRIM(tracked_bl.num_bl)),
+                        ' ',
+                        ''
+                    ),
+                    2
+                ) = RIGHT(
+                    REPLACE(
+                        LTRIM(RTRIM(bl.num_bl)),
+                        ' ',
+                        ''
+                    ),
+                    2
+                )
+            AND
+            (
+                LTRIM(RTRIM(ISNULL(tracked_bl.track_id, ''))) <> ''
+                OR
+                LTRIM(RTRIM(
+                    ISNULL(tracked_bl.num_suivi_transporteur, '')
+                )) <> ''
+            )
+      )
+)
+SELECT
+    id_bl,
+    id_fichier,
+    num_bl,
+    cust_po,
+    cust_nbr
+FROM TrackingSource
+WHERE suffix_row_number = 1
+ORDER BY
+    cust_po,
+    bl_suffix,
+    id_bl;";
+
+            var result = new List<BlTrackingCandidate>();
+
+            using (var connection = new SqlConnection(sqlGestion))
+            using (var command = new SqlCommand(sql, connection))
+            {
+                command.CommandTimeout = 300;
+                command.Parameters.Add(
+                    "@DELAI",
+                    SqlDbType.Int).Value =
+                    delaiRefreshBlTracking;
+
+                connection.Open();
+
+                using (SqlDataReader reader = command.ExecuteReader())
+                {
+                    while (reader.Read())
+                    {
+                        result.Add(new BlTrackingCandidate
+                        {
+                            BlId = Convert.ToInt32(reader["id_bl"]),
+                            FileId = Convert.ToInt32(reader["id_fichier"]),
+                            BlNumber = Convert.ToString(reader["num_bl"]).Trim(),
+                            CustomerPo = Convert.ToString(reader["cust_po"]).Trim(),
+                            CustomerNumber = Convert.ToString(reader["cust_nbr"]).Trim()
+                        });
+                    }
+                }
+            }
+
+            return result;
+        }
+
+        private static bool TrySplitTrackingBlNumber(
+            string blNumber,
+            out string branchOrderNumber,
+            out string suffixNumber)
+        {
+            branchOrderNumber = "";
+            suffixNumber = "";
+            string normalized = (blNumber ?? "").Trim().Replace(" ", "");
+            if (string.IsNullOrWhiteSpace(normalized)) return false;
+            string[] parts = normalized.Split(
+                new[] { '-' },
+                StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length < 2) return false;
+            branchOrderNumber = parts[0].Trim();
+            suffixNumber = parts[parts.Length - 1].Trim();
+            return Regex.IsMatch(branchOrderNumber, @"^[A-Za-z0-9]+$") &&
+                   Regex.IsMatch(suffixNumber, @"^[A-Za-z0-9]+$");
+        }
+
+        private string FindTrackingInvoiceInDss(
+            string orderNumber,
+            string customerPo,
+            string customerNumber)
+        {
+            const string sql = @"
+SELECT TOP (1) ISNULL(invoice_nbr, '')
+FROM dbo.shipment_header
+WHERE order_nbr = @ORDER
+  AND LTRIM(RTRIM(ISNULL(CustPoNbr, ''))) = @PO
+  AND branch_customer_nbr = @CUSTOMER
+ORDER BY invoice_date DESC;";
+            return ScalarString(
+                sqlDss,
+                sql,
+                P("@ORDER", SqlDbType.VarChar, orderNumber, 50),
+                P("@PO", SqlDbType.VarChar, customerPo, 500),
+                P("@CUSTOMER", SqlDbType.VarChar, customerNumber, 50));
+        }
+
+        private ImXmlTrackingResult ExecuteImXmlOrderTracking(
+            string customerPo,
+            string customerNumber,
+            int requestId,
+            string branchOrderNumber,
+            string suffixNumber,
+            string invoiceNumber)
+        {
+            XmlDocument request = BuildImXmlOrderTrackingRequest(
+                customerPo,
+                requestId,
+                LoadImXmlCredentials(customerNumber));
+            if (IsTrue(debug))
+                WriteLog(
+                    "       IMXML Order Tracking request" +
+                    " - Customer PO : " + customerPo +
+                    " - Branch order number : " + branchOrderNumber +
+                    " - Suffix : " + suffixNumber +
+                    " - Invoice : " + invoiceNumber);
+            string response = PostImXmlRequest(
+                request,
+                imXmlOrderTrackingUrl);
+            return ParseImXmlTrackingResponse(
+                response,
+                branchOrderNumber,
+                suffixNumber,
+                invoiceNumber);
+        }
+
+        private XmlDocument BuildImXmlOrderTrackingRequest(
+            string customerPo,
+            int requestId,
+            ImXmlCredentials credentials)
+        {
+            var document = new XmlDocument();
+            document.LoadXml(imXmlOrderTrackingTemplate);
+            SetNode(document, "//*[local-name()='LoginID']", credentials.Login);
+            SetNode(document, "//*[local-name()='Password']", credentials.Password);
+            SetNode(document, "//*[local-name()='TransactionID']",
+                requestId.ToString(CultureInfo.InvariantCulture));
+            SetNode(document, "//*[local-name()='TrackingRequestHeader']/*[local-name()='CustomerPO']", customerPo);
+            return document;
+        }
+
+        private static ImXmlTrackingResult ParseImXmlTrackingResponse(
+            string text,
+            string branchOrderNumber,
+            string suffixNumber,
+            string invoiceNumber)
+        {
+            var result = new ImXmlTrackingResult();
+            if (string.IsNullOrWhiteSpace(text))
+            {
+                result.Outcome = TrackingOutcome.InvalidResponse;
+                result.Message = "Empty IMXML response";
+                return result;
+            }
+
+            var document = new XmlDocument();
+            try { document.LoadXml(text); }
+            catch (Exception ex)
+            {
+                result.Outcome = TrackingOutcome.InvalidResponse;
+                result.Message = "Invalid IMXML response : " +
+                    Truncate(ex.Message, 150);
+                result.DebugResponse = Truncate(
+                    Regex.Replace(text ?? "", @"\s+", " ").Trim(), 500);
+                return result;
+            }
+
+            XmlNode root = document.SelectSingleNode(
+                "//*[local-name()='OrderTrackingResponse']");
+            if (root == null)
+            {
+                result.Outcome = TrackingOutcome.InvalidResponse;
+                result.Message = "Unexpected IMXML tracking response";
+                result.DebugResponse = Truncate(
+                    Regex.Replace(document.OuterXml ?? "", @"\s+", " ").Trim(),
+                    500);
+                return result;
+            }
+
+            string error = (root.SelectSingleNode(
+                ".//*[local-name()='TransactionHeader']/*[local-name()='ErrorStatus']")
+                ?.InnerText ?? "").Trim();
+            if (!string.IsNullOrWhiteSpace(error))
+            {
+                result.Outcome = TrackingOutcome.ImXmlError;
+                result.Message = Truncate(error, 250);
+                return result;
+            }
+
+            foreach (XmlNode order in root.SelectNodes(
+                ".//*[local-name()='Order']"))
+            {
+                string responseOrder = (order.SelectSingleNode(
+                    "./*[local-name()='BranchOrderNumber']")?.InnerText ?? "").Trim();
+                foreach (XmlNode suffix in order.SelectNodes(
+                    "./*[local-name()='Suffix']"))
+                {
+                    string responseSuffix =
+                        (suffix.Attributes?["SuffixNumber"]?.Value ?? "").Trim();
+                    bool blMatch =
+                        string.Equals(responseOrder, branchOrderNumber,
+                            StringComparison.OrdinalIgnoreCase) &&
+                        string.Equals(responseSuffix, suffixNumber,
+                            StringComparison.OrdinalIgnoreCase);
+                    bool invoiceMatch =
+                        !string.IsNullOrWhiteSpace(invoiceNumber) &&
+                        string.Equals(responseOrder + responseSuffix,
+                            invoiceNumber.Replace("-", "").Replace(" ", ""),
+                            StringComparison.OrdinalIgnoreCase);
+                    if (!blMatch && !invoiceMatch) continue;
+
+                    XmlNode package = suffix.SelectSingleNode(
+                        "./*[local-name()='Package']");
+                    if (package == null)
+                    {
+                        result.Outcome = TrackingOutcome.NoPackage;
+                        result.Message = "Tracking package not found";
+                        return result;
+                    }
+
+                    string tracking =
+                        (package.Attributes?["ID"]?.Value ?? "").Trim();
+                    string shipDateText = (package.SelectSingleNode(
+                        "./*[local-name()='ShipDate']")?.InnerText ?? "").Trim();
+                    string carrier =
+                        (suffix.SelectSingleNode("./*[local-name()='Carrier']")
+                            ?.Attributes?["Code"]?.Value ?? "").Trim();
+
+                    if (string.IsNullOrWhiteSpace(tracking))
+                    {
+                        result.Outcome = TrackingOutcome.NoPackage;
+                        result.Message = "Tracking number not found";
+                        return result;
+                    }
+                    if (!DateTime.TryParseExact(
+                            shipDateText,
+                            "yyyy-MM-dd",
+                            CultureInfo.InvariantCulture,
+                            DateTimeStyles.None,
+                            out DateTime shipDate))
+                    {
+                        result.Outcome = TrackingOutcome.InvalidShipDate;
+                        result.Message = "Invalid or missing tracking ship date";
+                        return result;
+                    }
+
+                    result.Success = true;
+                    result.Outcome = TrackingOutcome.Success;
+                    result.Message = "Requête OK";
+                    result.TrackingNumber = tracking;
+                    result.CarrierCode = carrier;
+                    result.ShipDate = shipDate;
+                    return result;
+                }
+            }
+
+            result.Outcome = TrackingOutcome.NotFound;
+            result.Message = "BL or invoice not found in tracking response";
+            return result;
+        }
+
+        private CarrierMapping FindCarrierMapping(string impulseCarrierCode)
+        {
+            var result = new CarrierMapping();
+            if (string.IsNullOrWhiteSpace(impulseCarrierCode)) return result;
+
+            const string sql = @"
+SELECT TOP (1)
+       ISNULL(cc.carrier_code, '') AS carrier_code,
+       ISNULL(t.nom_transporteur, '') AS nom_transporteur
+FROM dbo.T_suivi_commande_end_user_carrier_code cc
+LEFT JOIN dbo.T_suivi_commande_end_user_transporteur t
+    ON t.carrier_code = cc.carrier_code
+WHERE cc.carrier_impulse LIKE @IMPULSE
+ORDER BY CASE WHEN t.nom_transporteur IS NULL THEN 1 ELSE 0 END,
+         t.nom_transporteur;";
+
+            using (var connection = new SqlConnection(sqlGestion))
+            using (var command = new SqlCommand(sql, connection))
+            {
+                command.CommandTimeout = 300;
+                command.Parameters.Add(P(
+                    "@IMPULSE",
+                    SqlDbType.VarChar,
+                    impulseCarrierCode.Trim() + "%",
+                    100));
+                connection.Open();
+                using (SqlDataReader reader = command.ExecuteReader())
+                {
+                    if (reader.Read())
+                    {
+                        result.CarrierCode = Convert.ToString(
+                            reader["carrier_code"]).Trim();
+                        result.CarrierName = Convert.ToString(
+                            reader["nom_transporteur"]).Trim();
+                    }
+                }
+            }
+            return result;
+        }
+
+        private void UpdateBlTrackingAndFlagFile(
+            int blId,
+            int fileId,
+            ImXmlTrackingResult tracking,
+            CarrierMapping mapping)
+        {
+            const string updateBlSql = @"
+UPDATE dbo.T_suivi_commande_end_user_BL
+SET track_id = @TRACK,
+    ship_date = @SHIP_DATE,
+    carrier_code =
+        CASE
+            WHEN @IMPULSE_CARRIER = '' THEN carrier_code
+            ELSE @IMPULSE_CARRIER
+        END,
+    num_suivi_transporteur =
+        CASE
+            WHEN @MAPPED_CARRIER <> ''
+             AND @MAPPED_CARRIER <> 'OT' THEN @TRACK
+            ELSE num_suivi_transporteur
+        END,
+    nom_transporteur =
+        CASE
+            WHEN @MAPPED_CARRIER <> ''
+             AND @MAPPED_CARRIER <> 'OT'
+             AND @CARRIER_NAME <> '' THEN @CARRIER_NAME
+            ELSE nom_transporteur
+        END
+WHERE id_bl = @ID;";
+
+            const string updateFileSql = @"
+UPDATE dbo.T_suivi_commande_end_user_fichier
+SET a_envoyer_o_n = 'O',
+    info_tracking_updated_o_n = 'O'
+WHERE id_fichier = @FILE_ID;";
+
+            using (var connection = new SqlConnection(sqlGestion))
+            {
+                connection.Open();
+                using (SqlTransaction transaction = connection.BeginTransaction())
+                {
+                    try
+                    {
+                        using (var command = new SqlCommand(
+                            updateBlSql,
+                            connection,
+                            transaction))
+                        {
+                            command.CommandTimeout = 300;
+                            command.Parameters.Add(P(
+                                "@TRACK",
+                                SqlDbType.VarChar,
+                                tracking.TrackingNumber,
+                                500));
+                            command.Parameters.Add(
+                                new SqlParameter("@SHIP_DATE", SqlDbType.Date)
+                                {
+                                    Value = tracking.ShipDate.HasValue
+                                        ? (object)tracking.ShipDate.Value.Date
+                                        : DBNull.Value
+                                });
+                            command.Parameters.Add(P(
+                                "@IMPULSE_CARRIER",
+                                SqlDbType.VarChar,
+                                tracking.CarrierCode,
+                                100));
+                            command.Parameters.Add(P(
+                                "@MAPPED_CARRIER",
+                                SqlDbType.VarChar,
+                                mapping.CarrierCode,
+                                100));
+                            command.Parameters.Add(P(
+                                "@CARRIER_NAME",
+                                SqlDbType.VarChar,
+                                mapping.CarrierName,
+                                500));
+                            command.Parameters.Add(
+                                new SqlParameter("@ID", SqlDbType.Int)
+                                {
+                                    Value = blId
+                                });
+
+                            if (command.ExecuteNonQuery() != 1)
+                            {
+                                throw new InvalidOperationException(
+                                    "BL tracking update affected an unexpected number of rows" +
+                                    " - BL ID : " + blId);
+                            }
+                        }
+
+                        using (var command = new SqlCommand(
+                            updateFileSql,
+                            connection,
+                            transaction))
+                        {
+                            command.CommandTimeout = 300;
+                            command.Parameters.Add(
+                                new SqlParameter("@FILE_ID", SqlDbType.Int)
+                                {
+                                    Value = fileId
+                                });
+
+                            if (command.ExecuteNonQuery() != 1)
+                            {
+                                throw new InvalidOperationException(
+                                    "Tracking file flag update affected an unexpected number of rows" +
+                                    " - File ID : " + fileId);
+                            }
+                        }
+
+                        transaction.Commit();
+                    }
+                    catch
+                    {
+                        transaction.Rollback();
+                        throw;
+                    }
+                }
+            }
         }
 
         public void Send_Files_To_Customers(
@@ -538,16 +2269,14 @@ WHERE po.id_fichier=@FILE;";
                                 "CSV_STRUCTURE",
                                 StringComparison.OrdinalIgnoreCase))
                         {
-                            SetValidationTerminalStatus(
+                            SetRetryableErrorStatus(
                                 mailbox.Address,
                                 email.Id,
-                                folderError);
+                                folderError,
+                                validation.ErrorType,
+                                validation.Message);
 
-                            MarkProcessed(
-                                mailbox.Address,
-                                email.Id);
-
-                            Move(
+                            MoveRetryableError(
                                 mailbox.Address,
                                 email.Id,
                                 errorsFolder.Id);
@@ -573,16 +2302,14 @@ WHERE po.id_fichier=@FILE;";
                                 email,
                                 validation);
 
-                            SetValidationTerminalStatus(
+                            SetRetryableErrorStatus(
                                 mailbox.Address,
                                 email.Id,
-                                folderError);
+                                folderError,
+                                validation.ErrorType,
+                                validation.Message);
 
-                            MarkProcessed(
-                                mailbox.Address,
-                                email.Id);
-
-                            Move(
+                            MoveRetryableError(
                                 mailbox.Address,
                                 email.Id,
                                 errorsFolder.Id);
@@ -616,6 +2343,14 @@ WHERE po.id_fichier=@FILE;";
                         }
 
                         continue;
+                    }
+
+                    if (validation.UnexpectedColumns.Count > 0)
+                    {
+                        SendCsvAdditionalColumnsAlert(
+                            mailbox.Address,
+                            email,
+                            validation);
                     }
 
                     if (validation.IsDuplicate)
@@ -737,31 +2472,23 @@ WHERE po.id_fichier=@FILE;";
                             string[] fields = parser.ReadFields() ?? Array.Empty<string>();
                             if (header)
                             {
-                                string actualHeader =
-                                    NormalizeCsvHeader(fields);
-
-                                string expectedHeader =
-                                    NormalizeCsvHeader(
-                                        expectedHeaderFields);
-
-                                if (!actualHeader.Equals(
-                                        expectedHeader,
-                                        StringComparison.OrdinalIgnoreCase))
-                                {
-                                    result.ErrorType = "CSV_STRUCTURE";
-                                    result.Message =
-                                        "Le fichier " + safeName +
-                                        " ne correspond pas à l'en-tête configuré " +
-                                        "pour le client " + customer +
-                                        ". En-tête attendu : " +
-                                        clientConfiguration.ExpectedCsvHeader +
-                                        ". En-tête reçu : " +
-                                        string.Join(",", fields);
-                                    return result;
-                                }
-
                                 file.ColumnIndexes =
                                     BuildCsvColumnIndexes(fields);
+
+                                List<string> unexpectedColumns =
+                                    GetUnexpectedCsvColumns(
+                                        fields,
+                                        expectedHeaderFields);
+
+                                foreach (string unexpectedColumn in unexpectedColumns)
+                                {
+                                    if (!result.UnexpectedColumns.Contains(
+                                            unexpectedColumn,
+                                            StringComparer.OrdinalIgnoreCase))
+                                    {
+                                        result.UnexpectedColumns.Add(unexpectedColumn);
+                                    }
+                                }
 
                                 List<string> missingBusinessColumns =
                                     GetMissingBusinessColumns(
@@ -784,15 +2511,21 @@ WHERE po.id_fichier=@FILE;";
                                 continue;
                             }
 
-                            if (fields.Length != expectedColumnCount)
+                            int minimumColumnCount =
+                                file.ColumnIndexes.Count == 0
+                                    ? 0
+                                    : file.ColumnIndexes.Values.Max() + 1;
+
+                            if (fields.Length < minimumColumnCount)
                             {
                                 result.ErrorType = "CSV_STRUCTURE";
                                 result.Message =
                                     "Le fichier " + safeName +
-                                    " contient une ligne avec " +
+                                    " contient une ligne incomplète avec " +
                                     fields.Length +
-                                    " colonne(s), alors que l'en-tête configuré " +
-                                    "en attend " + expectedColumnCount;
+                                    " colonne(s). Le nombre minimum requis " +
+                                    "pour les colonnes métier détectées est " +
+                                    minimumColumnCount + ".";
                                 return result;
                             }
                             if (string.IsNullOrWhiteSpace(firstOrderReference))
@@ -810,7 +2543,7 @@ WHERE po.id_fichier=@FILE;";
                                 GetCsvValue(
                                     fields,
                                     file.ColumnIndexes,
-                                    "bundle");
+                                    "product_type");
 
                             if (!string.IsNullOrWhiteSpace(bundle))
                             {
@@ -868,6 +2601,71 @@ VALUES(@MAILBOX,@GRAPH,@INTERNET,@SUBJECT,@RECEIVED,'E',@TYPE,@BUNDLES,@ERROR,1)
             return alreadySent;
         }
 
+        private static List<string> GetUnexpectedCsvColumns(
+            string[] receivedHeaderFields,
+            string[] configuredHeaderFields)
+        {
+            var knownColumns = new HashSet<string>(
+                CsvColumnAliases.Values
+                    .SelectMany(aliases => aliases)
+                    .Concat(
+                        configuredHeaderFields ??
+                        Array.Empty<string>())
+                    .Select(NormalizeCsvColumnName)
+                    .Where(value =>
+                        !string.IsNullOrWhiteSpace(value)),
+                StringComparer.OrdinalIgnoreCase);
+
+            return (receivedHeaderFields ??
+                    Array.Empty<string>())
+                .Select(value =>
+                    (value ?? "").Trim())
+                .Where(value =>
+                    !string.IsNullOrWhiteSpace(value))
+                .Where(value =>
+                    !knownColumns.Contains(
+                        NormalizeCsvColumnName(value)))
+                .Distinct(
+                    StringComparer.OrdinalIgnoreCase)
+                .ToList();
+        }
+
+        private void SendCsvAdditionalColumnsAlert(
+            string mailbox,
+            Message email,
+            CsvValidationResult validation)
+        {
+            string text =
+                "Commande Econocom/Airbus importée malgré la présence " +
+                "de nouvelle(s) colonne(s) non utilisée(s). " +
+                "Boîte : " + mailbox +
+                ". Sujet : " + (email.Subject ?? "") +
+                ". Colonne(s) supplémentaire(s) : " +
+                string.Join(", ", validation.UnexpectedColumns) +
+                ". Aucune donnée de ces colonnes n'a été importée.";
+
+            SendAlertToRecipients(
+                "Nouvelle colonne CSV détectée",
+                text,
+                MergeRecipients(
+                    businessAlertRecipients,
+                    alertRecipients));
+        }
+
+        private static string MergeRecipients(params string[] recipientLists)
+        {
+            return string.Join(
+                ";",
+                (recipientLists ?? Array.Empty<string>())
+                    .Where(value => !string.IsNullOrWhiteSpace(value))
+                    .SelectMany(value => value.Split(
+                        new[] { ';', ',' },
+                        StringSplitOptions.RemoveEmptyEntries))
+                    .Select(value => value.Trim())
+                    .Where(value => !string.IsNullOrWhiteSpace(value))
+                    .Distinct(StringComparer.OrdinalIgnoreCase));
+        }
+
         private void SendValidationAlert(string mailbox, Message email, CsvValidationResult validation)
         {
             string text = validation.ErrorType == "MISSING_BUNDLE"
@@ -875,9 +2673,12 @@ VALUES(@MAILBOX,@GRAPH,@INTERNET,@SUBJECT,@RECEIVED,'E',@TYPE,@BUNDLES,@ERROR,1)
                   ". Bundle(s) à créer dans T_suivi_commande_end_user_ref_sku : " + string.Join(", ", validation.MissingBundles) +
                   ". La commande sera reprise automatiquement après création."
                 : "Commande Econocom/Airbus laissée en attente. Boîte : " + mailbox + ". Sujet : " + (email.Subject ?? "") + ". " + validation.Message;
-            SendBusinessAlert(
+            SendAlertToRecipients(
                 "Validation CSV",
-                text);
+                text,
+                MergeRecipients(
+                    businessAlertRecipients,
+                    alertRecipients));
         }
 
         private bool IsBundleUpdateDelayExpired(
@@ -939,36 +2740,31 @@ VALUES(@MAILBOX,@GRAPH,@INTERNET,@SUBJECT,@RECEIVED,'E',@TYPE,@BUNDLES,@ERROR,1)
                 text);
         }
 
-        private void SetValidationTerminalStatus(
+        private void SetRetryableErrorStatus(
             string mailbox,
             string graphId,
-            string destinationFolder)
+            string destinationFolder,
+            string errorType,
+            string errorMessage)
         {
             ExecuteNonQuery(
                 sqlGestion,
                 @"UPDATE dbo.T_suivi_commande_end_user_MailProcessing
-SET ProcessingStatus='S',
+SET ProcessingStatus='E',
     DestinationFolder=@FOLDER,
-    ProcessedAtUtc=SYSUTCDATETIME(),
+    ErrorType=@TYPE,
+    ErrorMessage=@ERROR,
+    ProcessedAtUtc=NULL,
     LastAttemptAtUtc=SYSUTCDATETIME()
 WHERE MailboxAddress=@MAILBOX
   AND GraphMessageId=@GRAPH;",
-                P(
-                    "@FOLDER",
-                    SqlDbType.NVarChar,
-                    destinationFolder,
-                    100),
-                P(
-                    "@MAILBOX",
-                    SqlDbType.NVarChar,
-                    mailbox,
-                    320),
-                P(
-                    "@GRAPH",
-                    SqlDbType.NVarChar,
-                    graphId,
-                    500));
+                P("@FOLDER", SqlDbType.NVarChar, destinationFolder, 100),
+                P("@TYPE", SqlDbType.VarChar, errorType, 50),
+                P("@ERROR", SqlDbType.NVarChar, Truncate(errorMessage, 2000), 2000),
+                P("@MAILBOX", SqlDbType.NVarChar, mailbox, 320),
+                P("@GRAPH", SqlDbType.NVarChar, graphId, 500));
         }
+
 
         private void MarkAlertSent(string mailbox, string graphId)
         {
@@ -1258,14 +3054,6 @@ ORDER BY CASE
             }
         }
 
-        private static string NormalizeCsvHeader(string[] fields)
-        {
-            return string.Join(
-                ",",
-                (fields ?? Array.Empty<string>())
-                    .Select(field =>
-                        NormalizeCsvHeaderValue(field)));
-        }
 
         private static string[] SplitConfiguredCsvHeader(
             string configuredHeader)
@@ -1286,8 +3074,8 @@ ORDER BY CASE
             return (value ?? "")
                 .Trim()
                 .Trim('﻿')
-                .Replace("", "")
-                .Replace("", "");
+                .Replace("\r", "")
+                .Replace("\n", "");
         }
 
         private bool IsDuplicate(string customer, string orderRef) => ScalarInt(sqlGestion, @"SELECT COUNT(*) FROM dbo.T_suivi_commande_end_user_cust_po p
@@ -1311,7 +3099,7 @@ VALUES(@F,@P,1); SELECT CONVERT(int,SCOPE_IDENTITY());", new SqlParameter("@F", 
             Dictionary<string, int> columnIndexes)
         {
             string bundle =
-                GetCsvValue(row, columnIndexes, "bundle");
+                GetCsvValue(row, columnIndexes, "product_type");
 
             string sku = GetSku(bundle);
 
@@ -1388,6 +3176,26 @@ VALUES(@M,@G,'E','TECHNICAL',@E,1);", P("@M", SqlDbType.NVarChar, mailbox, 320),
                 SingleValueExtendedProperties = new List<SingleValueLegacyExtendedProperty> { new SingleValueLegacyExtendedProperty { Id = ProcessedPropertyId, Value = DateTime.UtcNow.ToString("O") } }
             }, c => Header(c.Headers)).GetAwaiter().GetResult(); return true;
         }, "mark");
+        private void MoveRetryableError(
+            string mailbox,
+            string messageId,
+            string errorFolderId)
+        {
+            Retry(() =>
+            {
+                graph.Users[mailbox]
+                    .Messages[messageId]
+                    .PatchAsync(
+                        new Message { IsRead = true },
+                        configuration => Header(configuration.Headers))
+                    .GetAwaiter()
+                    .GetResult();
+                return true;
+            }, "mark retryable error as read");
+
+            Move(mailbox, messageId, errorFolderId);
+        }
+
         private void Move(string mailbox, string id, string folderId) => Retry(() => { graph.Users[mailbox].Messages[id].Move.PostAsync(new Microsoft.Graph.Users.Item.Messages.Item.Move.MovePostRequestBody { DestinationId = folderId }, c => Header(c.Headers)).GetAwaiter().GetResult(); return true; }, "move");
         private void FinalizeGraph(string mailbox, string id, string folderId) { try { MarkProcessed(mailbox, id); Move(mailbox, id, folderId); } catch { } }
         private MailFolder GetFolder(string mailbox, string parent, string display)
@@ -1412,7 +3220,22 @@ VALUES(@M,@G,'E','TECHNICAL',@E,1);", P("@M", SqlDbType.NVarChar, mailbox, 320),
             imeiConfigurationParameterGlobal = i.imei_configuration_parameter_global ?? "IMEI_MANAGEMENT_FR";
             appleImeiTableName = i.apple_imei_table_name ?? "dbo.IMEI_APPLE";
             sendFilesHours = i.send_files_hours ?? new List<string>();
+            oracleOdsParameterGlobal = string.IsNullOrWhiteSpace(i.oracle_ods_parameter_global) ? "DWHP_IMT" : i.oracle_ods_parameter_global;
+            imXmlOrderStatusUrlParameterGlobal = string.IsNullOrWhiteSpace(i.imxml_order_status_url_parameter_global) ? "ECONOCOM_IMXML_ORDER_STATUS_URL_FR" : i.imxml_order_status_url_parameter_global;
+            imXmlOrderStatusTemplateParameterGlobal = string.IsNullOrWhiteSpace(i.imxml_order_status_template_parameter_global) ? "ECONOCOM_IMXML_ORDER_STATUS_TEMPLATE_FR" : i.imxml_order_status_template_parameter_global;
+            imXmlOrderDetailUrlParameterGlobal = string.IsNullOrWhiteSpace(i.imxml_order_detail_url_parameter_global) ? "ECONOCOM_IMXML_ORDER_DETAIL_URL_FR" : i.imxml_order_detail_url_parameter_global;
+            imXmlOrderDetailTemplateParameterGlobal = string.IsNullOrWhiteSpace(i.imxml_order_detail_template_parameter_global) ? "ECONOCOM_IMXML_ORDER_DETAIL_TEMPLATE_FR" : i.imxml_order_detail_template_parameter_global;
+            imXmlOrderTrackingUrlParameterGlobal = string.IsNullOrWhiteSpace(i.imxml_order_tracking_url_parameter_global) ? "ECONOCOM_IMXML_ORDER_TRACKING_URL_FR" : i.imxml_order_tracking_url_parameter_global;
+            imXmlOrderTrackingTemplateParameterGlobal = string.IsNullOrWhiteSpace(i.imxml_order_tracking_template_parameter_global) ? "ECONOCOM_IMXML_ORDER_TRACKING_TEMPLATE_FR" : i.imxml_order_tracking_template_parameter_global;
+            delaiRefreshBlTracking = i.Delai_Refresh_BL_Tracking > 0 ? i.Delai_Refresh_BL_Tracking : 180;
             sqlGestion = GetParameter(imca, sqlGestionParameter);
+            oracleOdsConnection = GetParameter(imca, oracleOdsParameterGlobal);
+            imXmlOrderStatusUrl = GetParameter(imca, imXmlOrderStatusUrlParameterGlobal);
+            imXmlOrderStatusTemplate = GetParameter(imca, imXmlOrderStatusTemplateParameterGlobal);
+            imXmlOrderDetailUrl = GetParameter(imca, imXmlOrderDetailUrlParameterGlobal);
+            imXmlOrderDetailTemplate = GetParameter(imca, imXmlOrderDetailTemplateParameterGlobal);
+            imXmlOrderTrackingUrl = GetParameter(imca, imXmlOrderTrackingUrlParameterGlobal);
+            imXmlOrderTrackingTemplate = GetParameter(imca, imXmlOrderTrackingTemplateParameterGlobal);
             sqlDss = GetParameter(imca, sqlDssParameter);
             alertRecipients = GetParameter(imca, alertParameter);
             sendAs = GetParameter(imca, sendAsParameter);
@@ -1536,8 +3359,8 @@ VALUES(@M,@G,'E','TECHNICAL',@E,1);", P("@M", SqlDbType.NVarChar, mailbox, 320),
                             Sender = sender,
                             Body = new ItemBody
                             {
-                                ContentType = BodyType.Html,
-                                Content = WebUtility.HtmlEncode(text)
+                                ContentType = BodyType.Text,
+                                Content = text
                             },
                             ToRecipients = recipients
                         },
@@ -1551,13 +3374,13 @@ VALUES(@M,@G,'E','TECHNICAL',@E,1);", P("@M", SqlDbType.NVarChar, mailbox, 320),
             }
         }
 
+        private static string ValidateHttpUrl(string value, string name) { string u = (value ?? "").Trim(); if (!Uri.TryCreate(u, UriKind.Absolute, out Uri uri) || (uri.Scheme != "https" && uri.Scheme != "http")) throw new InvalidOperationException("Invalid URL configured for " + name); return uri.AbsoluteUri; }
         private string GetParameter(string c, string p) => string.IsNullOrWhiteSpace(p) ? "" : ScalarString(c, "SELECT ISNULL(VALUE,'') FROM PCM_TAB_IMCA_PARAMETER_GLOBAL WHERE SK_VALID=0 AND PARAMETER=@P;", P("@P", SqlDbType.NVarChar, p, 255));
         private static void ExecuteNonQuery(string c, string s, params SqlParameter[] p) { using (var cn = new SqlConnection(c)) using (var cmd = new SqlCommand(s, cn)) { if (p != null) cmd.Parameters.AddRange(p); cn.Open(); cmd.ExecuteNonQuery(); } }
         private static string ScalarString(string c, string s, params SqlParameter[] p) { using (var cn = new SqlConnection(c)) using (var cmd = new SqlCommand(s, cn)) { if (p != null) cmd.Parameters.AddRange(p); cn.Open(); return Convert.ToString(cmd.ExecuteScalar()).Trim(); } }
         private static int ScalarInt(string c, string s, params SqlParameter[] p) { using (var cn = new SqlConnection(c)) using (var cmd = new SqlCommand(s, cn)) { if (p != null) cmd.Parameters.AddRange(p); cn.Open(); return Convert.ToInt32(cmd.ExecuteScalar()); } }
         private static SqlParameter P(string n, SqlDbType t, object v, int size) { var p = new SqlParameter(n, t, size); p.Value = v ?? ""; return p; }
         private bool IsDue(SharedMailbox m) => !m.LastRefresh.HasValue || m.RefreshMinutes <= 0 || m.LastRefresh.Value.AddMinutes(m.RefreshMinutes) <= DateTime.Now;
-        private string GetMailCustomerNumber(int id) => ScalarString(sqlGestion, "SELECT ISNULL(cust_nbr,'') FROM dbo.T_suivi_commande_end_user_mail WHERE id_mail=@ID;", new SqlParameter("@ID", SqlDbType.Int) { Value = id });
         private void DeleteTempFiles(List<CsvFileValidation> files) { foreach (var f in files ?? new List<CsvFileValidation>()) try { if (File.Exists(f.TempPath)) File.Delete(f.TempPath); } catch { } }
         private void WriteLog(string m) { try { string p = Path.Combine(logsFolder, "IMCA_" + sessionName + "_" + DateTime.Now.ToString("dd_MM_yyyy") + "_" + country + "_" + ApplicationName + ".txt"); lock (LogLock) File.AppendAllText(p, DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + " - " + m + Environment.NewLine, Encoding.UTF8); } catch { } }
         private static string Details(Exception e) => e == null ? "Unknown error" : e.GetType().FullName + " | " + e.Message + (e.InnerException == null ? "" : " | " + Details(e.InnerException));
