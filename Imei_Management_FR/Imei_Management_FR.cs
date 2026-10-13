@@ -511,7 +511,7 @@ namespace IMEI_MANAGEMENT_FR
             }
             catch (Exception ex)
             {
-                WriteToFile("Global error ReadCurrentSharedMailbox : " + ex.Message);
+                WriteToFile("Global error ReadCurrentSharedMailbox : " + GetDetailedExceptionMessage(ex));
                 throw;
             }
             finally
@@ -1281,10 +1281,12 @@ namespace IMEI_MANAGEMENT_FR
             return email.From.EmailAddress.Address ?? "<unknown sender>";
         }
 
-        private List<string> DownloadCSVAttachmentsWithGraph(GraphServiceClient graphService, string mailbox, string messageId)
+        private List<string> DownloadCSVAttachmentsWithGraph(
+            GraphServiceClient graphService,
+            string mailbox,
+            string messageId)
         {
-            List<string> downloadedFiles = new List<string>();
-
+            var downloadedFiles = new List<string>();
             AttachmentCollectionResponse attachments = ExecuteGraphWithRetry(
                 () => graphService.Users[mailbox]
                     .Messages[messageId]
@@ -1292,7 +1294,8 @@ namespace IMEI_MANAGEMENT_FR
                     .GetAsync()
                     .GetAwaiter()
                     .GetResult(),
-                "Read IMEI message attachments");
+                "List IMEI attachments for message " + messageId +
+                " in " + mailbox);
 
             if (attachments?.Value == null)
             {
@@ -1301,24 +1304,49 @@ namespace IMEI_MANAGEMENT_FR
 
             foreach (Attachment attachment in attachments.Value)
             {
-                if (attachment is FileAttachment fileAttachment)
+                FileAttachment fileAttachment = attachment as FileAttachment;
+                if (fileAttachment == null)
                 {
-                    string extension = Path.GetExtension(fileAttachment.Name ?? "").ToLowerInvariant();
-                    if (extension != ".csv")
-                    {
-                        continue;
-                    }
-
-                    if (fileAttachment.ContentBytes == null)
-                    {
-                        throw new Exception("The content of the attachment is empty : " + fileAttachment.Name);
-                    }
-
-                    string fileName = CleanFileName(global_application_name + "_" + fileAttachment.Name);
-                    string filePath = Path.Combine(temp_folder, fileName);
-                    File.WriteAllBytes(filePath, fileAttachment.ContentBytes);
-                    downloadedFiles.Add(filePath);
+                    continue;
                 }
+
+                string extension = Path.GetExtension(
+                    fileAttachment.Name ?? "").ToLowerInvariant();
+                if (extension != ".csv")
+                {
+                    continue;
+                }
+
+                if (fileAttachment.ContentBytes == null &&
+                    !string.IsNullOrWhiteSpace(fileAttachment.Id))
+                {
+                    string attachmentId = fileAttachment.Id;
+                    fileAttachment = ExecuteGraphWithRetry(
+                        () => graphService.Users[mailbox]
+                            .Messages[messageId]
+                            .Attachments[attachmentId]
+                            .GetAsync()
+                            .GetAwaiter()
+                            .GetResult() as FileAttachment,
+                        "Download IMEI attachment " +
+                        (fileAttachment.Name ?? attachmentId) +
+                        " for message " + messageId +
+                        " in " + mailbox);
+                }
+
+                if (fileAttachment?.ContentBytes == null)
+                {
+                    throw new InvalidDataException(
+                        "The content of the attachment is empty : " +
+                        (fileAttachment?.Name ?? attachment.Id));
+                }
+
+                string fileName = CleanFileName(
+                    global_application_name + "_" +
+                    (fileAttachment.Name ?? "attachment.csv"));
+                string filePath = Path.Combine(temp_folder, fileName);
+                File.WriteAllBytes(filePath, fileAttachment.ContentBytes);
+                downloadedFiles.Add(filePath);
             }
 
             return downloadedFiles;
@@ -1589,9 +1617,13 @@ namespace IMEI_MANAGEMENT_FR
 
                 if (message.IndexOf("Too many retries performed", StringComparison.OrdinalIgnoreCase) >= 0 ||
                     message.IndexOf("More than 3 retries encountered", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    message.IndexOf("TooManyRequests", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    message.IndexOf("ApplicationThrottled", StringComparison.OrdinalIgnoreCase) >= 0 ||
                     message.IndexOf("temporarily unavailable", StringComparison.OrdinalIgnoreCase) >= 0 ||
                     message.IndexOf("service unavailable", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    message.IndexOf("12002", StringComparison.OrdinalIgnoreCase) >= 0 ||
                     message.IndexOf("timed out", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    message.IndexOf("operation was canceled", StringComparison.OrdinalIgnoreCase) >= 0 ||
                     message.IndexOf("An error occurred while sending the request", StringComparison.OrdinalIgnoreCase) >= 0)
                 {
                     return true;

@@ -739,7 +739,7 @@ namespace IMCA_Services
                 catch (Exception ex)
                 {
                     result = "ERROR";
-                    WriteToFile("  POST error :" + ex.Message);
+                    WriteToFile("  POST error : " + GetDetailedExceptionMessage(ex));
                     WriteToFile("       JSON : " + postData);
 
                     if (email_in_case_of_technical_issue.Trim() != "" && email_in_case_of_technical_issue.Contains("@"))
@@ -906,9 +906,13 @@ namespace IMCA_Services
 
                 if (message.IndexOf("Too many retries performed", StringComparison.OrdinalIgnoreCase) >= 0 ||
                     message.IndexOf("More than 3 retries encountered", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    message.IndexOf("TooManyRequests", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    message.IndexOf("ApplicationThrottled", StringComparison.OrdinalIgnoreCase) >= 0 ||
                     message.IndexOf("temporarily unavailable", StringComparison.OrdinalIgnoreCase) >= 0 ||
                     message.IndexOf("service unavailable", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    message.IndexOf("12002", StringComparison.OrdinalIgnoreCase) >= 0 ||
                     message.IndexOf("timed out", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    message.IndexOf("operation was canceled", StringComparison.OrdinalIgnoreCase) >= 0 ||
                     message.IndexOf("An error occurred while sending the request", StringComparison.OrdinalIgnoreCase) >= 0)
                 {
                     return true;
@@ -1912,7 +1916,9 @@ namespace IMCA_Services
                                     {
                                         DestinationId = Erreur_folder_id.Value[0].Id
                                     };
-                                    ExecuteGraphWithRetry(
+                                    try
+                                    {
+                                        ExecuteGraphWithRetry(
                                             () =>
                                             {
                                                 GraphService.Users[sharedmailbox_name]
@@ -1923,9 +1929,19 @@ namespace IMCA_Services
                                                     .GetResult();
                                                 return true;
                                             },
-                                            "Move Fortinet message");
+                                            "Move Fortinet message to error folder after processing failure");
+                                    }
+                                    catch (Exception moveException)
+                                    {
+                                        WriteToFile(
+                                            "   Error moving Fortinet message to error folder : " +
+                                            GetDetailedExceptionMessage(moveException));
+                                    }
 
-                                    WriteToFile("   Error : " + GetDetailedExceptionMessage(ex) + " at " + DateTime.Now.ToString("dd/MM/yyyy HH:mm:ss"));
+                                    WriteToFile(
+                                        "   Error : " +
+                                        GetDetailedExceptionMessage(ex) +
+                                        " at " + DateTime.Now.ToString("dd/MM/yyyy HH:mm:ss"));
                                 }
                             }
 

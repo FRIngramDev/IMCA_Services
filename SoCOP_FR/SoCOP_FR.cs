@@ -269,7 +269,9 @@ namespace SoCOP_FR
                                         EnvoiEmail_with_Graph(
                                             graphService,
                                             global_application_name,
-                                            global_application_name + " - Une erreur (" + ex.Message + ") est survenue lors du traitement du mail. Le mail a été déplacé dans le dossier Erreur.",
+                                            global_application_name + " - Une erreur (" +
+                                              GetDetailedExceptionMessage(ex) +
+                                              ") est survenue lors du traitement du mail. Le mail a été déplacé dans le dossier Erreur.",
                                             email_in_case_of_technical_issue
                                         );
                                     }
@@ -352,7 +354,7 @@ namespace SoCOP_FR
         {
             try
             {
-                WriteToFile("SQL error in " + methodName + " : " + ex.Message);
+                WriteToFile("SQL error in " + methodName + " : " + GetDetailedExceptionMessage(ex));
 
 
 
@@ -362,7 +364,7 @@ namespace SoCOP_FR
                     "Une erreur SQL est survenue dans " + global_application_name + ".<br/><br/>" +
                     "<b>Méthode :</b> " + methodName + "<br/>" +
                     "<b>Timeout configuré :</b> " + 300 + " secondes<br/>" +
-                    "<b>Message :</b> " + ex.Message + "<br/><br/>" +
+                    "<b>Message :</b> " + GetDetailedExceptionMessage(ex) + "<br/><br/>" +
                     "<b>Requête SQL :</b><br/>" +
                     "<pre>" + sql + "</pre>";
 
@@ -375,7 +377,7 @@ namespace SoCOP_FR
             }
             catch (Exception mailEx)
             {
-                WriteToFile("Error sending SQL technical issue email : " + mailEx.Message);
+                WriteToFile("Error sending SQL technical issue email : " + GetDetailedExceptionMessage(mailEx));
             }
         }
 
@@ -711,9 +713,13 @@ namespace SoCOP_FR
 
                 if (message.IndexOf("Too many retries performed", StringComparison.OrdinalIgnoreCase) >= 0 ||
                     message.IndexOf("More than 3 retries encountered", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    message.IndexOf("TooManyRequests", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    message.IndexOf("ApplicationThrottled", StringComparison.OrdinalIgnoreCase) >= 0 ||
                     message.IndexOf("temporarily unavailable", StringComparison.OrdinalIgnoreCase) >= 0 ||
                     message.IndexOf("service unavailable", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    message.IndexOf("12002", StringComparison.OrdinalIgnoreCase) >= 0 ||
                     message.IndexOf("timed out", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    message.IndexOf("operation was canceled", StringComparison.OrdinalIgnoreCase) >= 0 ||
                     message.IndexOf("An error occurred while sending the request", StringComparison.OrdinalIgnoreCase) >= 0)
                 {
                     return true;

@@ -268,7 +268,7 @@ namespace Brother_load_Bid
                                     }
                                     catch (Exception mailEx)
                                     {
-                                        WriteToFile("   Error sending alert email : " + mailEx.Message);
+                                        WriteToFile("   Error sending alert email : " + GetDetailedExceptionMessage(mailEx));
                                     }
 
                                     try
@@ -277,7 +277,7 @@ namespace Brother_load_Bid
                                     }
                                     catch (Exception moveEx)
                                     {
-                                        WriteToFile("   Error moving email to Erreur folder : " + moveEx.Message);
+                                        WriteToFile("   Error moving email to Erreur folder : " + GetDetailedExceptionMessage(moveEx));
                                     }
                                 }
                             }
@@ -579,11 +579,13 @@ namespace Brother_load_Bid
         {
             if (sharedmailbox_folder_in.ToUpper().Trim() == "INBOX")
             {
-                return graphService.Users[sharedmailbox_name]
-                    .MailFolders["inbox"]
-                    .GetAsync()
-                    .GetAwaiter()
-                    .GetResult();
+                return ExecuteGraphWithRetry(
+                    () => graphService.Users[sharedmailbox_name]
+                        .MailFolders["inbox"]
+                        .GetAsync()
+                        .GetAwaiter()
+                        .GetResult(),
+                    "Read Inbox folder for " + sharedmailbox_name);
             }
 
             return GetChildFolderByName(graphService, sharedmailbox_name, sharedmailbox_folder_in);
@@ -593,15 +595,18 @@ namespace Brother_load_Bid
         {
             string safeFolderName = EscapeODataString(folderName);
 
-            MailFolderCollectionResponse folders = graphService.Users[mailbox]
-                .MailFolders["inbox"]
-                .ChildFolders
-                .GetAsync(config =>
-                {
-                    config.QueryParameters.Filter = $"displayName eq '{safeFolderName}'";
-                })
-                .GetAwaiter()
-                .GetResult();
+            MailFolderCollectionResponse folders = ExecuteGraphWithRetry(
+                () => graphService.Users[mailbox]
+                    .MailFolders["inbox"]
+                    .ChildFolders
+                    .GetAsync(config =>
+                    {
+                        config.QueryParameters.Filter =
+                            $"displayName eq '{safeFolderName}'";
+                    })
+                    .GetAwaiter()
+                    .GetResult(),
+                "Find folder " + folderName + " for " + mailbox);
 
             if (folders == null || folders.Value == null || folders.Value.Count == 0)
             {
@@ -611,47 +616,70 @@ namespace Brother_load_Bid
             return folders.Value.First();
         }
 
-        private List<string> DownloadExcelAttachmentsWithGraph(GraphServiceClient graphService, string mailbox, string messageId)
+        private List<string> DownloadExcelAttachmentsWithGraph(
+            GraphServiceClient graphService,
+            string mailbox,
+            string messageId)
         {
-            List<string> downloadedFiles = new List<string>();
+            var downloadedFiles = new List<string>();
+            AttachmentCollectionResponse attachments = ExecuteGraphWithRetry(
+                () => graphService.Users[mailbox]
+                    .Messages[messageId]
+                    .Attachments
+                    .GetAsync()
+                    .GetAwaiter()
+                    .GetResult(),
+                "List attachments for message " + messageId + " in " + mailbox);
 
-            AttachmentCollectionResponse attachments = graphService.Users[mailbox]
-                .Messages[messageId]
-                .Attachments
-                .GetAsync()
-                .GetAwaiter()
-                .GetResult();
-
-            if (attachments == null || attachments.Value == null)
+            if (attachments?.Value == null)
             {
                 return downloadedFiles;
             }
 
             foreach (Attachment attachment in attachments.Value)
             {
-                if (attachment is Microsoft.Graph.Models.FileAttachment fileAttachment)
+                FileAttachment fileAttachment = attachment as FileAttachment;
+                if (fileAttachment == null)
                 {
-                    string attachmentName = global_application_name + '_' + (fileAttachment.Name ?? "");
-                    string extension = Path.GetExtension(attachmentName).ToLower();
-
-                    if (extension == ".xlsx" || extension == ".xls")
-                    {
-                        if (fileAttachment.ContentBytes == null)
-                        {
-                            WriteToFile("       Attachment content is empty : " + attachmentName);
-                            continue;
-                        }
-
-                        string cleanFileName = CleanFileName(attachmentName);
-                        string filePath = Path.Combine(temp_folder, cleanFileName);
-
-                        File.WriteAllBytes(filePath, fileAttachment.ContentBytes);
-
-                        downloadedFiles.Add(filePath);
-                    }
+                    continue;
                 }
-            }
 
+                string attachmentName = global_application_name + "_" +
+                    (fileAttachment.Name ?? "attachment");
+                string extension = Path.GetExtension(attachmentName)
+                    .ToLowerInvariant();
+                if (extension != ".xlsx" && extension != ".xls")
+                {
+                    continue;
+                }
+
+                if (fileAttachment.ContentBytes == null &&
+                    !string.IsNullOrWhiteSpace(fileAttachment.Id))
+                {
+                    string attachmentId = fileAttachment.Id;
+                    fileAttachment = ExecuteGraphWithRetry(
+                        () => graphService.Users[mailbox]
+                            .Messages[messageId]
+                            .Attachments[attachmentId]
+                            .GetAsync()
+                            .GetAwaiter()
+                            .GetResult() as FileAttachment,
+                        "Download attachment " + attachmentName +
+                        " for message " + messageId + " in " + mailbox);
+                }
+
+                if (fileAttachment?.ContentBytes == null)
+                {
+                    throw new InvalidDataException(
+                        "Attachment content is empty : " + attachmentName);
+                }
+
+                string filePath = Path.Combine(
+                    temp_folder,
+                    CleanFileName(attachmentName));
+                File.WriteAllBytes(filePath, fileAttachment.ContentBytes);
+                downloadedFiles.Add(filePath);
+            }
             return downloadedFiles;
         }
 
@@ -662,11 +690,14 @@ namespace Brother_load_Bid
                 IsRead = true
             };
 
-            graphService.Users[mailbox]
-                .Messages[messageId]
-                .PatchAsync(messageUpdate)
-                .GetAwaiter()
-                .GetResult();
+            ExecuteGraphWithRetry(
+                () =>
+                {
+                    graphService.Users[mailbox].Messages[messageId]
+                        .PatchAsync(messageUpdate).GetAwaiter().GetResult();
+                    return true;
+                },
+                "Mark message as read " + messageId + " in " + mailbox);
         }
 
         private void MoveEmail(GraphServiceClient graphService, string mailbox, string messageId, string destinationFolderId)
@@ -676,12 +707,14 @@ namespace Brother_load_Bid
                 DestinationId = destinationFolderId
             };
 
-            graphService.Users[mailbox]
-                .Messages[messageId]
-                .Move
-                .PostAsync(requestBody)
-                .GetAwaiter()
-                .GetResult();
+            ExecuteGraphWithRetry(
+                () =>
+                {
+                    graphService.Users[mailbox].Messages[messageId]
+                        .Move.PostAsync(requestBody).GetAwaiter().GetResult();
+                    return true;
+                },
+                "Move message " + messageId + " in " + mailbox);
         }
 
         private void EnvoiEmail_with_Graph(GraphServiceClient graphService, string subject, string body, string recipient)
@@ -716,11 +749,14 @@ namespace Brother_load_Bid
                 SaveToSentItems = true
             };
 
-            graphService.Users[sharedmailbox_name]
-                .SendMail
-                .PostAsync(requestBody)
-                .GetAwaiter()
-                .GetResult();
+            ExecuteGraphWithRetry(
+                () =>
+                {
+                    graphService.Users[sharedmailbox_name]
+                        .SendMail.PostAsync(requestBody).GetAwaiter().GetResult();
+                    return true;
+                },
+                "Send Graph email : " + subject);
         }
 
         private List<Recipient> BuildRecipients(string emails)
@@ -2067,7 +2103,7 @@ namespace Brother_load_Bid
             }
             catch (Exception ex)
             {
-                WriteToFile("Error sending functional Brother email : " + ex.Message);
+                WriteToFile("Error sending functional Brother email : " + GetDetailedExceptionMessage(ex));
             }
         }
 
@@ -2112,7 +2148,7 @@ namespace Brother_load_Bid
             }
             catch (Exception mailEx)
             {
-                WriteToFile("Error sending SQL technical issue email : " + mailEx.Message);
+                WriteToFile("Error sending SQL technical issue email : " + GetDetailedExceptionMessage(mailEx));
             }
         }
 

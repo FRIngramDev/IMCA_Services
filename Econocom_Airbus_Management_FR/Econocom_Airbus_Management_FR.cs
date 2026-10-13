@@ -1,5 +1,6 @@
 ﻿using Microsoft.Graph;
 using Microsoft.Graph.Models;
+using Microsoft.Graph.Models.ODataErrors;
 using Microsoft.Kiota.Abstractions;
 using Microsoft.VisualBasic.FileIO;
 using Newtonsoft.Json;
@@ -15,6 +16,7 @@ using System.Net;
 using System.Net.Http;
 using System.Text;
 using System.Text.RegularExpressions;
+using System.Threading.Tasks;
 using System.Xml;
 
 namespace ECONOCOM_AIRBUS_MANAGEMENT_FR
@@ -2191,7 +2193,22 @@ WHERE po.id_fichier=@FILE;";
             List<Recipient> recipients = Recipients(to); if (recipients.Count == 0) throw new InvalidOperationException("No valid customer recipient for file ID " + p.FileId);
             var sender = new Recipient { EmailAddress = new EmailAddress { Address = econocomSendAs, Name = "Ingram Micro" } };
             var message = new Message { Subject = subject, From = sender, Sender = sender, Body = new ItemBody { ContentType = BodyType.Html, Content = p.Body ?? "" }, ToRecipients = recipients, CcRecipients = Recipients(cc), Attachments = new List<Attachment> { new FileAttachment { OdataType = "#microsoft.graph.fileAttachment", Name = Path.GetFileName(p.FileName), ContentType = "text/csv", ContentBytes = File.ReadAllBytes(filePath) } } };
-            graph.Users[econocomSendAs].SendMail.PostAsync(new Microsoft.Graph.Users.Item.SendMail.SendMailPostRequestBody { Message = message, SaveToSentItems = true }).GetAwaiter().GetResult();
+            Retry(
+                () =>
+                {
+                    graph.Users[econocomSendAs]
+                        .SendMail
+                        .PostAsync(
+                            new Microsoft.Graph.Users.Item.SendMail.SendMailPostRequestBody
+                            {
+                                Message = message,
+                                SaveToSentItems = true
+                            })
+                        .GetAwaiter()
+                        .GetResult();
+                    return true;
+                },
+                "Send customer file with Graph - File ID : " + p.FileId);
         }
         private void MarkCustomerFileAsSent(int fileId, int sendType)
         {
@@ -3293,7 +3310,93 @@ VALUES(@M,@G,'E','TECHNICAL',@E,1);", P("@M", SqlDbType.NVarChar, mailbox, 320),
             }
         }
         private GraphServiceClient ConnectGraph() { ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12; return new class_dev_tools.Ews_Modern_Auth().Get_Graph_Service(); }
-        private T Retry<T>(Func<T> action, string op) { Exception last = null; for (int n = 1; n <= 3; n++) { try { return action(); } catch (Exception ex) when (ex is HttpRequestException || ex is TimeoutException) { last = ex; System.Threading.Thread.Sleep(n * 5000); } } throw new InvalidOperationException(op, last); }
+        private T Retry<T>(Func<T> action, string operation)
+        {
+            const int maximumAttempts = 3;
+            Exception lastException = null;
+
+            for (int attempt = 1; attempt <= maximumAttempts; attempt++)
+            {
+                try
+                {
+                    return action();
+                }
+                catch (Exception ex) when (IsTransientGraphError(ex))
+                {
+                    lastException = ex;
+                    if (attempt >= maximumAttempts)
+                    {
+                        break;
+                    }
+
+                    int delayMilliseconds = attempt * 5000;
+                    WriteLog(
+                        "       Temporary Graph error during " + operation +
+                        ". Application attempt " + attempt + "/" +
+                        maximumAttempts + ". Retry in " +
+                        delayMilliseconds + " ms. Details : " +
+                        Details(ex));
+                    System.Threading.Thread.Sleep(delayMilliseconds);
+                }
+            }
+
+            throw new InvalidOperationException(
+                "Graph operation failed after " + maximumAttempts +
+                " application attempt(s) : " + operation + " - " +
+                Details(lastException),
+                lastException);
+        }
+
+        private static bool IsTransientGraphError(Exception exception)
+        {
+            Exception current = exception;
+            while (current != null)
+            {
+                if (current is HttpRequestException ||
+                    current is TimeoutException ||
+                    current is TaskCanceledException)
+                {
+                    return true;
+                }
+
+                if (current is ApiException apiException)
+                {
+                    int status = apiException.ResponseStatusCode;
+                    if (status == 408 || status == 429 || status == 500 ||
+                        status == 502 || status == 503 || status == 504)
+                    {
+                        return true;
+                    }
+                }
+
+                ODataError graphError = current as ODataError;
+                string graphCode = graphError?.Error?.Code ?? "";
+                if (graphCode.Equals("TooManyRequests", StringComparison.OrdinalIgnoreCase) ||
+                    graphCode.Equals("ErrorServerBusy", StringComparison.OrdinalIgnoreCase) ||
+                    graphCode.Equals("ServiceUnavailable", StringComparison.OrdinalIgnoreCase) ||
+                    graphCode.Equals("ApplicationThrottled", StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+
+                string text = current.Message ?? "";
+                if (text.IndexOf("Too many retries performed", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    text.IndexOf("More than 3 retries encountered", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    text.IndexOf("TooManyRequests", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    text.IndexOf("ApplicationThrottled", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    text.IndexOf("temporarily unavailable", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    text.IndexOf("service unavailable", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    text.IndexOf("12002", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    text.IndexOf("timed out", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    text.IndexOf("operation was canceled", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    text.IndexOf("An error occurred while sending the request", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    return true;
+                }
+                current = current.InnerException;
+            }
+            return false;
+        }
         private void SendTechnicalAlert(
             string method,
             string text)
@@ -3347,25 +3450,31 @@ VALUES(@M,@G,'E','TECHNICAL',@E,1);", P("@M", SqlDbType.NVarChar, mailbox, 320),
                     }
                 };
 
-                graph.Users[sendAs].SendMail.PostAsync(
-                    new Microsoft.Graph.Users.Item.SendMail.SendMailPostRequestBody
+                Retry(
+                    () =>
                     {
-                        Message = new Message
-                        {
-                            Subject =
-                                "Gestion des commandes Econocom/Airbus - " +
-                                method,
-                            From = sender,
-                            Sender = sender,
-                            Body = new ItemBody
+                        graph.Users[sendAs].SendMail.PostAsync(
+                            new Microsoft.Graph.Users.Item.SendMail.SendMailPostRequestBody
                             {
-                                ContentType = BodyType.Text,
-                                Content = text
-                            },
-                            ToRecipients = recipients
-                        },
-                        SaveToSentItems = true
-                    }).GetAwaiter().GetResult();
+                                Message = new Message
+                                {
+                                    Subject =
+                                        "Gestion des commandes Econocom/Airbus - " +
+                                        method,
+                                    From = sender,
+                                    Sender = sender,
+                                    Body = new ItemBody
+                                    {
+                                        ContentType = BodyType.Text,
+                                        Content = text
+                                    },
+                                    ToRecipients = recipients
+                                },
+                                SaveToSentItems = true
+                            }).GetAwaiter().GetResult();
+                        return true;
+                    },
+                    "Send Graph alert : " + method);
             }
             catch (Exception ex)
             {
@@ -3383,7 +3492,29 @@ VALUES(@M,@G,'E','TECHNICAL',@E,1);", P("@M", SqlDbType.NVarChar, mailbox, 320),
         private bool IsDue(SharedMailbox m) => !m.LastRefresh.HasValue || m.RefreshMinutes <= 0 || m.LastRefresh.Value.AddMinutes(m.RefreshMinutes) <= DateTime.Now;
         private void DeleteTempFiles(List<CsvFileValidation> files) { foreach (var f in files ?? new List<CsvFileValidation>()) try { if (File.Exists(f.TempPath)) File.Delete(f.TempPath); } catch { } }
         private void WriteLog(string m) { try { string p = Path.Combine(logsFolder, "IMCA_" + sessionName + "_" + DateTime.Now.ToString("dd_MM_yyyy") + "_" + country + "_" + ApplicationName + ".txt"); lock (LogLock) File.AppendAllText(p, DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + " - " + m + Environment.NewLine, Encoding.UTF8); } catch { } }
-        private static string Details(Exception e) => e == null ? "Unknown error" : e.GetType().FullName + " | " + e.Message + (e.InnerException == null ? "" : " | " + Details(e.InnerException));
+        private static string Details(Exception exception)
+        {
+            if (exception == null) return "Unknown error";
+            var details = new List<string>();
+            Exception current = exception;
+            while (current != null)
+            {
+                details.Add("Type=" + current.GetType().FullName);
+                if (!string.IsNullOrWhiteSpace(current.Message))
+                    details.Add("Message=" + current.Message);
+                ODataError graphError = current as ODataError;
+                if (!string.IsNullOrWhiteSpace(graphError?.Error?.Code))
+                    details.Add("GraphCode=" + graphError.Error.Code);
+                if (!string.IsNullOrWhiteSpace(graphError?.Error?.Message))
+                    details.Add("GraphMessage=" + graphError.Error.Message);
+                if (current is ApiException apiException)
+                    details.Add("HttpStatus=" + apiException.ResponseStatusCode);
+                current = current.InnerException;
+            }
+            return string.Join(" | ", details
+                .Where(value => !string.IsNullOrWhiteSpace(value))
+                .Distinct(StringComparer.OrdinalIgnoreCase));
+        }
         private DateTime ParseStartDate() => DateTime.TryParseExact(startDateScan, "yyyyMMdd", CultureInfo.InvariantCulture, DateTimeStyles.None, out DateTime d) ? d : new DateTime(1900, 1, 1);
         private static int ParseInt(string v, int f) => int.TryParse(v, out int n) && n > 0 ? n : f;
         private static List<Recipient> Recipients(string v) => (v ?? "").Split(new[] { ';', ',' }, StringSplitOptions.RemoveEmptyEntries).Select(x => x.Trim()).Where(x => Regex.IsMatch(x, @"^[^\s@]+@[^\s@]+\.[^\s@]+$")).Distinct(StringComparer.OrdinalIgnoreCase).Select(x => new Recipient { EmailAddress = new EmailAddress { Address = x } }).ToList();

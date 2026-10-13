@@ -491,46 +491,51 @@ namespace ENCODAGE_SPLA_FR
             return folders.Value.First();
         }
 
-        private List<string> DownloadExcelAttachmentsWithGraph(GraphServiceClient graphService, string mailbox, string messageId)
+        private List<string> DownloadExcelAttachmentsWithGraph(
+            GraphServiceClient graphService,
+            string mailbox,
+            string messageId)
         {
-            List<string> downloadedFiles = new List<string>();
-
+            var downloadedFiles = new List<string>();
             AttachmentCollectionResponse attachments = ExecuteGraphWithRetry(
-                () => graphService.Users[mailbox]
-                    .Messages[messageId]
-                    .Attachments
-                    .GetAsync()
-                    .GetAwaiter()
-                    .GetResult(),
-                "Read SPLA message attachments");
+                () => graphService.Users[mailbox].Messages[messageId]
+                    .Attachments.GetAsync().GetAwaiter().GetResult(),
+                "List SPLA attachments for message " + messageId + " in " + mailbox);
 
-            if (attachments?.Value == null)
-            {
-                return downloadedFiles;
-            }
+            if (attachments?.Value == null) return downloadedFiles;
 
             foreach (Attachment attachment in attachments.Value)
             {
-                if (attachment is FileAttachment fileAttachment)
+                FileAttachment fileAttachment = attachment as FileAttachment;
+                if (fileAttachment == null) continue;
+                string extension = Path.GetExtension(fileAttachment.Name ?? "").ToLowerInvariant();
+                if (extension != ".xls") continue;
+
+                if (fileAttachment.ContentBytes == null &&
+                    !string.IsNullOrWhiteSpace(fileAttachment.Id))
                 {
-                    string extension = Path.GetExtension(fileAttachment.Name ?? "").ToLowerInvariant();
-                    if (extension != ".xls")
-                    {
-                        continue;
-                    }
-
-                    if (fileAttachment.ContentBytes == null)
-                    {
-                        throw new Exception("Le contenu de la pièce jointe est vide : " + fileAttachment.Name);
-                    }
-
-                    string fileName = CleanFileName(global_application_name + "_" + fileAttachment.Name);
-                    string filePath = Path.Combine(temp_folder, fileName);
-                    File.WriteAllBytes(filePath, fileAttachment.ContentBytes);
-                    downloadedFiles.Add(filePath);
+                    string attachmentId = fileAttachment.Id;
+                    fileAttachment = ExecuteGraphWithRetry(
+                        () => graphService.Users[mailbox].Messages[messageId]
+                            .Attachments[attachmentId].GetAsync()
+                            .GetAwaiter().GetResult() as FileAttachment,
+                        "Download SPLA attachment " +
+                        (fileAttachment.Name ?? attachmentId) +
+                        " for message " + messageId + " in " + mailbox);
                 }
-            }
 
+                if (fileAttachment?.ContentBytes == null)
+                    throw new InvalidDataException(
+                        "Le contenu de la pièce jointe est vide : " +
+                        (fileAttachment?.Name ?? attachment.Id));
+
+                string fileName = CleanFileName(
+                    global_application_name + "_" +
+                    (fileAttachment.Name ?? "attachment.xls"));
+                string filePath = Path.Combine(temp_folder, fileName);
+                File.WriteAllBytes(filePath, fileAttachment.ContentBytes);
+                downloadedFiles.Add(filePath);
+            }
             return downloadedFiles;
         }
 
@@ -724,7 +729,7 @@ namespace ENCODAGE_SPLA_FR
             {
                 WriteToFile(
                     "       Unable to send macro 195 restart alert : " +
-                    ex.Message);
+                    GetDetailedExceptionMessage(ex));
             }
         }
 
@@ -1208,13 +1213,25 @@ namespace ENCODAGE_SPLA_FR
                         "More than 3 retries encountered",
                         StringComparison.OrdinalIgnoreCase) >= 0 ||
                     message.IndexOf(
+                        "TooManyRequests",
+                        StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    message.IndexOf(
+                        "ApplicationThrottled",
+                        StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    message.IndexOf(
                         "temporarily unavailable",
                         StringComparison.OrdinalIgnoreCase) >= 0 ||
                     message.IndexOf(
                         "service unavailable",
                         StringComparison.OrdinalIgnoreCase) >= 0 ||
                     message.IndexOf(
+                        "12002",
+                        StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    message.IndexOf(
                         "timed out",
+                        StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    message.IndexOf(
+                        "operation was canceled",
                         StringComparison.OrdinalIgnoreCase) >= 0 ||
                     message.IndexOf(
                         "An error occurred while sending the request",
@@ -1631,7 +1648,9 @@ namespace ENCODAGE_SPLA_FR
             }
             catch (Exception mailEx)
             {
-                WriteToFile("Error sending SQL technical issue email : " + mailEx.Message);
+                WriteToFile(
+                    "Error sending SQL technical issue email : " +
+                    GetDetailedExceptionMessage(mailEx));
             }
         }
 

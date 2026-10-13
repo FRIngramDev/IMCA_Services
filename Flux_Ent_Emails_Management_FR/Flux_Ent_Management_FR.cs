@@ -1295,12 +1295,23 @@ WHERE id_fichier=@FILE;",
                     },
                     ToRecipients = recipients
                 };
-                graphService.Users[graphSendAs].SendMail.PostAsync(
-                    new Microsoft.Graph.Users.Item.SendMail.SendMailPostRequestBody
+                ExecuteGraphWithRetry(
+                    () =>
                     {
-                        Message = message,
-                        SaveToSentItems = true
-                    }).GetAwaiter().GetResult();
+                        graphService.Users[graphSendAs]
+                            .SendMail
+                            .PostAsync(
+                                new Microsoft.Graph.Users.Item.SendMail
+                                    .SendMailPostRequestBody
+                                {
+                                    Message = message,
+                                    SaveToSentItems = true
+                                })
+                            .GetAwaiter()
+                            .GetResult();
+                        return true;
+                    },
+                    "Send Flux Entrant technical alert : " + method);
             }
             catch (Exception alertException)
             {
@@ -1499,14 +1510,76 @@ WHERE id_fichier=@FILE;",
             Exception current = exception;
             while (current != null)
             {
-                if (current is HttpRequestException || current is TimeoutException ||
+                if (current is HttpRequestException ||
+                    current is TimeoutException ||
                     current is System.Threading.Tasks.TaskCanceledException)
+                {
                     return true;
-                if (current is ApiException api &&
-                    (api.ResponseStatusCode == 408 || api.ResponseStatusCode == 429 ||
-                     api.ResponseStatusCode == 500 || api.ResponseStatusCode == 502 ||
-                     api.ResponseStatusCode == 503 || api.ResponseStatusCode == 504))
+                }
+
+                if (current is ApiException apiException)
+                {
+                    int status = apiException.ResponseStatusCode;
+                    if (status == 408 || status == 429 || status == 500 ||
+                        status == 502 || status == 503 || status == 504)
+                    {
+                        return true;
+                    }
+                }
+
+                ODataError graphError = current as ODataError;
+                string graphCode = graphError?.Error?.Code ?? "";
+                if (graphCode.Equals(
+                        "TooManyRequests",
+                        StringComparison.OrdinalIgnoreCase) ||
+                    graphCode.Equals(
+                        "ErrorServerBusy",
+                        StringComparison.OrdinalIgnoreCase) ||
+                    graphCode.Equals(
+                        "ServiceUnavailable",
+                        StringComparison.OrdinalIgnoreCase) ||
+                    graphCode.Equals(
+                        "ApplicationThrottled",
+                        StringComparison.OrdinalIgnoreCase))
+                {
                     return true;
+                }
+
+                string message = current.Message ?? "";
+                if (message.IndexOf(
+                        "Too many retries performed",
+                        StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    message.IndexOf(
+                        "More than 3 retries encountered",
+                        StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    message.IndexOf(
+                        "TooManyRequests",
+                        StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    message.IndexOf(
+                        "ApplicationThrottled",
+                        StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    message.IndexOf(
+                        "temporarily unavailable",
+                        StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    message.IndexOf(
+                        "service unavailable",
+                        StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    message.IndexOf(
+                        "12002",
+                        StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    message.IndexOf(
+                        "timed out",
+                        StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    message.IndexOf(
+                        "operation was canceled",
+                        StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    message.IndexOf(
+                        "An error occurred while sending the request",
+                        StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    return true;
+                }
+
                 current = current.InnerException;
             }
             return false;

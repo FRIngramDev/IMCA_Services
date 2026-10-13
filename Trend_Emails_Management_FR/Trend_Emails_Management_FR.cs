@@ -1370,9 +1370,13 @@ namespace TREND_EMAILS_MANAGEMENT_FR
                 string message = current.Message ?? "";
                 if (message.IndexOf("Too many retries performed", StringComparison.OrdinalIgnoreCase) >= 0 ||
                     message.IndexOf("More than 3 retries encountered", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    message.IndexOf("TooManyRequests", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    message.IndexOf("ApplicationThrottled", StringComparison.OrdinalIgnoreCase) >= 0 ||
                     message.IndexOf("temporarily unavailable", StringComparison.OrdinalIgnoreCase) >= 0 ||
                     message.IndexOf("service unavailable", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    message.IndexOf("12002", StringComparison.OrdinalIgnoreCase) >= 0 ||
                     message.IndexOf("timed out", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    message.IndexOf("operation was canceled", StringComparison.OrdinalIgnoreCase) >= 0 ||
                     message.IndexOf("An error occurred while sending the request", StringComparison.OrdinalIgnoreCase) >= 0)
                 {
                     return true;

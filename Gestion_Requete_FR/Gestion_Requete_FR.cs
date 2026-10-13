@@ -270,7 +270,9 @@ namespace GESTION_REQUETE_FR
                                         EnvoiEmail_with_Graph(
                                             graphService,
                                             "Gestion Requêtes FR",
-                                            "Gestion Requêtes FR - Une erreur (" + ex.Message + ") est survenue lors du traitement d'un fichier. Le mail a été déplacé dans le dossier Erreur.",
+                                            "Gestion Requêtes FR - Une erreur (" +
+                                              GetDetailedExceptionMessage(ex) +
+                                              ") est survenue lors du traitement d'un fichier. Le mail a été déplacé dans le dossier Erreur.",
                                             email_in_case_of_technical_issue
                                         );
                                     }
@@ -499,7 +501,6 @@ SELECT @id,GETDATE(),@user,35,@comment,ISNULL(id_gestionnaire,0) FROM T_Requeteu
             string messageId)
         {
             var files = new List<string>();
-
             AttachmentCollectionResponse response = ExecuteGraphWithRetry(
                 () => service.Users[sharedmailbox_name]
                     .Messages[messageId]
@@ -507,28 +508,48 @@ SELECT @id,GETDATE(),@user,35,@comment,ISNULL(id_gestionnaire,0) FROM T_Requeteu
                     .GetAsync()
                     .GetAwaiter()
                     .GetResult(),
-                "Read Gestion Requete attachments");
+                "List Gestion Requete attachments for message " + messageId);
 
             foreach (Attachment attachment in
                 response?.Value ?? new List<Attachment>())
             {
-                if (attachment is FileAttachment fileAttachment &&
-                    fileAttachment.ContentBytes != null &&
-                    !string.IsNullOrWhiteSpace(fileAttachment.Name))
+                FileAttachment fileAttachment = attachment as FileAttachment;
+                if (fileAttachment == null ||
+                    string.IsNullOrWhiteSpace(fileAttachment.Name))
                 {
-                    string path = Path.Combine(
-                        temp_folder,
-                        global_application_name + "_" +
-                        CleanFileName(fileAttachment.Name));
-
-                    File.WriteAllBytes(
-                        path,
-                        fileAttachment.ContentBytes);
-
-                    files.Add(path);
+                    continue;
                 }
-            }
 
+                if (fileAttachment.ContentBytes == null &&
+                    !string.IsNullOrWhiteSpace(fileAttachment.Id))
+                {
+                    string attachmentId = fileAttachment.Id;
+                    fileAttachment = ExecuteGraphWithRetry(
+                        () => service.Users[sharedmailbox_name]
+                            .Messages[messageId]
+                            .Attachments[attachmentId]
+                            .GetAsync()
+                            .GetAwaiter()
+                            .GetResult() as FileAttachment,
+                        "Download Gestion Requete attachment " +
+                        fileAttachment.Name +
+                        " for message " + messageId);
+                }
+
+                if (fileAttachment?.ContentBytes == null)
+                {
+                    throw new InvalidDataException(
+                        "Attachment content is empty : " +
+                        (fileAttachment?.Name ?? attachment.Id));
+                }
+
+                string path = Path.Combine(
+                    temp_folder,
+                    global_application_name + "_" +
+                    CleanFileName(fileAttachment.Name));
+                File.WriteAllBytes(path, fileAttachment.ContentBytes);
+                files.Add(path);
+            }
             return files;
         }
 
@@ -908,9 +929,13 @@ SELECT @id,GETDATE(),@user,35,@comment,ISNULL(id_gestionnaire,0) FROM T_Requeteu
 
                 if (message.IndexOf("Too many retries performed", StringComparison.OrdinalIgnoreCase) >= 0 ||
                     message.IndexOf("More than 3 retries encountered", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    message.IndexOf("TooManyRequests", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    message.IndexOf("ApplicationThrottled", StringComparison.OrdinalIgnoreCase) >= 0 ||
                     message.IndexOf("temporarily unavailable", StringComparison.OrdinalIgnoreCase) >= 0 ||
                     message.IndexOf("service unavailable", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    message.IndexOf("12002", StringComparison.OrdinalIgnoreCase) >= 0 ||
                     message.IndexOf("timed out", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    message.IndexOf("operation was canceled", StringComparison.OrdinalIgnoreCase) >= 0 ||
                     message.IndexOf("An error occurred while sending the request", StringComparison.OrdinalIgnoreCase) >= 0)
                 {
                     return true;
@@ -1316,7 +1341,7 @@ SELECT @id,GETDATE(),@user,35,@comment,ISNULL(id_gestionnaire,0) FROM T_Requeteu
             }
             catch (Exception mailEx)
             {
-                WriteToFile("Error sending SQL technical issue email : " + mailEx.Message);
+                WriteToFile("Error sending SQL technical issue email : " + GetDetailedExceptionMessage(mailEx));
             }
         }
 

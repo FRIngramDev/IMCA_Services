@@ -808,7 +808,8 @@ namespace TRACT_SYNDICAL_FR
             catch (Exception ex)
             {
                 WriteToFile(
-                    "Global error ReadCurrentSharedMailbox : " + ex.Message);
+                    "Global error ReadCurrentSharedMailbox : " +
+                  GetDetailedExceptionMessage(ex));
                 throw;
             }
             finally
@@ -841,7 +842,7 @@ namespace TRACT_SYNDICAL_FR
                     })
                     .GetAwaiter()
                     .GetResult(),
-                "Read complete tract message");
+                "Read complete tract message - Message ID : " + messageId);
         }
 
         private void ProcessTractEmail(
@@ -988,7 +989,7 @@ namespace TRACT_SYNDICAL_FR
                         .PostAsync(newMessage)
                         .GetAwaiter()
                         .GetResult(),
-                    "Create tract draft");
+                    "Create tract draft - BCC recipients : " + bccRecipients.Count);
 
                 if (draft == null ||
                     string.IsNullOrWhiteSpace(draft.Id))
@@ -1027,7 +1028,7 @@ namespace TRACT_SYNDICAL_FR
                             .GetResult();
                         return true;
                     },
-                    "Send tract draft");
+                    "Send tract draft - Draft ID : " + draft.Id);
             }
             catch
             {
@@ -1046,7 +1047,7 @@ namespace TRACT_SYNDICAL_FR
                                     .GetResult();
                                 return true;
                             },
-                            "Delete failed tract draft");
+                            "Delete failed tract draft - Draft ID : " + draft.Id);
                     }
                     catch
                     {
@@ -1083,7 +1084,7 @@ namespace TRACT_SYNDICAL_FR
                         .GetResult();
                     return true;
                 },
-                "Add small tract attachment");
+                "Add small tract attachment " + attachment.Name + " to draft " + draftId);
         }
 
         private void AddLargeAttachmentToDraft(
@@ -1122,7 +1123,7 @@ namespace TRACT_SYNDICAL_FR
                     .PostAsync(requestBody)
                     .GetAwaiter()
                     .GetResult(),
-                "Create tract attachment upload session");
+                "Create tract attachment upload session for " + attachment.Name + " - Draft ID : " + draftId);
 
             if (uploadSession == null ||
                 string.IsNullOrWhiteSpace(uploadSession.UploadUrl))
@@ -1215,7 +1216,7 @@ namespace TRACT_SYNDICAL_FR
                     .GetAsync()
                     .GetAwaiter()
                     .GetResult(),
-                "Read tract attachments");
+                "List tract attachments - Message ID : " + messageId);
 
             if (attachments == null ||
                 attachments.Value == null)
@@ -1245,7 +1246,7 @@ namespace TRACT_SYNDICAL_FR
                             .GetAsync()
                             .GetAwaiter()
                             .GetResult() as FileAttachment,
-                        "Read complete tract attachment");
+                        "Read complete tract attachment " + (fileAttachment.Name ?? fileAttachment.Id) + " - Message ID : " + messageId);
                 }
 
                 if (fileAttachment == null ||
@@ -1644,7 +1645,7 @@ namespace TRACT_SYNDICAL_FR
                         .GetResult();
                     return true;
                 },
-                "Mark tract message as read");
+                "Mark tract message as read - Message ID : " + messageId);
         }
 
         private void MoveEmail(
@@ -1671,7 +1672,7 @@ namespace TRACT_SYNDICAL_FR
                         .GetResult();
                     return true;
                 },
-                "Move tract message");
+                "Move tract message - Message ID : " + messageId + " - Destination folder ID : " + destinationFolderId);
         }
 
         private MessageCollectionResponse GetMessagesToProcess(
@@ -1889,9 +1890,13 @@ namespace TRACT_SYNDICAL_FR
 
                 if (message.IndexOf("Too many retries performed", StringComparison.OrdinalIgnoreCase) >= 0 ||
                     message.IndexOf("More than 3 retries encountered", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    message.IndexOf("TooManyRequests", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    message.IndexOf("ApplicationThrottled", StringComparison.OrdinalIgnoreCase) >= 0 ||
                     message.IndexOf("temporarily unavailable", StringComparison.OrdinalIgnoreCase) >= 0 ||
                     message.IndexOf("service unavailable", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    message.IndexOf("12002", StringComparison.OrdinalIgnoreCase) >= 0 ||
                     message.IndexOf("timed out", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    message.IndexOf("operation was canceled", StringComparison.OrdinalIgnoreCase) >= 0 ||
                     message.IndexOf("An error occurred while sending the request", StringComparison.OrdinalIgnoreCase) >= 0)
                 {
                     return true;

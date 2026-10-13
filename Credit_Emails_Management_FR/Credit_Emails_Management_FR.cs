@@ -1406,8 +1406,8 @@ WHERE id_mailboxe = @MAILBOX_ID;";
 
                 try
                 {
-                    Message errorMessage =
-                        graphService.Users[mailboxAddress]
+                    Message errorMessage = ExecuteGraphWithRetry(
+                        () => graphService.Users[mailboxAddress]
                             .Messages[graphMessageId]
                             .GetAsync(q =>
                             {
@@ -1429,7 +1429,8 @@ WHERE id_mailboxe = @MAILBOX_ID;";
                                 };
                             })
                             .GetAwaiter()
-                            .GetResult();
+                            .GetResult(),
+                        "Reload opening account error message " + graphMessageId);
 
                     if (errorMessage != null &&
                         !string.IsNullOrWhiteSpace(errorMessage.Id))
@@ -2304,16 +2305,21 @@ WHERE MailboxId = @MAILBOX_ID
             var byId = (res?.Value ?? new List<Message>()).Where(x => !string.IsNullOrWhiteSpace(x.Id)).ToDictionary(x => x.Id, x => x, StringComparer.Ordinal);
             foreach (string id in GetDeferredMessageIds()) if (!byId.ContainsKey(id)) try
                 {
-                    Message m = graphService.Users[mailboxAddress].Messages[id].GetAsync(q =>
-                    {
-                        AddImmutableHeader(q.Headers);
-                        q.QueryParameters.Select = new[]
-                        {
-                        "id","subject","receivedDateTime","internetMessageId","from"
-                    }
-                        ;
-                    }
-                    ).GetAwaiter().GetResult();
+                    Message m = ExecuteGraphWithRetry(
+                        () => graphService.Users[mailboxAddress]
+                            .Messages[id]
+                            .GetAsync(q =>
+                            {
+                                AddImmutableHeader(q.Headers);
+                                q.QueryParameters.Select = new[]
+                                {
+                                    "id", "subject", "receivedDateTime",
+                                    "internetMessageId", "from"
+                                };
+                            })
+                            .GetAwaiter()
+                            .GetResult(),
+                        "Reload pending credit message " + id);
                     if (m != null) byId[m.Id] = m;
                 }
                 catch (Exception ex)
@@ -2780,10 +2786,10 @@ WHERE ROWNUM = 1";
 
         private T ExecuteGraphWithRetry<T>(Func<T> action, string operation)
         {
-            const int maxAttempts = 3;
-            Exception last = null;
+            const int maximumAttempts = 3;
+            Exception lastException = null;
 
-            for (int attempt = 1; attempt <= maxAttempts; attempt++)
+            for (int attempt = 1; attempt <= maximumAttempts; attempt++)
             {
                 try
                 {
@@ -2791,24 +2797,30 @@ WHERE ROWNUM = 1";
                 }
                 catch (Exception ex) when (IsTransientGraphError(ex))
                 {
-                    last = ex;
-                    if (attempt >= maxAttempts) break;
+                    lastException = ex;
+
+                    if (attempt >= maximumAttempts)
+                    {
+                        break;
+                    }
 
                     int delayMilliseconds = attempt * 5000;
                     WriteLog(
                         "       Temporary Graph error during " + operation +
-                        ". Application attempt " + attempt + "/" + maxAttempts +
-                        ". Retry in " + delayMilliseconds +
-                        " ms. Error : " + GetInnermostExceptionMessage(ex));
+                        ". Application attempt " + attempt + "/" +
+                        maximumAttempts + ". Retry in " +
+                        delayMilliseconds + " ms. Error : " +
+                        GetDetailedExceptionMessage(ex));
+
                     System.Threading.Thread.Sleep(delayMilliseconds);
                 }
             }
 
             throw new InvalidOperationException(
-                "Graph operation failed after " + maxAttempts +
+                "Graph operation failed after " + maximumAttempts +
                 " application attempt(s) : " + operation + " - " +
-                GetInnermostExceptionMessage(last),
-                last);
+                GetDetailedExceptionMessage(lastException),
+                lastException);
         }
 
         private void SendTechnicalAlert(string method, string error, string type)
@@ -2819,7 +2831,9 @@ WHERE ROWNUM = 1";
             }
             catch (Exception ex)
             {
-                WriteLog("Alert error : " + ex.Message);
+                WriteLog(
+                    "Alert error : " +
+                    GetDetailedExceptionMessage(ex));
             }
         }
 
@@ -2839,12 +2853,23 @@ WHERE ROWNUM = 1";
                 ToRecipients = to
             }
             ;
-            graphService.Users[fr_graph_send_as].SendMail.PostAsync(new Microsoft.Graph.Users.Item.SendMail.SendMailPostRequestBody
-            {
-                Message = m,
-                SaveToSentItems = true
-            }
-            ).GetAwaiter().GetResult();
+            ExecuteGraphWithRetry(
+                () =>
+                {
+                    graphService.Users[fr_graph_send_as]
+                        .SendMail
+                        .PostAsync(
+                            new Microsoft.Graph.Users.Item.SendMail
+                                .SendMailPostRequestBody
+                            {
+                                Message = m,
+                                SaveToSentItems = true
+                            })
+                        .GetAwaiter()
+                        .GetResult();
+                    return true;
+                },
+                "Send Graph mail : " + subject);
         }
 
         private void UpsertMailboxError(Exception ex)
@@ -3319,39 +3344,86 @@ WHERE ROWNUM = 1";
             return t.IndexOf("change key", StringComparison.OrdinalIgnoreCase) >= 0 || t.IndexOf("ErrorIrresolvableConflict", StringComparison.OrdinalIgnoreCase) >= 0 || (ex is ApiException a && (a.ResponseStatusCode == 409 || a.ResponseStatusCode == 412));
         }
 
-        private static bool IsTransientGraphError(Exception ex)
+        private static bool IsTransientGraphError(Exception exception)
         {
-            Exception current = ex;
+            Exception current = exception;
+
             while (current != null)
             {
                 if (current is HttpRequestException ||
                     current is TimeoutException ||
                     current is System.Threading.Tasks.TaskCanceledException)
+                {
                     return true;
+                }
 
-                if (current is ApiException apiException &&
-                    (apiException.ResponseStatusCode == 408 ||
-                     apiException.ResponseStatusCode == 429 ||
-                     apiException.ResponseStatusCode == 500 ||
-                     apiException.ResponseStatusCode == 502 ||
-                     apiException.ResponseStatusCode == 503 ||
-                     apiException.ResponseStatusCode == 504))
+                if (current is ApiException apiException)
+                {
+                    int status = apiException.ResponseStatusCode;
+                    if (status == 408 || status == 429 || status == 500 ||
+                        status == 502 || status == 503 || status == 504)
+                    {
+                        return true;
+                    }
+                }
+
+                ODataError graphError = current as ODataError;
+                string graphCode = graphError?.Error?.Code ?? "";
+
+                if (graphCode.Equals(
+                        "TooManyRequests",
+                        StringComparison.OrdinalIgnoreCase) ||
+                    graphCode.Equals(
+                        "ErrorServerBusy",
+                        StringComparison.OrdinalIgnoreCase) ||
+                    graphCode.Equals(
+                        "ServiceUnavailable",
+                        StringComparison.OrdinalIgnoreCase) ||
+                    graphCode.Equals(
+                        "ApplicationThrottled",
+                        StringComparison.OrdinalIgnoreCase))
+                {
                     return true;
+                }
 
                 string text = current.Message ?? "";
-                if (text.IndexOf("Too many retries performed", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                    text.IndexOf("More than 3 retries encountered", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                    text.IndexOf("TooManyRequests", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                    text.IndexOf("ApplicationThrottled", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                    text.IndexOf("temporarily unavailable", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                    text.IndexOf("service unavailable", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                    text.IndexOf("12002", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                    text.IndexOf("timed out", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                    text.IndexOf("An error occurred while sending the request", StringComparison.OrdinalIgnoreCase) >= 0)
+                if (text.IndexOf(
+                        "Too many retries performed",
+                        StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    text.IndexOf(
+                        "More than 3 retries encountered",
+                        StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    text.IndexOf(
+                        "TooManyRequests",
+                        StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    text.IndexOf(
+                        "ApplicationThrottled",
+                        StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    text.IndexOf(
+                        "temporarily unavailable",
+                        StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    text.IndexOf(
+                        "service unavailable",
+                        StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    text.IndexOf(
+                        "12002",
+                        StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    text.IndexOf(
+                        "timed out",
+                        StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    text.IndexOf(
+                        "operation was canceled",
+                        StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    text.IndexOf(
+                        "An error occurred while sending the request",
+                        StringComparison.OrdinalIgnoreCase) >= 0)
+                {
                     return true;
+                }
 
                 current = current.InnerException;
             }
+
             return false;
         }
 
