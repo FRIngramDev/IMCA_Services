@@ -296,7 +296,27 @@ namespace APPLE_EMAILS_MANAGEMENT_FR
                         }
                         catch (Exception appleException)
                         {
-                            mailboxErrors.Add(appleException);
+                            string appleErrorDetails =
+                                GetDetailedExceptionMessage(appleException);
+
+                            WriteToFile(
+                                "   Apple communication processing error" +
+                                " - Details : " + appleErrorDetails);
+
+                            mailboxErrors.Add(
+                                new Exception(
+                                    "Apple communication processing : " +
+                                    appleErrorDetails,
+                                    appleException));
+
+                            if (!(appleException is
+                                TechnicalAlertAlreadySentException))
+                            {
+                                SendTechnicalIssueMail(
+                                    nameof(Transfert_de_mail_communications_APPLE),
+                                    appleErrorDetails,
+                                    "APPLE COMMUNICATION");
+                            }
                         }
 
                         if (mailboxErrors.Count > 0)
@@ -306,6 +326,18 @@ namespace APPLE_EMAILS_MANAGEMENT_FR
                                 mailboxErrors.Count +
                                 " technical error(s). Errors were logged and " +
                                 "alerted without stopping the IMCA action.");
+
+                            for (int errorIndex = 0;
+                                 errorIndex < mailboxErrors.Count;
+                                 errorIndex++)
+                            {
+                                WriteToFile(
+                                    "       Technical error " +
+                                    (errorIndex + 1) + "/" +
+                                    mailboxErrors.Count + " - " +
+                                    GetDetailedExceptionMessage(
+                                        mailboxErrors[errorIndex]));
+                            }
                         }
                         else
                         {
@@ -438,7 +470,7 @@ namespace APPLE_EMAILS_MANAGEMENT_FR
                 {
                     WriteToFile(
                         "       Error processing email : " +
-                        ex.Message);
+                        GetDetailedExceptionMessage(ex));
 
                     if (!(ex is
                         TechnicalAlertAlreadySentException))
@@ -462,7 +494,8 @@ namespace APPLE_EMAILS_MANAGEMENT_FR
                     {
                         WriteToFile(
                             "       Error moving email to Erreur " +
-                            "folder : " + moveException.Message);
+                            "folder : " +
+                            GetDetailedExceptionMessage(moveException));
                     }
                 }
             }
@@ -764,7 +797,6 @@ WHERE EwsID COLLATE Latin1_General_CS_AS = @EWSID AND id_mailboxe = @ID;";
                 " - Group : " + mail.AffecteA + " - Initial status : " + mail.StatutEnvoi);
             try
             {
-                UpdateAppleValue(mail.Id, "top_a_envoyer", "P");
                 List<string> contacts = GetAppleContacts(mail.AffecteA);
                 if (contacts.Count == 0)
                     throw new InvalidOperationException("No Apple contact found for group : " + mail.AffecteA);
@@ -826,6 +858,11 @@ WHERE EwsID COLLATE Latin1_General_CS_AS = @EWSID AND id_mailboxe = @ID;";
             {
                 try { UpdateAppleValue(mail.Id, "top_a_envoyer", "R"); } catch { }
                 string details = GetDetailedExceptionMessage(ex);
+                WriteToFile(
+                    "   Apple communication failed" +
+                    " - Apple mail ID : " + mail.Id +
+                    " - Group : " + mail.AffecteA +
+                    " - Details : " + details);
                 SendTechnicalIssueMail(nameof(Transfert_de_mail_communications_APPLE),
                     "Apple mail ID " + mail.Id + " - " + details, "APPLE");
                 throw new TechnicalAlertAlreadySentException(
@@ -871,23 +908,58 @@ WHERE EwsID COLLATE Latin1_General_CS_AS = @EWSID AND id_mailboxe = @ID;";
         private AppleMailToSend GetNextAppleMailToSend()
         {
             const string sql = @"
-SELECT TOP (1) c.id,ISNULL(c.sujet,'') sujet,ISNULL(c.body,'') body,
-       ISNULL(c.affecte_a,'') affecte_a,ISNULL(c.envoyer_a,'') envoyer_a,
-       ISNULL(c.top_a_envoyer,'') top_a_envoyer,c.fichier
-FROM dbo.T_contenu_email c WITH (UPDLOCK,READPAST)
-WHERE c.id_mailboxe=@ID_MAILBOXE
-  AND c.top_a_envoyer IN ('O','R')
-  AND NULLIF(LTRIM(RTRIM(c.affecte_a)),'') IS NOT NULL
-ORDER BY CASE WHEN c.top_a_envoyer='R' THEN 0 ELSE 1 END,c.id;";
-            using (SqlConnection con = new SqlConnection(sql_connexion))
-            using (SqlCommand cmd = new SqlCommand(sql, con))
+;WITH NextAppleMail AS
+(
+    SELECT TOP (1)
+           c.id,
+           c.sujet,
+           c.body,
+           c.affecte_a,
+           c.envoyer_a,
+           c.top_a_envoyer,
+           c.fichier
+    FROM dbo.T_contenu_email c
+    WHERE c.id_mailboxe = @ID_MAILBOXE
+      AND c.top_a_envoyer IN ('O', 'R')
+      AND NULLIF(LTRIM(RTRIM(c.affecte_a)), '') IS NOT NULL
+    ORDER BY
+        CASE
+            WHEN c.top_a_envoyer = 'R' THEN 0
+            ELSE 1
+        END,
+        c.id
+)
+UPDATE NextAppleMail
+SET top_a_envoyer = 'P'
+OUTPUT
+    inserted.id,
+    ISNULL(inserted.sujet, '') AS sujet,
+    ISNULL(inserted.body, '') AS body,
+    ISNULL(inserted.affecte_a, '') AS affecte_a,
+    ISNULL(inserted.envoyer_a, '') AS envoyer_a,
+    ISNULL(inserted.top_a_envoyer, '') AS top_a_envoyer,
+    inserted.fichier;";
+
+            using (SqlConnection connection =
+                new SqlConnection(sql_connexion))
+            using (SqlCommand command =
+                new SqlCommand(sql, connection))
             {
-                cmd.CommandTimeout = 300;
-                cmd.Parameters.Add("@ID_MAILBOXE", SqlDbType.Int).Value = id_mailboxe;
-                con.Open();
-                using (SqlDataReader reader = cmd.ExecuteReader(CommandBehavior.SingleRow))
+                command.CommandTimeout = 300;
+                command.Parameters.Add(
+                    "@ID_MAILBOXE",
+                    SqlDbType.Int).Value = id_mailboxe;
+
+                connection.Open();
+
+                using (SqlDataReader reader =
+                    command.ExecuteReader(CommandBehavior.SingleRow))
                 {
-                    if (!reader.Read()) return null;
+                    if (!reader.Read())
+                    {
+                        return null;
+                    }
+
                     return new AppleMailToSend
                     {
                         Id = Convert.ToInt32(reader["id"]),
@@ -895,8 +967,11 @@ ORDER BY CASE WHEN c.top_a_envoyer='R' THEN 0 ELSE 1 END,c.id;";
                         Body = Convert.ToString(reader["body"]),
                         AffecteA = Convert.ToString(reader["affecte_a"]),
                         EnvoyerA = Convert.ToString(reader["envoyer_a"]),
-                        StatutEnvoi = Convert.ToString(reader["top_a_envoyer"]),
-                        Fichier = reader["fichier"] == DBNull.Value ? null : (byte[])reader["fichier"]
+                        StatutEnvoi = Convert.ToString(
+                            reader["top_a_envoyer"]),
+                        Fichier = reader["fichier"] == DBNull.Value
+                            ? null
+                            : (byte[])reader["fichier"]
                     };
                 }
             }
@@ -1020,9 +1095,13 @@ ISNULL(date_dernier_raf,'19000101') date_dernier_raf,
 ISNULL(is_integration_auto,0) is_integration_auto,
 ISNULL(typologie,'') typologie
 FROM dbo.T_SharedMailboxes
-WHERE actif=1
-AND LOWER(LTRIM(RTRIM(mailboxe))) NOT IN
-('fr_aging_report@ingrammicro.com','marketplace_data_fr@ingrammicro.com')
+WHERE actif = 1
+  AND
+  (
+      UPPER(LTRIM(RTRIM(ISNULL(typologie, '')))) = 'APPLE'
+      OR LOWER(LTRIM(RTRIM(ISNULL(mailboxe, '')))) =
+         'fr_compubase@ingrammicro.com'
+  )
 ORDER BY ordre;";
             return ExecuteMailboxQuery(sql);
         }
