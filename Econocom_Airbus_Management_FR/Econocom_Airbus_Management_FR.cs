@@ -2248,6 +2248,27 @@ WHERE po.id_fichier=@FILE;";
                         continue;
                     }
                     email = GetMessage(mailbox.Address, summary.Id);
+
+                    // Ignore automatic replies before sender configuration and CSV validation.
+                    // The message is marked as processed and archived without generating an alert.
+                    if (IsAutomaticReply(email))
+                    {
+                        WriteLog(
+                            "       Automatic reply ignored" +
+                            " - Mailbox : " + mailbox.Address +
+                            " - Subject : " + (email.Subject ?? "<no subject>") +
+                            " - Sender : " + GetSender(email));
+
+                        MarkProcessed(
+                            mailbox.Address,
+                            email.Id);
+                        Move(
+                            mailbox.Address,
+                            email.Id,
+                            archives.Id);
+                        continue;
+                    }
+
                     ClientImportConfiguration clientConfiguration =
                         GetClientImportConfiguration(
                             GetSender(email));
@@ -3183,7 +3204,7 @@ VALUES(@M,@G,'E','TECHNICAL',@E,1);", P("@M", SqlDbType.NVarChar, mailbox, 320),
         }
         private Message GetMessage(string mailbox, string id) => Retry(() => graph.Users[mailbox].Messages[id].GetAsync(c => {
             Header(c.Headers); c.QueryParameters.Select =
-            new[] { "id", "subject", "receivedDateTime", "from", "sender", "internetMessageId", "hasAttachments" };
+            new[] { "id", "subject", "receivedDateTime", "from", "sender", "internetMessageId", "hasAttachments", "internetMessageHeaders" };
         }).GetAwaiter().GetResult(), "message");
         private byte[] GetMime(string mailbox, string id) { using (Stream i = Retry(() => graph.Users[mailbox].Messages[id].Content.GetAsync(c => Header(c.Headers)).GetAwaiter().GetResult(), "mime")) using (var o = new MemoryStream()) { i.CopyTo(o); return o.ToArray(); } }
         private void MarkProcessed(string mailbox, string id) => Retry(() => {
@@ -3465,8 +3486,8 @@ VALUES(@M,@G,'E','TECHNICAL',@E,1);", P("@M", SqlDbType.NVarChar, mailbox, 320),
                                     Sender = sender,
                                     Body = new ItemBody
                                     {
-                                        ContentType = BodyType.Text,
-                                        Content = text
+                                        ContentType = BodyType.Html,
+                                        Content = BuildAlertHtmlContent(text)
                                     },
                                     ToRecipients = recipients
                                 },
@@ -3481,6 +3502,22 @@ VALUES(@M,@G,'E','TECHNICAL',@E,1);", P("@M", SqlDbType.NVarChar, mailbox, 320),
                 WriteLog(
                     "Alert error: " + Details(ex));
             }
+        }
+
+        private static string BuildAlertHtmlContent(string text)
+        {
+            string encodedText = WebUtility.HtmlEncode(text ?? "")
+                .Replace("\r\n", "<br />")
+                .Replace("\n", "<br />")
+                .Replace("\r", "<br />");
+
+            return
+                "<html>" +
+                "<body style=\"font-family:Arial,sans-serif;" +
+                "font-size:11pt;color:#000000;\">" +
+                "<div>" + encodedText + "</div>" +
+                "</body>" +
+                "</html>";
         }
 
         private static string ValidateHttpUrl(string value, string name) { string u = (value ?? "").Trim(); if (!Uri.TryCreate(u, UriKind.Absolute, out Uri uri) || (uri.Scheme != "https" && uri.Scheme != "http")) throw new InvalidOperationException("Invalid URL configured for " + name); return uri.AbsoluteUri; }
@@ -3518,6 +3555,87 @@ VALUES(@M,@G,'E','TECHNICAL',@E,1);", P("@M", SqlDbType.NVarChar, mailbox, 320),
         private DateTime ParseStartDate() => DateTime.TryParseExact(startDateScan, "yyyyMMdd", CultureInfo.InvariantCulture, DateTimeStyles.None, out DateTime d) ? d : new DateTime(1900, 1, 1);
         private static int ParseInt(string v, int f) => int.TryParse(v, out int n) && n > 0 ? n : f;
         private static List<Recipient> Recipients(string v) => (v ?? "").Split(new[] { ';', ',' }, StringSplitOptions.RemoveEmptyEntries).Select(x => x.Trim()).Where(x => Regex.IsMatch(x, @"^[^\s@]+@[^\s@]+\.[^\s@]+$")).Distinct(StringComparer.OrdinalIgnoreCase).Select(x => new Recipient { EmailAddress = new EmailAddress { Address = x } }).ToList();
+        /// <summary>
+        /// Detects automatic replies and out-of-office messages.
+        /// Internet headers are checked first; the subject is used as a fallback.
+        /// </summary>
+        private static bool IsAutomaticReply(Message email)
+        {
+            if (email == null)
+            {
+                return false;
+            }
+
+            if (email.InternetMessageHeaders != null)
+            {
+                foreach (InternetMessageHeader header in email.InternetMessageHeaders)
+                {
+                    string headerName = (header.Name ?? "").Trim();
+                    string headerValue = (header.Value ?? "").Trim();
+
+                    if (headerName.Equals(
+                            "Auto-Submitted",
+                            StringComparison.OrdinalIgnoreCase) &&
+                        !headerValue.Equals(
+                            "no",
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        return true;
+                    }
+
+                    if (headerName.Equals(
+                            "X-Autoreply",
+                            StringComparison.OrdinalIgnoreCase) ||
+                        headerName.Equals(
+                            "X-Auto-Response-Suppress",
+                            StringComparison.OrdinalIgnoreCase) ||
+                        headerName.Equals(
+                            "X-Autorespond",
+                            StringComparison.OrdinalIgnoreCase) ||
+                        headerName.Equals(
+                            "X-Autoresponder",
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        return true;
+                    }
+
+                    if (headerName.Equals(
+                            "Precedence",
+                            StringComparison.OrdinalIgnoreCase) &&
+                        (headerValue.Equals(
+                             "auto_reply",
+                             StringComparison.OrdinalIgnoreCase) ||
+                         headerValue.Equals(
+                             "auto-reply",
+                             StringComparison.OrdinalIgnoreCase)))
+                    {
+                        return true;
+                    }
+                }
+            }
+
+            string subject = (email.Subject ?? "").Trim();
+            string[] automaticReplySubjects =
+            {
+                "réponse automatique",
+                "reponse automatique",
+                "automatic reply",
+                "auto reply",
+                "out of office",
+                "hors du bureau",
+                "absence du bureau",
+                "abwesenheitsnotiz",
+                "risposta automatica",
+                "respuesta automática",
+                "respuesta automatica"
+            };
+
+            return automaticReplySubjects.Any(value =>
+                subject.IndexOf(
+                    value,
+                    StringComparison.OrdinalIgnoreCase) >= 0);
+        }
+
         private static string GetSender(Message m) => m?.From?.EmailAddress?.Address ?? m?.Sender?.EmailAddress?.Address ?? "";
         private static string Truncate(string v, int n) { v = v ?? ""; return v.Length <= n ? v : v.Substring(0, n); }
         private static bool IsTrue(string v) => string.Equals(v?.Trim(), "TRUE", StringComparison.OrdinalIgnoreCase);

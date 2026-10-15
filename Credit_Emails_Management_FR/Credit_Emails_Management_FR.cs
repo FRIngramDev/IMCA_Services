@@ -1795,21 +1795,17 @@ WHERE MailboxId = @MAILBOX_ID
                 "       ScoreFraud email(s) found for processing : " +
                 messages.Count);
 
-            DateTime? latest = null;
+            DateTime? latestHandled = null;
             int archived = 0;
             int deleted = 0;
             int xmlFiles = 0;
+            int postponed = 0;
             int errors = 0;
 
             foreach (Message summary in messages)
             {
                 DateTime receptionDate =
                     summary.ReceivedDateTime?.LocalDateTime ?? DateTime.Now;
-
-                if (!latest.HasValue || receptionDate > latest.Value)
-                {
-                    latest = receptionDate;
-                }
 
                 try
                 {
@@ -1837,7 +1833,7 @@ WHERE MailboxId = @MAILBOX_ID
                     {
                         string attachmentName = attachment?.Name ?? "";
 
-                        // Comportement historique : recherche de la chaîne
+                        // Comportement historique : recherche de la chaine
                         // .CSV ou .XML dans le nom, sans exiger que ce soit
                         // l'extension finale.
                         if (attachmentName.IndexOf(
@@ -1865,7 +1861,6 @@ WHERE MailboxId = @MAILBOX_ID
 
                             string safeAttachmentName =
                                 CleanFileName(attachmentName);
-
                             string workingXmlPath =
                                 Path.Combine(
                                     tempFolder,
@@ -1897,7 +1892,7 @@ WHERE MailboxId = @MAILBOX_ID
 
                     if (containsCsv)
                     {
-                        // Équivalent Graph du DeleteMode.HardDelete historique.
+                        // Equivalent Graph du DeleteMode.HardDelete historique.
                         PermanentlyDeleteMessage(email.Id);
                         deleted++;
 
@@ -1907,7 +1902,7 @@ WHERE MailboxId = @MAILBOX_ID
                     }
                     else
                     {
-                        // Comportement historique : lecture puis déplacement
+                        // Comportement historique : lecture puis deplacement
                         // dans le dossier Archives.
                         MarkMessageAsReadAndMove(
                             email.Id,
@@ -1922,6 +1917,20 @@ WHERE MailboxId = @MAILBOX_ID
                             messageXmlFiles);
                     }
 
+                    if (!latestHandled.HasValue ||
+                        receptionDate > latestHandled.Value)
+                    {
+                        latestHandled = receptionDate;
+                    }
+                }
+                catch (ScoreFraudDssCopyNotReadyException)
+                {
+                    postponed++;
+
+                    WriteLog(
+                        "       ScoreFraud email processing postponed" +
+                        " - Message remains unread in Inbox" +
+                        " - No technical alert sent");
                 }
                 catch (Exception ex)
                 {
@@ -1948,9 +1957,28 @@ WHERE MailboxId = @MAILBOX_ID
                 " - Archived : " + archived +
                 " - Permanently deleted : " + deleted +
                 " - XML files saved : " + xmlFiles +
+                " - Postponed : " + postponed +
                 " - Errors : " + errors);
 
-            return latest;
+            if (postponed > 0)
+            {
+                WriteLog(
+                    "       ScoreFraud mailbox cursor not updated" +
+                    " - Postponed message(s) : " + postponed +
+                    " - Processing will be retried automatically");
+
+                return null;
+            }
+
+            return latestHandled;
+        }
+
+        private sealed class ScoreFraudDssCopyNotReadyException : Exception
+        {
+            public ScoreFraudDssCopyNotReadyException(string message)
+                : base(message)
+            {
+            }
         }
 
         private string TraitementFichiersXmlNew(string fullPath, string fileName, DateTime graphReceptionDate)
@@ -1958,6 +1986,31 @@ WHERE MailboxId = @MAILBOX_ID
             if (string.IsNullOrWhiteSpace(fullPath) || !File.Exists(fullPath)) throw new FileNotFoundException("ScoreFraud XML file not found", fullPath);
             if (string.IsNullOrWhiteSpace(uri_webservice)) throw new InvalidOperationException("uri_webservice is empty");
             if (string.IsNullOrWhiteSpace(dss_con_openrowset)) throw new InvalidOperationException("dss_con_openrowset is empty");
+            if (string.IsNullOrWhiteSpace(sql_dss_copie)) throw new InvalidOperationException("sql_dss_copie is empty");
+
+            DateTime? oldestDssUpdate;
+            string dssUpdateDetails;
+            if (!AreScoreFraudDssCopyTablesUpdatedToday(
+                    out oldestDssUpdate,
+                    out dssUpdateDetails))
+            {
+                WriteLog(
+                    "       ScoreFraud XML processing postponed" +
+                    " - DSS copy source table(s) are not updated today");
+
+                WriteLog(
+                    "           Details : " +
+                    dssUpdateDetails);
+
+                throw new ScoreFraudDssCopyNotReadyException(
+                    "ScoreFraud XML processing is waiting for DSS copy tables.");
+            }
+
+            WriteLog(
+                "       ScoreFraud DSS copy source tables validated" +
+                " - Oldest update : " +
+                oldestDssUpdate.Value.ToString("dd/MM/yyyy HH:mm:ss") +
+                " - Details : " + dssUpdateDetails);
 
             string period = ExtractHistoricalScoreFraudPeriod(fileName);
             DateTime archiveDate = DateTime.Now;
@@ -2108,8 +2161,56 @@ WHERE MailboxId = @MAILBOX_ID
                 @"UPDATE T_messages_ORT_TRANSFERT_CAPGEMINI SET pole_analyse = 'IA',personne_affectee='14'  WHERE date_reception Is null AND  top_selection='1' AND (cast(new_cotation as integer) BETWEEN 1 and 5 OR new_cotation ='NA') AND exists (select dss.branch_customer_nbr from openrowset('SQLOLEDB', {OPENROWSET}, 'Select branch_customer_nbr FROM  customer where analyst_risk in (''APP'',''CS2'')') dss where dss.branch_customer_nbr=T_messages_ORT_TRANSFERT_CAPGEMINI.client)",
                 @"UPDATE T_messages_ORT_TRANSFERT_CAPGEMINI SET pole_analyse = 'GLOBAL',personne_affectee='99'  WHERE date_reception Is null AND  top_selection='1' AND (cast(new_cotation as integer) BETWEEN 1 and 5 OR new_cotation ='NA') AND exists (select dss.branch_customer_nbr from openrowset('SQLOLEDB', {OPENROWSET}, 'Select branch_customer_nbr FROM  customer where analyst_risk not in (''CAP'',''CDC'',''MOO'',''APP'',''CS2'',''CS1'',''RET'',''KEY'',''PAN'',''COM'',''PER'')') dss where dss.branch_customer_nbr=T_messages_ORT_TRANSFERT_CAPGEMINI.client)"
                 };
-                foreach (string historicalQuery in historicalQueries)
-                    ExecuteHistoricalSql(connection, historicalQuery.Replace("{OPENROWSET}", dss_con_openrowset));
+                for (int queryIndex = 0;
+                     queryIndex < historicalQueries.Length;
+                     queryIndex++)
+                {
+                    string historicalQuery = historicalQueries[queryIndex]
+                        .Replace("{OPENROWSET}", dss_con_openrowset);
+                    string queryPreview = Truncate(
+                        Regex.Replace(historicalQuery, @"\s+", " ").Trim(),
+                        300);
+                    DateTime queryStartedAt = DateTime.Now;
+
+
+                    try
+                    {
+                        ExecuteHistoricalSql(connection, historicalQuery);
+
+                        WriteLog(
+                            "       ScoreFraud historical SQL query completed" +
+                            " - Query : " + (queryIndex + 1) +
+                            "/" + historicalQueries.Length +
+                            " - Duration : " +
+                            Math.Round(
+                                (DateTime.Now - queryStartedAt)
+                                    .TotalMilliseconds) +
+                            " ms");
+                    }
+                    catch (Exception ex)
+                    {
+                        WriteLog(
+                            "       ScoreFraud historical SQL query failed" +
+                            " - Query : " + (queryIndex + 1) +
+                            "/" + historicalQueries.Length +
+                            " - Duration : " +
+                            Math.Round(
+                                (DateTime.Now - queryStartedAt)
+                                    .TotalMilliseconds) +
+                            " ms" +
+                            " - SQL : " +
+                            Truncate(
+                                Regex.Replace(
+                                    historicalQuery,
+                                    @"\s+",
+                                    " ").Trim(),
+                                1000) +
+                            " - Error : " +
+                            GetDetailedExceptionMessage(ex));
+
+                        throw;
+                    }
+                }
                 ApplyHistoricalSmbRoundRobin(connection);
                 ExecuteHistoricalSql(connection, "UPDATE dbo.T_messages_ORT SET date_reception=@P WHERE date_reception IS NULL; UPDATE dbo.T_messages_ORT_TRANSFERT_CAPGEMINI SET date_reception=@P WHERE date_reception IS NULL;", new SqlParameter("@P", SqlDbType.Char, 8) { Value = period });
                 string month = archiveDate.ToString("yyyyMM", CultureInfo.InvariantCulture);
@@ -2120,6 +2221,83 @@ WHERE MailboxId = @MAILBOX_ID
                 File.Move(fullPath, archivePath);
                 return archivePath;
             }
+        }
+
+        private bool AreScoreFraudDssCopyTablesUpdatedToday(
+            out DateTime? oldestUpdate,
+            out string details)
+        {
+            oldestUpdate = null;
+            details = "";
+
+            string[] requiredTables =
+            {
+                "customer",
+                "customer_location"
+            };
+
+            var tableDetails = new List<string>();
+            bool allUpdatedToday = true;
+
+            foreach (string tableName in requiredTables)
+            {
+                DataTable table = FillDataTable(
+                    sql_dss_copie,
+                    @"SELECT TOP (1)
+                             id_table,
+                             table_name,
+                             date_maj,
+                             id_statut,
+                             ISNULL(cmt,'') AS cmt
+                      FROM dbo.t_maj_tables
+                      WHERE table_name=@TABLE_NAME
+                        AND actif=1
+                      ORDER BY date_maj DESC,id_table DESC;",
+                    new SqlParameter("@TABLE_NAME", SqlDbType.NVarChar, 255)
+                    {
+                        Value = tableName
+                    });
+
+                if (table.Rows.Count == 0)
+                {
+                    allUpdatedToday = false;
+                    tableDetails.Add(
+                        tableName + " : no active t_maj_tables row found");
+                    continue;
+                }
+
+                DataRow row = table.Rows[0];
+                if (row["date_maj"] == DBNull.Value)
+                {
+                    allUpdatedToday = false;
+                    tableDetails.Add(
+                        tableName +
+                        " : date_maj is NULL" +
+                        " - ID : " + Convert.ToString(row["id_table"]) +
+                        " - Status : " + Convert.ToString(row["id_statut"]) +
+                        " - Comment : " + Convert.ToString(row["cmt"]));
+                    continue;
+                }
+
+                DateTime dateMaj = Convert.ToDateTime(row["date_maj"]);
+                if (!oldestUpdate.HasValue || dateMaj < oldestUpdate.Value)
+                    oldestUpdate = dateMaj;
+
+                bool updatedToday = dateMaj.Date == DateTime.Today;
+                if (!updatedToday)
+                    allUpdatedToday = false;
+
+                tableDetails.Add(
+                    tableName +
+                    " : " + (updatedToday ? "OK" : "NOT UPDATED TODAY") +
+                    " - ID : " + Convert.ToString(row["id_table"]) +
+                    " - Date : " + dateMaj.ToString("dd/MM/yyyy HH:mm:ss") +
+                    " - Status : " + Convert.ToString(row["id_statut"]) +
+                    " - Comment : " + Convert.ToString(row["cmt"]));
+            }
+
+            details = string.Join(" | ", tableDetails);
+            return allUpdatedToday && oldestUpdate.HasValue;
         }
 
         private static string ExtractHistoricalScoreFraudPeriod(string fileName)
@@ -6911,27 +7089,573 @@ ORDER BY q.id;";
 
         private string CreateDetailedOpeningReport(DateTime lastReport)
         {
-            string source = SafeResourcePath("modele_calendrier_jour_ferie.xlsx"); string output = Path.Combine(tempFolder, DateTime.Now.ToString("yyyyMMdd_HHmmss") + "_detail_ouverture_compte.xlsx"); File.Copy(source, output, true);
-            DataTable data = FillDataTable(sql_creation_compte, BuildDetailedReportSql(), new SqlParameter("@LAST_REPORT", SqlDbType.DateTime2) { Value = lastReport });
-            InsertDetailedStats(data, lastReport);
-            using (var wb = new XLWorkbook(output))
+            string source = SafeResourcePath("modele_calendrier_jour_ferie.xlsx");
+            string output = Path.Combine(
+                tempFolder,
+                DateTime.Now.ToString("yyyyMMdd_HHmmss", CultureInfo.InvariantCulture) +
+                "_detail_ouverture_compte.xlsx");
+            File.Copy(source, output, true);
+
+            DataTable data = FillDataTable(
+                sql_creation_compte,
+                BuildDetailedReportSql(),
+                new SqlParameter("@LAST_REPORT", SqlDbType.DateTime2) { Value = lastReport });
+
+            DataTable received = FillDataTable(
+                sql_creation_compte,
+                BuildReceivedOpeningReportSql(),
+                new SqlParameter("@LAST_REPORT", SqlDbType.DateTime2) { Value = lastReport });
+
+            using (var workbook = new XLWorkbook(output))
             {
-                IXLWorksheet result = wb.Worksheets.FirstOrDefault(x => x.Name.Equals("resultat", StringComparison.OrdinalIgnoreCase)) ?? wb.AddWorksheet("resultat"); result.Clear(); result.Cell(1, 1).InsertTable(data, false);
-                IXLWorksheet settings = wb.Worksheet("ne pas modifier"); settings.Cell("E2").Value = DateTime.Now.Year; TimeSpan start = ReadTime(settings, "B2", new TimeSpan(9, 0, 0)), end = ReadTime(settings, "B3", new TimeSpan(18, 0, 0)); HashSet<DateTime> holidays = FrenchHolidays(data.AsEnumerable().SelectMany(r => new[] { AsNullableDate(r, "Date_integration_intranet"), AsNullableDate(r, "Date") }).Where(d => d.HasValue).Select(d => d.Value.Year));
-                for (int i = 0; i < data.Rows.Count; i++) { DataRow r = data.Rows[i]; DateTime? begin = AsNullableDate(r, "Date_integration_intranet"), finish = AsNullableDate(r, "Date"), phoneBegin = AsNullableDate(r, "Date de passage par statut 13 A relancer par téléphone"), phoneEnd = AsNullableDate(r, "Date de passage par statut 14 A créer"); double total = BusinessSeconds(begin, finish, start, end, holidays), phone = BusinessSeconds(phoneBegin, phoneEnd, start, end, holidays), net = Math.Max(0, total - phone); result.Cell(i + 2, 15).Value = TimeSpan.FromSeconds(net); result.Cell(i + 2, 16).Value = TimeSpan.FromSeconds(total); UpdateStatsBusinessDelay(Convert.ToInt32(r["idDossier"]), lastReport, Convert.ToInt32(Math.Round(net))); }
-                result.Column(15).Style.NumberFormat.Format = "[h]:mm:ss"; result.Column(16).Style.NumberFormat.Format = "[h]:mm:ss"; wb.Save();
+                DeleteWorksheetIfExists(workbook, "resultat");
+                DeleteWorksheetIfExists(workbook, "tcd");
+                DeleteWorksheetIfExists(workbook, "Dossiers enregistrés sem prec");
+                DeleteWorksheetIfExists(workbook, "tcd2");
+
+                IXLWorksheet result = workbook.AddWorksheet("resultat");
+                result.Cell(1, 1).InsertTable(data, "ResultatOuverture", true);
+
+                IXLWorksheet settings = workbook.Worksheet("ne pas modifier");
+                settings.Cell("E2").Value = DateTime.Now.Year;
+                TimeSpan workingStart = ReadTime(settings, "B2", new TimeSpan(9, 0, 0));
+                TimeSpan workingEnd = ReadTime(settings, "B3", new TimeSpan(18, 0, 0));
+                HashSet<DateTime> holidays = FrenchHolidays(
+                    data.AsEnumerable()
+                        .SelectMany(row => new[]
+                        {
+                            AsNullableDate(row, "Date_integration_intranet"),
+                            AsNullableDate(row, "Date")
+                        })
+                        .Where(date => date.HasValue)
+                        .Select(date => date.Value.Year));
+
+                for (int index = 0; index < data.Rows.Count; index++)
+                {
+                    DataRow row = data.Rows[index];
+                    DateTime? begin = AsNullableDate(row, "Date_integration_intranet");
+                    DateTime? finish = AsNullableDate(row, "Date");
+                    DateTime? phoneBegin = AsNullableDate(
+                        row,
+                        "Date de passage par statut 13 A relancer par téléphone");
+                    DateTime? phoneEnd = AsNullableDate(
+                        row,
+                        "Date de passage par statut 14 A créer");
+
+                    double totalSeconds = BusinessSeconds(
+                        begin, finish, workingStart, workingEnd, holidays);
+                    double phoneSeconds = BusinessSeconds(
+                        phoneBegin, phoneEnd, workingStart, workingEnd, holidays);
+                    int netSeconds = Convert.ToInt32(
+                        Math.Round(Math.Max(0, totalSeconds - phoneSeconds)));
+
+                    row["delai traitement en heure déduction faite du temps de relance tel"] =
+                        netSeconds;
+                    result.Cell(index + 2, 15).Value = TimeSpan.FromSeconds(netSeconds);
+                    result.Cell(index + 2, 16).Value = TimeSpan.FromSeconds(totalSeconds);
+                }
+
+                result.Cell(1, 16).Value =
+                    "Délai de traitement total hors Nuit/Week-end/Jour Férié";
+                result.Columns(4, 4).Style.DateFormat.Format = "dd/MM/yyyy HH:mm:ss";
+                result.Columns(7, 7).Style.DateFormat.Format = "dd/MM/yyyy HH:mm:ss";
+                result.Columns(9, 9).Style.DateFormat.Format = "dd/MM/yyyy HH:mm:ss";
+                result.Columns(12, 13).Style.DateFormat.Format = "dd/MM/yyyy HH:mm:ss";
+                result.Columns(15, 16).Style.NumberFormat.Format = "[h]:mm:ss";
+                StyleDetailWorksheet(result);
+
+                IXLWorksheet receivedSheet =
+                    workbook.AddWorksheet("Dossiers enregistrés sem prec");
+                receivedSheet.Cell(1, 1).InsertTable(
+                    received,
+                    "DossiersEnregistresSemainePrecedente",
+                    true);
+                receivedSheet.Columns(4, 4).Style.DateFormat.Format = "dd/MM/yyyy HH:mm:ss";
+                receivedSheet.Columns(7, 7).Style.DateFormat.Format = "dd/MM/yyyy HH:mm:ss";
+                receivedSheet.Columns(9, 9).Style.DateFormat.Format = "dd/MM/yyyy HH:mm:ss";
+                StyleDetailWorksheet(receivedSheet);
+
+                IXLWorksheet summary = workbook.AddWorksheet("tcd", 1);
+                WriteDetailedOpeningSummary(summary, data);
+
+                IXLWorksheet receivedSummary = workbook.AddWorksheet("tcd2");
+                WriteReceivedOpeningSummary(receivedSummary, received);
+
+                workbook.Save();
             }
+
+            InsertDetailedStats(data, lastReport);
+            WriteLog(
+                "       Detailed opening account workbook generated" +
+                " - Processed dossier(s) : " + data.Rows.Count +
+                " - Received dossier(s) : " + received.Rows.Count +
+                " - File : " + output);
             return output;
         }
 
-        private static string BuildDetailedReportSql() { return @"SELECT s.idDossier,s.idStatut,l.LibelleStatut,s.Date,c.id_type_customer,t.libel_type_customer,c.Date_integration_intranet,DATEDIFF(hour,c.Date_integration_intranet,s.Date) delai_traitement_en_heure,CAST(NULL AS datetime) [Date passage par statut incomplet],CAST(NULL AS int) [delai entre l'enregistrement et passage en incomplet],CAST(NULL AS int) [delai entre passage en incomplet et dernier statut connu],h13.d [Date de passage par statut 13 A relancer par téléphone],h14.d [Date de passage par statut 14 A créer],DATEDIFF(hour,h13.d,h14.d) [delai de passage entre le statut  13 a relancer par téléphone et le statut 14 à créer],CAST(NULL AS int) [delai traitement en heure déduction faite du temps de relance tel] FROM dbo.T_Statut s JOIN dbo.T_customer c ON c.id=s.idDossier JOIN dbo.T_type_customer t ON t.id_type_customer=c.id_type_customer JOIN dbo.T_Libelle_Statut l ON l.IdStatut=s.idStatut OUTER APPLY(SELECT MIN(Date) d FROM dbo.T_historique WHERE idDossier=s.idDossier AND idStatut=13) h13 OUTER APPLY(SELECT MIN(Date) d FROM dbo.T_historique WHERE idDossier=s.idDossier AND idStatut=14) h14 WHERE s.Date>@LAST_REPORT ORDER BY s.idDossier;"; }
-        private static DateTime? AsNullableDate(DataRow r, string c) { return !r.Table.Columns.Contains(c) || r[c] == DBNull.Value ? (DateTime?)null : Convert.ToDateTime(r[c]); }
-        private static TimeSpan ReadTime(IXLWorksheet ws, string cell, TimeSpan fallback) { try { object v = ws.Cell(cell).Value; if (v is TimeSpan) return (TimeSpan)v; if (v is DateTime) return ((DateTime)v).TimeOfDay; if (TimeSpan.TryParse(Convert.ToString(v), out TimeSpan parsed)) return parsed; } catch { } return fallback; }
-        private static double BusinessSeconds(DateTime? from, DateTime? to, TimeSpan start, TimeSpan end, HashSet<DateTime> holidays) { if (!from.HasValue || !to.HasValue || to <= from) return 0; double seconds = 0; for (DateTime d = from.Value.Date; d <= to.Value.Date; d = d.AddDays(1)) { if (d.DayOfWeek == DayOfWeek.Saturday || d.DayOfWeek == DayOfWeek.Sunday || holidays.Contains(d)) continue; DateTime a = d + start, b = d + end, left = from.Value > a ? from.Value : a, right = to.Value < b ? to.Value : b; if (right > left) seconds += (right - left).TotalSeconds; } return seconds; }
-        private static HashSet<DateTime> FrenchHolidays(IEnumerable<int> years) { var h = new HashSet<DateTime>(); foreach (int y in years.Distinct()) { DateTime easter = EasterSunday(y); foreach (DateTime d in new[] { new DateTime(y, 1, 1), easter.AddDays(1), new DateTime(y, 5, 1), new DateTime(y, 5, 8), easter.AddDays(39), easter.AddDays(50), new DateTime(y, 7, 14), new DateTime(y, 8, 15), new DateTime(y, 11, 1), new DateTime(y, 11, 11), new DateTime(y, 12, 25) }) h.Add(d.Date); } return h; }
-        private static DateTime EasterSunday(int year) { int a = year % 19, b = year / 100, c = year % 100, d = b / 4, e = b % 4, f = (b + 8) / 25, g = (b - f + 1) / 3, h = (19 * a + b - d - g + 15) % 30, i = c / 4, k = c % 4, l = (32 + 2 * e + 2 * i - h - k) % 7, m = (a + 11 * h + 22 * l) / 451, month = (h + l - 7 * m + 114) / 31, day = (h + l - 7 * m + 114) % 31 + 1; return new DateTime(year, month, day); }
-        private void InsertDetailedStats(DataTable data, DateTime lastReport) { foreach (DataRow r in data.Rows) { ExecuteNonQuery(sql_creation_compte, @"IF NOT EXISTS(SELECT 1 FROM dbo.T_STATS_OUVERTURE_COMPTE WHERE idDossier=@ID AND annee=DATEPART(year,@D) AND num_sem=DATEPART(week,@D)) INSERT INTO dbo.T_STATS_OUVERTURE_COMPTE(idDossier,idStatut,LibelleStatut,[Date],id_type_customer,libel_type_customer,Date_integration_intranet,delai_traitement_en_heure,annee,num_sem) VALUES(@ID,@S,@L,@DATE,@T,@TL,@I,@H,DATEPART(year,@D),DATEPART(week,@D));", new SqlParameter("@ID", SqlDbType.Int) { Value = r["idDossier"] }, new SqlParameter("@S", SqlDbType.Int) { Value = r["idStatut"] }, new SqlParameter("@L", SqlDbType.NVarChar, 500) { Value = Convert.ToString(r["LibelleStatut"]) }, new SqlParameter("@DATE", SqlDbType.DateTime) { Value = r["Date"] }, new SqlParameter("@T", SqlDbType.Int) { Value = r["id_type_customer"] }, new SqlParameter("@TL", SqlDbType.NVarChar, 500) { Value = Convert.ToString(r["libel_type_customer"]) }, new SqlParameter("@I", SqlDbType.DateTime) { Value = r["Date_integration_intranet"] }, new SqlParameter("@H", SqlDbType.Int) { Value = r["delai_traitement_en_heure"] == DBNull.Value ? (object)DBNull.Value : r["delai_traitement_en_heure"] }, new SqlParameter("@D", SqlDbType.DateTime) { Value = lastReport }); } }
-        private void UpdateStatsBusinessDelay(int dossierId, DateTime period, int seconds) { ExecuteNonQuery(sql_creation_compte, "UPDATE dbo.T_STATS_OUVERTURE_COMPTE SET [delai traitement en heure déduction faite du temps de relance tel]=@S WHERE idDossier=@ID AND annee=DATEPART(year,@D) AND num_sem=DATEPART(week,@D);", new SqlParameter("@S", SqlDbType.Int) { Value = seconds }, new SqlParameter("@ID", SqlDbType.Int) { Value = dossierId }, new SqlParameter("@D", SqlDbType.DateTime) { Value = period }); }
+        private static string BuildDetailedReportSql()
+        {
+            return @"
+WITH IncompleteStatus AS
+(
+    SELECT idDossier,
+           MIN(DATEADD(second,
+               CASE WHEN temps_depuis_dernier_statut IS NULL
+                    THEN 0 ELSE -temps_depuis_dernier_statut END,
+               Date)) AS IncompleteDate
+    FROM dbo.T_historique
+    WHERE idStatut IN (1,3,4)
+    GROUP BY idDossier
+),
+Phone13 AS
+(
+    SELECT idDossier, MIN(StatusDate) AS StatusDate
+    FROM
+    (
+        SELECT idDossier,
+               MIN(DATEADD(second,
+                   CASE WHEN temps_depuis_dernier_statut IS NULL
+                        THEN 0 ELSE -temps_depuis_dernier_statut END,
+                   Date)) AS StatusDate
+        FROM dbo.T_historique
+        WHERE idStatut=13
+        GROUP BY idDossier
+        UNION ALL
+        SELECT idDossier, MIN(Date)
+        FROM dbo.T_Statut
+        WHERE idStatut=13
+        GROUP BY idDossier
+    ) source
+    GROUP BY idDossier
+),
+Phone14 AS
+(
+    SELECT idDossier, MIN(StatusDate) AS StatusDate
+    FROM
+    (
+        SELECT idDossier,
+               MIN(DATEADD(second,
+                   CASE WHEN temps_depuis_dernier_statut IS NULL
+                        THEN 0 ELSE -temps_depuis_dernier_statut END,
+                   Date)) AS StatusDate
+        FROM dbo.T_historique
+        WHERE idStatut=14
+        GROUP BY idDossier
+        UNION ALL
+        SELECT idDossier, MIN(Date)
+        FROM dbo.T_Statut
+        WHERE idStatut=14
+        GROUP BY idDossier
+    ) source
+    GROUP BY idDossier
+)
+SELECT s.idDossier,
+       s.idStatut,
+       l.LibelleStatut +
+       CASE
+           WHEN incomplete.IncompleteDate IS NULL THEN
+               CASE WHEN s.idStatut NOT IN (1,3,13)
+                    THEN ' (complet à la 1ère dde)' ELSE '' END
+           ELSE ' (incomplet)'
+       END AS LibelleStatut,
+       s.Date,
+       c.id_type_customer,
+       t.libel_type_customer,
+       c.Date_integration_intranet,
+       DATEDIFF(hour,c.Date_integration_intranet,s.Date)
+           AS delai_traitement_en_heure,
+       CASE
+           WHEN incomplete.IncompleteDate IS NULL THEN
+               CASE WHEN s.idStatut NOT IN (4,6,12,13,14)
+                    THEN s.Date ELSE NULL END
+           ELSE incomplete.IncompleteDate
+       END AS [Date passage par statut incomplet],
+       DATEDIFF(hour,c.Date_integration_intranet,
+           CASE
+               WHEN incomplete.IncompleteDate IS NULL THEN
+                   CASE WHEN s.idStatut IN (4,6,12,13,14)
+                        THEN c.Date_integration_intranet ELSE s.Date END
+               ELSE incomplete.IncompleteDate
+           END) AS [delai entre l'enregistrement et passage en incomplet],
+       DATEDIFF(hour,incomplete.IncompleteDate,s.Date)
+           AS [delai entre passage en incomplet et dernier statut connu],
+       phone13.StatusDate
+           AS [Date de passage par statut 13 A relancer par téléphone],
+       phone14.StatusDate
+           AS [Date de passage par statut 14 A créer],
+       DATEDIFF(hour,phone13.StatusDate,phone14.StatusDate)
+           AS [delai de passage entre le statut  13 a relancer par téléphone et le statut 14 à créer],
+       CAST(NULL AS int)
+           AS [delai traitement en heure déduction faite du temps de relance tel]
+FROM dbo.T_Statut AS s
+INNER JOIN dbo.T_customer AS c ON c.id=s.idDossier
+INNER JOIN dbo.T_type_customer AS t
+    ON t.id_type_customer=c.id_type_customer
+INNER JOIN dbo.T_Libelle_Statut AS l ON l.IdStatut=s.idStatut
+LEFT JOIN IncompleteStatus AS incomplete
+    ON incomplete.idDossier=s.idDossier
+LEFT JOIN Phone13 AS phone13 ON phone13.idDossier=s.idDossier
+LEFT JOIN Phone14 AS phone14 ON phone14.idDossier=s.idDossier
+WHERE s.Date>@LAST_REPORT
+ORDER BY s.idDossier;";
+        }
+
+        private static string BuildReceivedOpeningReportSql()
+        {
+            return @"
+WITH IncompleteStatus AS
+(
+    SELECT idDossier, MIN(Date) AS IncompleteDate
+    FROM dbo.T_historique
+    WHERE idStatut IN (1,3)
+    GROUP BY idDossier
+)
+SELECT s.idDossier,
+       s.idStatut,
+       l.LibelleStatut +
+       CASE WHEN incomplete.IncompleteDate IS NULL
+            THEN ' (complet à la 1ère dde)' ELSE ' (incomplet)' END
+           AS LibelleStatut,
+       s.Date,
+       c.id_type_customer,
+       t.libel_type_customer,
+       c.Date_integration_intranet,
+       DATEDIFF(hour,c.Date_integration_intranet,s.Date)
+           AS delai_traitement_en_heure,
+       incomplete.IncompleteDate AS [Date passage par statut incomplet],
+       DATEDIFF(hour,c.Date_integration_intranet,incomplete.IncompleteDate)
+           AS [delai entre l'enregistrement et passage en incomplet],
+       DATEDIFF(hour,incomplete.IncompleteDate,s.Date)
+           AS [delai entre passage en incomplet et dernier statut connu]
+FROM dbo.T_Statut AS s
+INNER JOIN dbo.T_customer AS c ON c.id=s.idDossier
+INNER JOIN dbo.T_type_customer AS t
+    ON t.id_type_customer=c.id_type_customer
+INNER JOIN dbo.T_Libelle_Statut AS l ON l.IdStatut=s.idStatut
+LEFT JOIN IncompleteStatus AS incomplete
+    ON incomplete.idDossier=s.idDossier
+WHERE c.Date_integration_intranet>@LAST_REPORT
+ORDER BY s.idDossier;";
+        }
+
+        private static void DeleteWorksheetIfExists(XLWorkbook workbook, string name)
+        {
+            IXLWorksheet worksheet = workbook.Worksheets.FirstOrDefault(
+                item => item.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
+            if (worksheet != null)
+                worksheet.Delete();
+        }
+
+        private static void StyleDetailWorksheet(IXLWorksheet worksheet)
+        {
+            worksheet.SheetView.FreezeRows(1);
+            worksheet.Row(1).Style.Font.Bold = true;
+            worksheet.Row(1).Style.Fill.BackgroundColor = XLColor.DarkBlue;
+            worksheet.Row(1).Style.Font.FontColor = XLColor.White;
+            worksheet.Columns().AdjustToContents(1, 60);
+
+        }
+
+        private static void WriteDetailedOpeningSummary(
+            IXLWorksheet worksheet,
+            DataTable data)
+        {
+            worksheet.Cell("A1").Value = "Synthèse des dossiers traités";
+            worksheet.Cell("A1").Style.Font.Bold = true;
+            worksheet.Cell("A1").Style.Font.FontSize = 14;
+
+            List<string> types = data.AsEnumerable()
+                .Select(row => Convert.ToString(row["libel_type_customer"]).Trim())
+                .Where(value => !string.IsNullOrWhiteSpace(value))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(value => value)
+                .ToList();
+
+            worksheet.Cell(2, 1).Value = "Libelle Statut";
+            worksheet.Cell(2, 2).Value = "Indicateur";
+            for (int index = 0; index < types.Count; index++)
+                worksheet.Cell(2, index + 3).Value = types[index];
+            worksheet.Cell(2, types.Count + 3).Value = "Total Général";
+
+            List<string> statuses = data.AsEnumerable()
+                .Select(row => Convert.ToString(row["LibelleStatut"]).Trim())
+                .Where(value => !string.IsNullOrWhiteSpace(value))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(value => value)
+                .ToList();
+
+            int currentRow = 3;
+            foreach (string status in statuses)
+            {
+                worksheet.Cell(currentRow, 1).Value = status;
+                worksheet.Cell(currentRow, 2).Value = "Nombre de dossier";
+                for (int typeIndex = 0; typeIndex < types.Count; typeIndex++)
+                {
+                    int count = data.AsEnumerable().Count(row =>
+                        string.Equals(Convert.ToString(row["LibelleStatut"]), status,
+                            StringComparison.OrdinalIgnoreCase) &&
+                        string.Equals(Convert.ToString(row["libel_type_customer"]), types[typeIndex],
+                            StringComparison.OrdinalIgnoreCase));
+                    worksheet.Cell(currentRow, typeIndex + 3).Value = count;
+                }
+                worksheet.Cell(currentRow, types.Count + 3).Value =
+                    data.AsEnumerable().Count(row => string.Equals(
+                        Convert.ToString(row["LibelleStatut"]),
+                        status,
+                        StringComparison.OrdinalIgnoreCase));
+                currentRow++;
+            }
+
+            WriteDetailedTotalRows(worksheet, data, types, currentRow);
+            StyleSummaryRange(worksheet, currentRow + 2, types.Count + 3);
+            worksheet.Columns().AdjustToContents(1, 60);
+            worksheet.SheetView.FreezeRows(2);
+        }
+
+        private static void WriteDetailedTotalRows(
+            IXLWorksheet worksheet,
+            DataTable data,
+            List<string> types,
+            int startRow)
+        {
+            string[] indicators =
+            {
+                "Nombre de dossier",
+                "Moyenne de delai traitement en heure déduction faite du temps de relance tel",
+                "Min. de Date"
+            };
+            for (int indicatorIndex = 0; indicatorIndex < indicators.Length; indicatorIndex++)
+            {
+                int rowNumber = startRow + indicatorIndex;
+                worksheet.Cell(rowNumber, 1).Value = "TOTAL";
+                worksheet.Cell(rowNumber, 2).Value = indicators[indicatorIndex];
+                for (int typeIndex = 0; typeIndex <= types.Count; typeIndex++)
+                {
+                    IEnumerable<DataRow> rows = typeIndex == types.Count
+                        ? data.AsEnumerable()
+                        : data.AsEnumerable().Where(row => string.Equals(
+                            Convert.ToString(row["libel_type_customer"]),
+                            types[typeIndex],
+                            StringComparison.OrdinalIgnoreCase));
+                    int column = typeIndex + 3;
+                    if (indicatorIndex == 0)
+                    {
+                        worksheet.Cell(rowNumber, column).Value =
+                            rows.Select(row => Convert.ToInt32(row["idDossier"])).Distinct().Count();
+                    }
+                    else if (indicatorIndex == 1)
+                    {
+                        List<double> seconds = rows
+                            .Where(row => row["delai traitement en heure déduction faite du temps de relance tel"] != DBNull.Value)
+                            .Select(row => Convert.ToDouble(row["delai traitement en heure déduction faite du temps de relance tel"]))
+                            .ToList();
+                        if (seconds.Count > 0)
+                            worksheet.Cell(rowNumber, column).Value =
+                                TimeSpan.FromSeconds(seconds.Average());
+                        worksheet.Cell(rowNumber, column).Style.NumberFormat.Format = "[h]:mm:ss";
+                    }
+                    else
+                    {
+                        List<DateTime> dates = rows
+                            .Where(row => row["Date"] != DBNull.Value)
+                            .Select(row => Convert.ToDateTime(row["Date"]))
+                            .ToList();
+                        if (dates.Count > 0)
+                            worksheet.Cell(rowNumber, column).Value = dates.Min();
+                        worksheet.Cell(rowNumber, column).Style.DateFormat.Format =
+                            "dd/MM/yyyy HH:mm";
+                    }
+                }
+            }
+        }
+
+        private static void WriteReceivedOpeningSummary(
+            IXLWorksheet worksheet,
+            DataTable received)
+        {
+            worksheet.Cell("A1").Value = "Dossiers enregistrés semaine précédente";
+            worksheet.Cell("A1").Style.Font.Bold = true;
+            worksheet.Cell("A1").Style.Font.FontSize = 14;
+            worksheet.Cell("A2").Value = "libel_type_customer";
+            worksheet.Cell("B2").Value = "Nombre de id_type_customer";
+
+            List<IGrouping<string, DataRow>> groups = received.AsEnumerable()
+                .GroupBy(row => Convert.ToString(row["libel_type_customer"]).Trim(),
+                    StringComparer.OrdinalIgnoreCase)
+                .OrderBy(group => group.Key)
+                .ToList();
+            int rowNumber = 3;
+            foreach (IGrouping<string, DataRow> group in groups)
+            {
+                worksheet.Cell(rowNumber, 1).Value = group.Key;
+                worksheet.Cell(rowNumber, 2).Value = group.Count();
+                rowNumber++;
+            }
+            worksheet.Cell(rowNumber, 1).Value = "Total général";
+            worksheet.Cell(rowNumber, 2).Value = received.Rows.Count;
+            StyleSummaryRange(worksheet, rowNumber, 2);
+            worksheet.Columns().AdjustToContents(1, 60);
+        }
+
+        private static DateTime? AsNullableDate(DataRow row, string column)
+        {
+            return !row.Table.Columns.Contains(column) || row[column] == DBNull.Value
+                ? (DateTime?)null
+                : Convert.ToDateTime(row[column]);
+        }
+
+        private static TimeSpan ReadTime(
+            IXLWorksheet worksheet,
+            string cell,
+            TimeSpan fallback)
+        {
+            try
+            {
+                object value = worksheet.Cell(cell).Value;
+                if (value is TimeSpan) return (TimeSpan)value;
+                if (value is DateTime) return ((DateTime)value).TimeOfDay;
+                if (TimeSpan.TryParse(Convert.ToString(value), out TimeSpan parsed))
+                    return parsed;
+            }
+            catch
+            {
+            }
+            return fallback;
+        }
+
+        private static double BusinessSeconds(
+            DateTime? from,
+            DateTime? to,
+            TimeSpan start,
+            TimeSpan end,
+            HashSet<DateTime> holidays)
+        {
+            if (!from.HasValue || !to.HasValue || to <= from)
+                return 0;
+            double seconds = 0;
+            for (DateTime day = from.Value.Date;
+                 day <= to.Value.Date;
+                 day = day.AddDays(1))
+            {
+                if (day.DayOfWeek == DayOfWeek.Saturday ||
+                    day.DayOfWeek == DayOfWeek.Sunday ||
+                    holidays.Contains(day))
+                    continue;
+                DateTime workingStart = day + start;
+                DateTime workingEnd = day + end;
+                DateTime left = from.Value > workingStart ? from.Value : workingStart;
+                DateTime right = to.Value < workingEnd ? to.Value : workingEnd;
+                if (right > left)
+                    seconds += (right - left).TotalSeconds;
+            }
+            return seconds;
+        }
+
+        private static HashSet<DateTime> FrenchHolidays(IEnumerable<int> years)
+        {
+            var holidays = new HashSet<DateTime>();
+            foreach (int year in years.Distinct())
+            {
+                DateTime easter = EasterSunday(year);
+                foreach (DateTime date in new[]
+                {
+                    new DateTime(year,1,1), easter.AddDays(1),
+                    new DateTime(year,5,1), new DateTime(year,5,8),
+                    easter.AddDays(39), easter.AddDays(50),
+                    new DateTime(year,7,14), new DateTime(year,8,15),
+                    new DateTime(year,11,1), new DateTime(year,11,11),
+                    new DateTime(year,12,25)
+                })
+                    holidays.Add(date.Date);
+            }
+            return holidays;
+        }
+
+        private static DateTime EasterSunday(int year)
+        {
+            int a = year % 19, b = year / 100, c = year % 100;
+            int d = b / 4, e = b % 4, f = (b + 8) / 25;
+            int g = (b - f + 1) / 3;
+            int h = (19 * a + b - d - g + 15) % 30;
+            int i = c / 4, k = c % 4;
+            int l = (32 + 2 * e + 2 * i - h - k) % 7;
+            int m = (a + 11 * h + 22 * l) / 451;
+            int month = (h + l - 7 * m + 114) / 31;
+            int day = (h + l - 7 * m + 114) % 31 + 1;
+            return new DateTime(year, month, day);
+        }
+
+        private void InsertDetailedStats(DataTable data, DateTime lastReport)
+        {
+            const string sql = @"
+IF NOT EXISTS
+(
+    SELECT 1
+    FROM dbo.T_STATS_OUVERTURE_COMPTE
+    WHERE idDossier=@ID
+      AND annee=DATEPART(year,@PERIOD)
+      AND num_sem=DATEPART(week,@PERIOD)
+)
+BEGIN
+    INSERT INTO dbo.T_STATS_OUVERTURE_COMPTE
+    (
+        idDossier,idStatut,LibelleStatut,[Date],id_type_customer,
+        libel_type_customer,Date_integration_intranet,
+        delai_traitement_en_heure,[Date passage par statut incomplet],
+        [delai entre l'enregistrement et passage en incomplet],
+        [delai entre passage en incomplet et dernier statut connu],
+        [Date de passage par statut 13 A relancer par téléphone],
+        [Date de passage par statut 14 A créer],
+        [delai de passage entre le statut  13 a relancer par téléphone et le statut 14 à créer],
+        [delai traitement en heure déduction faite du temps de relance tel],
+        annee,num_sem
+    )
+    VALUES
+    (
+        @ID,@STATUS,@LABEL,@DATE,@TYPE,@TYPE_LABEL,@INTEGRATION,@RAW_DELAY,
+        @INCOMPLETE_DATE,@INTEGRATION_TO_INCOMPLETE,@INCOMPLETE_TO_LAST,
+        @PHONE13,@PHONE14,@PHONE_DELAY,@BUSINESS_DELAY,
+        DATEPART(year,@PERIOD),DATEPART(week,@PERIOD)
+    );
+END;";
+            foreach (DataRow row in data.Rows)
+            {
+                ExecuteNonQuery(
+                    sql_creation_compte,
+                    sql,
+                    new SqlParameter("@ID", SqlDbType.Int) { Value = row["idDossier"] },
+                    new SqlParameter("@STATUS", SqlDbType.Int) { Value = row["idStatut"] },
+                    DbParameter("@LABEL", SqlDbType.NVarChar, row["LibelleStatut"], 500),
+                    DbParameter("@DATE", SqlDbType.DateTime, row["Date"]),
+                    new SqlParameter("@TYPE", SqlDbType.Int) { Value = row["id_type_customer"] },
+                    DbParameter("@TYPE_LABEL", SqlDbType.NVarChar, row["libel_type_customer"], 500),
+                    DbParameter("@INTEGRATION", SqlDbType.DateTime, row["Date_integration_intranet"]),
+                    DbParameter("@RAW_DELAY", SqlDbType.Int, row["delai_traitement_en_heure"]),
+                    DbParameter("@INCOMPLETE_DATE", SqlDbType.DateTime, row["Date passage par statut incomplet"]),
+                    DbParameter("@INTEGRATION_TO_INCOMPLETE", SqlDbType.Int, row["delai entre l'enregistrement et passage en incomplet"]),
+                    DbParameter("@INCOMPLETE_TO_LAST", SqlDbType.Int, row["delai entre passage en incomplet et dernier statut connu"]),
+                    DbParameter("@PHONE13", SqlDbType.DateTime, row["Date de passage par statut 13 A relancer par téléphone"]),
+                    DbParameter("@PHONE14", SqlDbType.DateTime, row["Date de passage par statut 14 A créer"]),
+                    DbParameter("@PHONE_DELAY", SqlDbType.Int, row["delai de passage entre le statut  13 a relancer par téléphone et le statut 14 à créer"]),
+                    DbParameter("@BUSINESS_DELAY", SqlDbType.Int, row["delai traitement en heure déduction faite du temps de relance tel"]),
+                    new SqlParameter("@PERIOD", SqlDbType.DateTime) { Value = lastReport });
+            }
+        }
+
+        private static SqlParameter DbParameter(
+            string name,
+            SqlDbType type,
+            object value,
+            int size = 0)
+        {
+            var parameter = size > 0
+                ? new SqlParameter(name, type, size)
+                : new SqlParameter(name, type);
+            parameter.Value = value == null || value == DBNull.Value
+                ? (object)DBNull.Value
+                : value;
+            return parameter;
+        }
 
         private DateTime GetReportParameterDate(string name) { string v = ExecuteScalarString(sql_creation_compte, "SELECT ISNULL(ParameterValue,'') FROM dbo.T_STATS_OUVERTURE_COMPTEUR_PARAMETERS WHERE ParameterName=@N;", new SqlParameter("@N", SqlDbType.VarChar, 100) { Value = name }); if (!DateTime.TryParse(v, CultureInfo.InvariantCulture, DateTimeStyles.AssumeLocal, out DateTime d)) throw new InvalidDataException("Invalid report parameter " + name + " : " + v); return d; }
         private void SetReportParameterDate(string name, DateTime value) { ExecuteNonQuery(sql_creation_compte, @"MERGE dbo.T_STATS_OUVERTURE_COMPTEUR_PARAMETERS t USING(SELECT @N ParameterName)s ON s.ParameterName=t.ParameterName WHEN MATCHED THEN UPDATE SET ParameterValue=@V,UpdatedAtUtc=SYSUTCDATETIME() WHEN NOT MATCHED THEN INSERT(ParameterName,ParameterValue) VALUES(@N,@V);", new SqlParameter("@N", SqlDbType.VarChar, 100) { Value = name }, new SqlParameter("@V", SqlDbType.NVarChar, 2000) { Value = value.ToString("yyyy-MM-ddTHH:mm:ss", CultureInfo.InvariantCulture) }); }
